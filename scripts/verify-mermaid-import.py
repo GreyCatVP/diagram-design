@@ -1201,6 +1201,18 @@ def check_standalone_er_regression(tmp: Path) -> None:
     ):
         fail("Standalone ER entity was discarded")
     ok("standalone ER entity declarations, including Unicode names, become tables")
+def check_import_regression(tmp: Path) -> None:
+    path = tmp / "supported-form.mmd"
+    path.write_text('stateDiagram-v2\nDisconnected\n[*] --> Active\n', encoding="utf-8")
+    payload = json.loads(run_extract([str(path), "--json"]))["diagrams"][0]
+    nodes = {node["id"]: node for node in payload["nodes"]}
+    if "Disconnected" not in nodes or nodes["Disconnected"]["shape"] != "state":
+        fail("Standalone bare state was discarded")
+    concurrent = tmp / "concurrency.mmd"
+    concurrent.write_text('stateDiagram-v2\nstate Active {\nA --> B\n--\nC --> D\n}\n', encoding="utf-8")
+    payload = json.loads(run_extract([str(concurrent), "--json"]))["diagrams"][0]
+    if "--" in {node["id"] for node in payload["nodes"]}:
+        fail("The documented concurrency separator became a phantom state")
 
 
 def main() -> int:
@@ -1209,6 +1221,7 @@ def main() -> int:
         check_unicode_state_regression(tmp)
         check_unicode_er_regression(tmp)
         check_standalone_er_regression(tmp)
+        check_import_regression(tmp)
         check_files()
         expect_error([str(FLOW), "--diagram", "²"], "--diagram must be an index")
         check_flowchart()
