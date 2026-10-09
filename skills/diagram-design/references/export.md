@@ -36,7 +36,7 @@ python3 scripts/export_svg.py <html-file> [<out.svg>] [--system-fonts]
 
 `--system-fonts` skips the Google Fonts `@import` (step 5) so the SVG makes no network request; use it when the skin's font source is `system` (see [style-guide.md § Font source](style-guide.md#font-source)). The diagram CSS still carries over.
 
-That script is the source of truth for the transform below (CSS carry-forward, defs ID namespacing, rgba normalization, and the class-without-style gate). Reimplement only when the helper is unavailable; keep the behaviour identical.
+Export selects a live SVG and carries live style blocks; HTML comments and script literals do not contribute diagrams or CSS. Comments inside the selected SVG remain intact. That script is the source of truth for the transform below (CSS carry-forward, defs ID namespacing, rgba normalization, and the class-without-style gate). Reimplement only when the helper is unavailable; keep the behaviour identical.
 
 ### Manual algorithm (what the helper does)
 
