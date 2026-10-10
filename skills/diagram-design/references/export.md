@@ -126,7 +126,16 @@ from playwright.sync_api import TimeoutError as PlaywrightTimeoutError, sync_pla
 import sys, pathlib
 
 src, out = sys.argv[1], sys.argv[2]
-scale = int(sys.argv[3]) if len(sys.argv) > 3 else 2
+if len(sys.argv) > 3:
+    try:
+        scale = float(sys.argv[3])
+        if not (1.0 <= scale <= 4.0):
+            raise ValueError("scale must be between 1 and 4")
+    except ValueError as e:
+        print(f"error: invalid scale argument '{sys.argv[3]}': {e}", file=sys.stderr)
+        sys.exit(1)
+else:
+    scale = 2
 
 with sync_playwright() as p:
     browser = p.chromium.launch()
