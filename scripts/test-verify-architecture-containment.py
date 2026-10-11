@@ -1,0 +1,236 @@
+#!/usr/bin/env python3
+"""Adversarial and legal Architecture containment fixtures (ADR 0005).
+
+Synthetic fixtures exercise the public contract independently of the shipped
+layout; all three published variants and CLI discovery are checked as well.
+Run: python3 scripts/test-verify-architecture-containment.py
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import os
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+CHECKER = ROOT / "scripts/verify-architecture-containment.py"
+SPEC = importlib.util.spec_from_file_location("architecture_containment_verifier", CHECKER)
+checker = importlib.util.module_from_spec(SPEC)
+sys.modules[SPEC.name] = checker
+SPEC.loader.exec_module(checker)
+
+
+def scope(identity, kind, x, y, w, h, parent=None, rx=None, dashed=None):
+    if rx is None:
+        rx = 4 if kind == "admin" else 8
+    if dashed is None:
+        dashed = kind == "admin"
+    parent_attr = f' data-parent="{parent}"' if parent else ""
+    dash_attr = ' stroke-dasharray="4,4"' if dashed else ""
+    return (f'<rect data-role="bounds" data-scope-id="{identity}" data-scope-kind="{kind}"'
+            f'{parent_attr} x="{x}" y="{y}" width="{w}" height="{h}" rx="{rx}"'
+            f' fill="none" stroke="#000"{dash_attr}/>')
+
+
+def node(identity, kind, x, y, parent, target=None, size=40):
+    target_attr = f' data-target="{target}"' if target else ""
+    return (f'<g data-node-id="{identity}" data-kind="{kind}" data-parent="{parent}"{target_attr}>'
+            f'<rect data-role="bounds" x="{x}" y="{y}" width="{size}" height="{size}"/>'
+            f'<text>{identity}</text></g>')
+
+
+def fixture():
+    parts = [
+        '<html><head><style>svg {width:100%;height:auto} body {margin:0}</style></head><body>',
+        '<svg data-grammar="architecture-containment" viewBox="0 0 400 280">',
+        scope("subscription", "admin", 16, 16, 368, 248),
+        scope("rg", "admin", 24, 24, 352, 232, parent="subscription"),
+        scope("hub", "traffic", 32, 88, 160, 144, parent="rg"),
+        scope("spoke", "traffic", 208, 88, 160, 144, parent="rg"),
+        node("sql", "managed", 32, 36, "rg"),
+        node("app", "compute", 56, 144, "hub"),
+        node("pe", "endpoint", 232, 144, "spoke", target="sql"),
+        '<line data-peering="hub-spoke" data-from="hub" data-to="spoke" x1="192" y1="112" x2="208" y2="112"/>',
+        "</svg></body></html>",
+    ]
+    return "\n".join(parts)
+
+
+GOOD = fixture()
+SYNTHETIC_PATH = Path("synthetic-architecture-containment.html")
+
+
+class ContractTests(unittest.TestCase):
+    def clean(self, source):
+        self.assertEqual(checker.check_source(SYNTHETIC_PATH, source), [])
+
+    def rejects(self, source, reason):
+        self.assertNotEqual(source, GOOD, "fixture mutation did not apply")
+        findings = checker.check_source(SYNTHETIC_PATH, source)
+        self.assertTrue(findings, "invalid diagram accepted")
+        self.assertIn(reason, "\n".join(findings))
+
+    def test_synthetic_is_clean(self):
+        self.clean(GOOD)
+
+    def test_files_without_grammar_are_skipped(self):
+        source = GOOD.replace('data-grammar="architecture-containment"', "")
+        self.assertEqual(checker.check_source(SYNTHETIC_PATH, source), [])
+        self.assertFalse(checker.looks_like_containment(source))
+
+    def test_comments_entities_and_unquoted_attributes(self):
+        source = GOOD.replace("</svg>", "<!-- <rect data-scope-id=\"bogus\"/> --></svg>")
+        source = source.replace("<text>sql</text>", "<text>sql&gt;db</text>")
+        source = source.replace('data-scope-kind="admin"', "DATA-SCOPE-KIND=admin")
+        self.clean(source)
+
+    def test_duplicate_scope_id(self):
+        self.rejects(GOOD.replace('data-scope-id="hub"', 'data-scope-id="spoke"', 1), "duplicate ID")
+
+    def test_duplicate_node_id(self):
+        self.rejects(GOOD.replace('data-node-id="app"', 'data-node-id="sql"', 1), "duplicate ID")
+
+    def test_scope_and_node_share_one_namespace(self):
+        self.rejects(GOOD.replace('data-node-id="app"', 'data-node-id="hub"', 1), "duplicate ID")
+
+    def test_unresolved_parent(self):
+        self.rejects(GOOD.replace('data-parent="rg"', 'data-parent="missing"', 1), "does not match any data-scope-id")
+
+    def test_blank_parent_on_nested_scope(self):
+        self.rejects(GOOD.replace('data-parent="subscription"', 'data-parent=""', 1), "data-parent")
+
+    def test_parent_cycle(self):
+        source = GOOD.replace(
+            'data-scope-id="subscription"',
+            'data-scope-id="subscription" data-parent="rg"',
+            1,
+        )
+        self.rejects(source, "parent cycle")
+
+    def test_child_outside_parent(self):
+        self.rejects(GOOD.replace('x="32" y="88" width="160" height="144"', 'x="0" y="88" width="160" height="144"', 1), "not geometrically inside parent")
+
+    def test_admin_must_be_dashed_rx4_band(self):
+        self.rejects(GOOD.replace('rx="4"', 'rx="8"', 1), "admin band must use rx=4")
+        self.rejects(GOOD.replace(' stroke-dasharray="4,4"', "", 1), "admin band must use a dashed stroke")
+        tall = GOOD.replace(
+            'data-scope-id="subscription" data-scope-kind="admin" x="16" y="16" width="368" height="248"',
+            'data-scope-id="subscription" data-scope-kind="admin" x="16" y="16" width="120" height="248"',
+            1,
+        )
+        self.rejects(tall, "admin band must be a horizontal rectangle")
+
+    def test_traffic_must_be_solid_rx8_box(self):
+        self.rejects(GOOD.replace('rx="8"', 'rx="4"', 1), "traffic box must use rx=8")
+        dashed = GOOD.replace(
+            'data-scope-id="hub" data-scope-kind="traffic" data-parent="rg" x="32" y="88" width="160" height="144" rx="8" fill="none" stroke="#000"',
+            'data-scope-id="hub" data-scope-kind="traffic" data-parent="rg" x="32" y="88" width="160" height="144" rx="8" fill="none" stroke="#000" stroke-dasharray="4,4"',
+            1,
+        )
+        self.rejects(dashed, "traffic box must use a solid stroke")
+
+    def test_managed_must_not_sit_inside_traffic(self):
+        self.rejects(GOOD.replace('x="32" y="36"', 'x="56" y="144"'), "must not sit inside traffic scope")
+
+    def test_managed_must_parent_to_admin(self):
+        self.rejects(GOOD.replace('data-node-id="sql" data-kind="managed" data-parent="rg"',
+                                  'data-node-id="sql" data-kind="managed" data-parent="hub"'),
+                     "managed node must parent to an admin band")
+
+    def test_endpoint_must_parent_to_traffic_and_target_managed(self):
+        self.rejects(GOOD.replace('data-parent="spoke" data-target="sql"',
+                                  'data-parent="rg" data-target="sql"'),
+                     "endpoint node must parent to a traffic box")
+        self.rejects(GOOD.replace('data-target="sql"', 'data-target="app"'), "must name a managed node")
+        self.rejects(GOOD.replace(' data-target="sql"', ""), "endpoint must declare data-target")
+
+    def test_peering_must_join_traffic_scopes(self):
+        self.rejects(GOOD.replace('data-from="hub" data-to="spoke"', 'data-from="rg" data-to="spoke"'),
+                     "peering data-from and data-to must name traffic scopes")
+        self.rejects(GOOD.replace('data-from="hub" data-to="spoke"', 'data-from="hub" data-to="hub"'),
+                     "two distinct traffic scopes")
+
+    def test_sibling_axis_and_overlap(self):
+        mixed = GOOD.replace(
+            'data-scope-id="spoke" data-scope-kind="traffic" data-parent="rg" x="208" y="88"',
+            'data-scope-id="spoke" data-scope-kind="traffic" data-parent="rg" x="208" y="120"',
+            1,
+        )
+        self.rejects(mixed, "sibling traffic scopes must share one axis")
+        overlap = GOOD.replace(
+            'data-scope-id="spoke" data-scope-kind="traffic" data-parent="rg" x="208" y="88" width="160" height="144"',
+            'data-scope-id="spoke" data-scope-kind="traffic" data-parent="rg" x="80" y="88" width="160" height="144"',
+            1,
+        )
+        self.rejects(overlap, "overlap")
+
+    def test_off_grid_bounds(self):
+        self.rejects(GOOD.replace('x="32" y="88"', 'x="33" y="88"'), "4px grid")
+
+    def test_unknown_kinds_and_duplicate_attributes(self):
+        self.rejects(GOOD.replace('data-scope-kind="traffic"', 'data-scope-kind="vpc"', 1), "data-scope-kind")
+        self.rejects(GOOD.replace('data-kind="compute"', 'data-kind="vm"', 1), "data-kind")
+        self.rejects(GOOD.replace('data-scope-id="hub"', 'data-scope-id="hub" DATA-SCOPE-ID="ignored"', 1),
+                     "duplicate attributes")
+
+    def test_empty_and_invalid_ids(self):
+        for value in ("", " hub", "1hub", "hub spoke"):
+            with self.subTest(value=value):
+                self.rejects(GOOD.replace('data-scope-id="hub"', f'data-scope-id="{value}"', 1), "identity")
+
+    def test_budget(self):
+        extra_admin = GOOD.replace(
+            "</svg>",
+            scope("extra-admin", "admin", 16, 16, 368, 40) + "</svg>",
+        )
+        self.rejects(extra_admin, "admin budget")
+        extra_traffic = GOOD.replace(
+            "</svg>",
+            scope("a", "traffic", 32, 88, 40, 40, parent="rg")
+            + scope("b", "traffic", 80, 88, 40, 40, parent="rg")
+            + scope("c", "traffic", 128, 88, 40, 40, parent="rg")
+            + "</svg>",
+        )
+        self.rejects(extra_traffic, "traffic budget")
+        extra_nodes = GOOD
+        for identity in ("n1", "n2", "n3", "n4", "n5", "n6"):
+            extra_nodes = extra_nodes.replace("</svg>", node(identity, "compute", 56, 144, "hub") + "</svg>")
+        self.rejects(extra_nodes, "node budget")
+
+    def test_all_shipped_variants(self):
+        for suffix in ("", "-dark", "-full"):
+            path = ROOT / f"skills/diagram-design/assets/example-architecture-containment{suffix}.html"
+            with self.subTest(variant=suffix):
+                self.assertTrue(path.is_file(), f"missing shipped variant: {path.name}")
+                source = path.read_text(encoding="utf-8")
+                self.assertEqual(checker.check_source(path, source), [])
+                self.assertIn('data-grammar="architecture-containment"', source)
+                self.assertIn('data-kind="managed"', source)
+                self.assertIn('data-kind="endpoint"', source)
+                self.assertIn("data-peering=", source)
+
+    def test_cli_discovery_and_failures(self):
+        env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
+        for args in ([], ["--all"]):
+            result = subprocess.run([sys.executable, str(CHECKER), *args], capture_output=True, text=True, env=env)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("3 file(s)", result.stdout)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "diagram.html"
+            path.write_text(GOOD, encoding="utf-8")
+            result = subprocess.run([sys.executable, str(CHECKER), str(path)], capture_output=True, text=True, env=env)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            path.write_text(GOOD.replace('data-kind="managed"', 'data-kind="compute"', 1), encoding="utf-8")
+            result = subprocess.run([sys.executable, str(CHECKER), str(path)], capture_output=True, text=True, env=env)
+            self.assertEqual(result.returncode, 1)
+            path.unlink()
+            result = subprocess.run([sys.executable, str(CHECKER), str(path)], capture_output=True, text=True, env=env)
+            self.assertEqual(result.returncode, 2)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
