@@ -406,6 +406,15 @@
       "screenshot_sha256": "b655659e0dad7fafa4f33517899f60db08279938b9274adbb0d6ad2e250d6783",
       "width": 2480,
       "height": 1288
+    },
+    {
+      "slug": "sbgn",
+      "source": "skills/diagram-design/assets/example-sbgn.html",
+      "screenshot": "docs/screenshots/sbgn.png",
+      "source_sha256": "30027a71ec443f1c4bcb26225a7d18d7c4116eb3eb07e4ac016ce3f6c9300e66",
+      "screenshot_sha256": "1224d6a976afd4228ac97ed380a46f05792045ab3a09c80afc4d7eb8aa993d7b",
+      "width": 2400,
+      "height": 1442
     }
   ]
 }

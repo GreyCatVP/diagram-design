@@ -448,6 +448,16 @@ jobs:
         id: axo_plan_tests
         run: python scripts/test-verify-axonometric-plan.py
 
+      - name: Verify SBGN bipartite process maps
+        if: always()
+        id: sbgn
+        run: python scripts/verify-sbgn.py --all
+
+      - name: Verify SBGN checker
+        if: always()
+        id: sbgn_tests
+        run: python scripts/test-verify-sbgn.py
+
       - name: Verify tone claims against the ramps they describe
         if: always()
         id: skin_polarity

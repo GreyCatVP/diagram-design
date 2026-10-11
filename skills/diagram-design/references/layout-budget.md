@@ -60,6 +60,7 @@ These are the per-type limits. The universal rows in SKILL.md §7 (9 nodes, 12 a
 | Max classes / relationships (UML class) | 7 / 8, 5 members per compartment |
 | Max activities / slices / cards (story map) | 5 / 3 / 12 |
 | Max tables / columns / FKs (db schema) | 5 / 8 shown / 6 |
+| Max macromolecules / processes / compartments / source-sink (SBGN) | 7 / 6 / 1 / 2 |
 
 If you exceed, split into two diagrams (overview + detail).
 
