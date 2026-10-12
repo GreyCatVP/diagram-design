@@ -168,6 +168,29 @@ def png_chunk(ctype: bytes, data: bytes) -> bytes:
     )
 
 
+def check_out_write_errors(tmp: Path) -> None:
+    # A missing parent directory is the common caller mistake; an existing
+    # directory or a regular file in the parent slot are the hostile cases.
+    missing_dir = tmp / "missing-output-directory"
+    expect_extract_error(
+        [str(FIXTURE), "--out", str(missing_dir / "digest.md")],
+        f"cannot write {missing_dir / 'digest.md'}",
+    )
+    expect_extract_error(
+        [str(FIXTURE), "--json", "--out", str(missing_dir / "digest.json")],
+        f"cannot write {missing_dir / 'digest.json'}",
+    )
+    expect_extract_error(
+        [str(FIXTURE), "--out", str(tmp)], "cannot write"
+    )
+    parent_file = tmp / "regular-file.md"
+    parent_file.write_text("not a directory", encoding="utf-8")
+    expect_extract_error(
+        [str(FIXTURE), "--out", str(parent_file / "digest.md")], "cannot write"
+    )
+    ok("draw.io --out write failures report a clear diagnostic and exit 2")
+
+
 def check_files() -> None:
     for path in (SKILL, EXTRACT, IMPORT_REF, OUTPUT_REF, EXPORT_REF, COMMAND, FIXTURE, EXAMPLE):
         if not path.is_file():
@@ -807,6 +830,7 @@ def main() -> int:
         check_bom_prefixed(tmp)
         check_containers(tmp)
         check_legacy_stdout_encoding(tmp)
+        check_out_write_errors(tmp)
         check_digest_escaping(tmp)
         check_security_and_limits(tmp)
         check_docs()
