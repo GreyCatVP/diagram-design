@@ -276,6 +276,16 @@ def main() -> int:
         else:
             print("OK: :is() over HTML-only alternatives passes")
 
+        # An escaped quote inside an attribute value does not end the value.
+        escaped_wrapper = source.replace(
+            "  </style>", '    [data-note="6\\" preview"].frame { width: 100%; }\n  </style>', 1
+        )
+        code, output = run(str(write(directory, "escaped-quote-wrapper.html", escaped_wrapper)))
+        if code != 0:
+            failures.append(f"escaped-quote wrapper rule was rejected:\n{output}")
+        else:
+            print("OK: escaped-quote wrapper rule passes")
+
         # Every column widened past the spacing: the gutters stay equal but
         # are negative, so neighbouring stages overlap.
         overlap = source.replace('width="208"', 'width="240"').replace(

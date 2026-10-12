@@ -567,9 +567,14 @@ def _without_attribute_values(compound: str) -> str:
     out: list[str] = []
     depth = 0
     quote = ""
+    escaped = False
     for char in compound:
         if depth:
-            if quote:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif quote:
                 if char == quote:
                     quote = ""
             elif char in "\"'":
