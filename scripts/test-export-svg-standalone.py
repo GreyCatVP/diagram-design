@@ -603,6 +603,49 @@ class ExportSvgStandaloneTests(unittest.TestCase):
         self.assertIn('aria-labelledby="name"><title id="name">Title</title>', result)
         self.assertIn('<marker id="demo-name"/>', result)
 
+    def test_optional_defs_387_live_collision_survives_actual_export(self) -> None:
+        svg = ('<svg viewBox="0 0 10 10"><defs><!-- <pattern id="dot"/> --></defs>'
+               '<symbol id="dot"><rect width="5" height="5" fill="red"/></symbol>'
+               '<use href="#dot"/></svg>')
+        result = self.mod.export_svg_document(svg, Path("b.html"))
+        root = ET.fromstring(result)
+        symbol = root.find("{http://www.w3.org/2000/svg}symbol")
+        use = root.find("{http://www.w3.org/2000/svg}use")
+        self.assertEqual(symbol.get("id"), "dot")
+        self.assertEqual(use.get("href"), "#dot")
+        self.assertIn('<pattern id="b-dot"/>', result)
+
+    def test_optional_defs_387_collision_preserves_live_css_and_xlink(self) -> None:
+        svg = ('<svg viewBox="0 0 10 10" xmlns:xlink="http://www.w3.org/1999/xlink">'
+               '<defs><!-- <pattern id="dot"/><use href="#dot" fill="url(#dot)"/> --></defs>'
+               '<symbol id="dot"><rect width="5" height="5"/></symbol>'
+               '<use xlink:href="#dot" fill="url(#dot)" style="stroke:url(#dot)"/>'
+               '<style>#dot {fill:url(#dot)}</style></svg>')
+        result = self.mod.export_svg_document(svg, Path("b.html"))
+        root = ET.fromstring(result)
+        use = root.find("{http://www.w3.org/2000/svg}use")
+        self.assertEqual(use.get("{http://www.w3.org/1999/xlink}href"), "#dot")
+        self.assertEqual(use.get("fill"), "url(#dot)")
+        self.assertEqual(use.get("style"), "stroke:url(#dot)")
+        self.assertIn('#dot {fill:url(#dot)}', result)
+        self.assertIn('<pattern id="b-dot"/><use href="#b-dot" fill="url(#b-dot)"/>', result)
+
+    def test_optional_defs_387_comments_only_namespace_traditional_defs(self) -> None:
+        traditional = ('marker', 'pattern', 'linearGradient', 'radialGradient',
+                       'filter', 'clipPath', 'mask', 'symbol')
+        optional = ''.join(f'<{tag} id="{tag}"/>' for tag in traditional)
+        svg = ('<svg><defs><path id="live" d="M0 0"/></defs><!-- <defs>'
+               + optional + '<path id="commented-path"/><g id="commented-group"/>'
+               '</defs> --><use href="#live"/></svg>')
+        result = self.mod.namespace_defs_ids(svg, "b")
+        for tag in traditional:
+            with self.subTest(tag=tag):
+                self.assertIn(f'<{tag} id="b-{tag}"/>', result)
+        self.assertIn('<path id="commented-path"/>', result)
+        self.assertIn('<g id="commented-group"/>', result)
+        self.assertIn('<path id="b-live"', result)
+        self.assertIn('href="#b-live"', result)
+
     def test_rgba_presentation_attrs_still_split(self) -> None:
         html = """<!DOCTYPE html><html><body>
         <svg viewBox="0 0 10 10" xmlns="http://www.w3.org/2000/svg" role="img"
