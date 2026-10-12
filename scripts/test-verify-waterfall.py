@@ -23,6 +23,7 @@ ROOT = Path(__file__).resolve().parent.parent
 CHECKER = ROOT / "scripts/verify-waterfall.py"
 GOOD = ROOT / "skills/diagram-design/assets/example-waterfall.html"
 SHIPPED = sorted(GOOD.parent.glob("example-waterfall*.html"))
+PLAUSIBLE_WRONG = ROOT / "scripts/fixtures/waterfall-plausible-wrong.html"
 
 
 def run(*args: str, timeout: float | None = None) -> tuple[int, str]:
@@ -80,6 +81,14 @@ def main() -> int:
     else:
         print("OK: --all passes on the shipped set")
 
+    # A complete, renderable chart with plausible labels still has to reconcile.
+    # Here the printed savings are -36, so the walk reaches 238, not the shown 236.
+    code, output = run(str(PLAUSIBLE_WRONG))
+    if code != 1 or "declares 236 but the walk arrives at 238" not in output:
+        failures.append(f"plausible wrong chart did not name the arithmetic lie:\n{output}")
+    else:
+        print("OK: plausible wrong chart fails on its 238-versus-236 total")
+
     # Negative polarity: each mutation must fail with a finding that names the lie.
     # Every case below is (name, old, new, expected fragment of the finding).
     cases = (
@@ -97,14 +106,14 @@ def main() -> int:
         ),
         (
             "bridge lie: a bridge is stretched past its two running levels",
-            '<rect x="688" y="146" width="96" height="50" fill="rgba(235,108,54,0.12)"',
-            '<rect x="688" y="146" width="96" height="70" fill="rgba(235,108,54,0.12)"',
+            '<rect x="688" y="146" width="96" height="50" fill="rgba(191,69,32,0.12)"',
+            '<rect x="688" y="146" width="96" height="70" fill="rgba(191,69,32,0.12)"',
             "shared scale puts",
         ),
         (
             "bridge top lie: its bottom stays at the correct running level",
-            '<rect x="688" y="146" width="96" height="50" fill="rgba(235,108,54,0.12)"',
-            '<rect x="688" y="136" width="96" height="60" fill="rgba(235,108,54,0.12)"',
+            '<rect x="688" y="146" width="96" height="50" fill="rgba(191,69,32,0.12)"',
+            '<rect x="688" y="136" width="96" height="60" fill="rgba(191,69,32,0.12)"',
             "top edge drawn",
         ),
         (
@@ -191,7 +200,7 @@ def main() -> int:
         (
             "second accent bar: the focal treatment repeats",
             '<rect x="256" y="131" width="96" height="61" fill="rgba(79,93,117,0.15)" stroke="#4f5d75"',
-            '<rect x="256" y="131" width="96" height="61" fill="rgba(235,108,54,0.12)" stroke="#eb6c36"',
+            '<rect x="256" y="131" width="96" height="61" fill="rgba(191,69,32,0.12)" stroke="#bf4520"',
             "at most one bar",
         ),
         (

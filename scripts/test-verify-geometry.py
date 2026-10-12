@@ -114,6 +114,27 @@ def main() -> int:
         0,
     )
 
+    # Snapshot panels use their own local coordinates, but masking happens in
+    # the shared canvas after enclosing and per-element translations.
+    mask = '<rect x="50" y="80" width="80" height="12" fill="#fff"/>'
+    panel_node = '<rect x="100" y="70" width="100" height="60" fill="#eee"/>'
+    check("translated panels keep clear masks separate", document(
+        mask + '<g transform="translate(300 0)">' + panel_node + '</g>'), 0)
+    translated_mask = '<rect x="350" y="80" width="80" height="12" fill="#fff"/>'
+    check("translated mask is clipped in canvas space", document(
+        '<g transform="translate(-200 0)">' + translated_mask + '</g>' + panel_node), 1)
+    check("nested translations accumulate", document(
+        '<g transform="translate(-100 0)"><g transform="translate(-100 0)">'
+        + translated_mask + '</g></g>' + panel_node), 1)
+    check("element translation joins group translation", document(
+        '<g transform="translate(-100 0)">'
+        + translated_mask.replace('<rect ', '<rect transform="translate(-100 0)" ')
+        + '</g>' + panel_node), 1)
+    check("translated earlier node remains legal", document(
+        panel_node + '<g transform="translate(-200 0)">' + translated_mask + '</g>'), 0)
+    check("translated contained badge remains legal", document(
+        '<g transform="translate(300 0)">' + badge + node + '</g>'), 0)
+
     # A long mono plate (128px, as shipped in example-sequence-oauth.html) or a
     # wide CJK label plate must be recognized as a mask and checked like any other.
     check(
@@ -200,7 +221,7 @@ def main() -> int:
     check(
         "unstroked fill rect is not a node",
         document(
-            '<rect x="100" y="60" width="160" height="64" fill="rgba(235,108,54,0.04)"/>'
+            '<rect x="100" y="60" width="160" height="64" fill="rgba(191,69,32,0.04)"/>'
             f'<line x1="100" y1="40" x2="100" y2="200" {arrow}/>'
         ),
         0,
