@@ -201,6 +201,13 @@ def main() -> int:
             "CSS 'width' declaration can resize",
             False,
         ),
+        (
+            "cells widened through :is()",
+            "  </style>",
+            "    :is(rect, circle) { width: 400px; }\n  </style>",
+            "CSS 'width' declaration can resize",
+            False,
+        ),
     )
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -249,6 +256,18 @@ def main() -> int:
                 failures.append(f"HTML-only attribute selector was rejected:\n{output}")
             else:
                 print("OK: HTML-only attribute selector passes")
+
+        # Alternatives inside :is() that only name HTML are page layout too.
+        is_wrapper = source.replace(
+            "  </style>",
+            '    :is(div[class="diagram-container"], section) { width: 100%; }\n  </style>',
+            1,
+        )
+        code, output = run(str(write(directory, "html-is-wrapper-width.html", is_wrapper)))
+        if code != 0:
+            failures.append(f":is() over HTML-only alternatives was rejected:\n{output}")
+        else:
+            print("OK: :is() over HTML-only alternatives passes")
 
         # Every column widened past the spacing: the gutters stay equal but
         # are negative, so neighbouring stages overlap.

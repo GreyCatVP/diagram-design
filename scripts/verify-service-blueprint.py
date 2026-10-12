@@ -529,22 +529,70 @@ def selector_subject(selector: str) -> str:
     return text[cuts[-1] + 1:].strip() if cuts else text
 
 
+def _pseudo_functions(compound: str) -> tuple[str, list[tuple[str, str]]]:
+    """Split a compound into its text outside :name(...) and those functions."""
+    outside: list[str] = []
+    functions: list[tuple[str, str]] = []
+    index = 0
+    while index < len(compound):
+        match = re.match(r":{1,2}([\w-]+)\(", compound[index:])
+        if match is None:
+            outside.append(compound[index])
+            index += 1
+            continue
+        depth = 1
+        cursor = index + match.end()
+        quote = ""
+        while cursor < len(compound) and depth:
+            char = compound[cursor]
+            if quote:
+                if char == "\\":
+                    cursor += 1
+                elif char == quote:
+                    quote = ""
+            elif char in "\"'":
+                quote = char
+            elif char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+            cursor += 1
+        functions.append((match.group(1).lower(), compound[index + match.end():cursor - 1]))
+        index = cursor
+    return "".join(outside), functions
+
+
+# Pseudo-classes whose argument is a selector list the element itself must match.
+MATCHES_ANY = frozenset({"is", "where", "matches", "-webkit-any", "-moz-any"})
+
+
 def selector_can_reach_marks(selector: str, svg_tokens: set[str]) -> bool:
     """Whether a selector's subject can be one of the diagram's SVG marks.
 
     A named element decides it: an SVG shape or text element can be a mark;
-    any other element (div, svg, section) is page layout. With no element
-    named, an attribute selector or a class/id carried by an SVG mark can
-    reach a mark.
+    any other element (div, svg, section) is page layout. :is()/:where()
+    lists are read: the subject can be a mark only if some alternative can.
+    With no element named, a class or id that no SVG mark carries rules the
+    subject out; anything else (attributes, other pseudo-classes, a mark's
+    own class) is treated as able to reach a mark.
     """
     subject = selector_subject(selector)
     if not subject:
         return False
-    element = re.match(r"[A-Za-z][\w-]*", subject)
+    outside, functions = _pseudo_functions(subject)
+    element = re.match(r"[A-Za-z][\w-]*", outside)
     if element is not None:
         return element.group(0).lower() in SVG_MARK_ELEMENTS
-    names = set(re.findall(r"[.#]([\w-]+)", subject))
-    return "[" in subject or bool(names & svg_tokens)
+    for name, argument in functions:
+        if name in MATCHES_ANY and not any(
+            selector_can_reach_marks(alternative, svg_tokens)
+            for alternative in split_selector_list(argument)
+        ):
+            return False
+    names = set(re.findall(r"[.#]([\w-]+)", outside))
+    if names and not names <= svg_tokens:
+        return False
+    return True
 
 
 def check_layers(cells: list[Cell], errors: list[str]) -> dict[str, list[Cell]]:
