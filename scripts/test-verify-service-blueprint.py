@@ -173,6 +173,27 @@ def main() -> int:
             "printed",
             False,
         ),
+        (
+            "cell widened by an inline CSS width",
+            '<rect x="544" y="128" width="208" height="64" rx="4" fill="#ffffff" stroke="#2d3142" stroke-width="1" data-stage="hit-limit" data-name="Retry payment"/>',
+            '<rect x="544" y="128" width="208" height="64" rx="4" fill="#ffffff" stroke="#2d3142" stroke-width="1" data-stage="hit-limit" data-name="Retry payment" style="width:400px"/>',
+            "sets its size in CSS",
+            False,
+        ),
+        (
+            "cells stretched by a stylesheet height",
+            "  </style>",
+            "    rect[data-stage] { height: 300px; }\n  </style>",
+            "CSS 'height' declaration can resize",
+            False,
+        ),
+        (
+            "classed cell widened from the stylesheet",
+            '<rect x="544" y="128" width="208" height="64" rx="4" fill="#ffffff" stroke="#2d3142" stroke-width="1" data-stage="hit-limit" data-name="Retry payment"/>',
+            '<rect x="544" y="128" width="208" height="64" rx="4" fill="#ffffff" stroke="#2d3142" stroke-width="1" data-stage="hit-limit" data-name="Retry payment" class="wide"/><style>.wide { width: 400px; }</style>',
+            "CSS 'width' declaration can resize",
+            False,
+        ),
     )
 
     with tempfile.TemporaryDirectory() as tmp:

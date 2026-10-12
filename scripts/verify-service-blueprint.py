@@ -58,6 +58,20 @@ TEXT_RE = re.compile(
 # from every check.
 ATTR_RE = re.compile(r"""(?P<name>[\w:-]+)\s*=\s*(?:"(?P<dq>[^"]*)"|'(?P<sq>[^']*)')""")
 TAG_RE = re.compile(r"<[^>]+>")
+# CSS width/height redraw a rect at a size its attributes do not state.
+CSS_SIZE_RE = re.compile(r"(?:^|[{;}\n])\s*(?P<prop>width|height)\s*:", re.IGNORECASE)
+COMMENT_CSS_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
+CSS_RULE_RE = re.compile(r"(?P<selector>[^{}]+)\{(?P<body>[^{}]*)\}")
+# Selector parts that can reach the diagram's own marks: an SVG shape or text
+# element, or an attribute selector. Page chrome (svg, .frame, .card) cannot.
+SVG_MARK_SELECTOR_RE = re.compile(
+    r"(?<![\w.#-])(?:rect|line|text|tspan|g|path|polygon|polyline|circle|ellipse|use)(?![\w-])|\[",
+    re.IGNORECASE,
+)
+SVG_MARK_TAG_RE = re.compile(
+    r"<(?:rect|line|text|tspan|g|path|polygon|polyline|circle|ellipse|use)\b[^>]*>", re.IGNORECASE
+)
+SVG_TOKEN_RE = re.compile(r"""\b(?:class|id)\s*=\s*(?:"([^"]*)"|'([^']*)')""")
 COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
 GROUP_OPEN_RE = re.compile(r"<(?:g|svg)\b(?P<attrs>[^>]*?)(?P<selfclose>/?)>", re.IGNORECASE)
 GROUP_CLOSE_RE = re.compile(r"</(?:g|svg)\s*>", re.IGNORECASE)
@@ -404,12 +418,19 @@ def check_transforms(source: str, errors: list[str]) -> None:
         attrs = attrs_of(match.group("attrs"))
         if "data-stage" not in attrs and "data-name" not in attrs:
             continue
+        kind = "cell" if "data-name" in attrs else "stage header"
         how = transform_carrier(attrs) or enclosing(match.start())
         if how is not None:
-            kind = "cell" if "data-name" in attrs else "stage header"
             errors.append(
                 f"service-blueprint {kind} carries {how}; bake the movement into its "
                 "coordinates so the verifier checks what the browser draws"
+            )
+        sized = CSS_SIZE_RE.search(attrs.get("style", ""))
+        if sized is not None:
+            errors.append(
+                f"service-blueprint {kind} {attrs.get('data-name') or attrs.get('data-stage')!r} "
+                f"sets its size in CSS (the {sized.group('prop').lower()} property); state "
+                "width and height as attributes so the verifier checks what the browser draws"
             )
 
     # The printed and header checks read text by its x/y, so a transform on a
@@ -439,6 +460,14 @@ def check_transforms(source: str, errors: list[str]) -> None:
                 "browser draws"
             )
 
+    # Class and id names carried by SVG marks themselves; HTML chrome around
+    # the figure (cards, captions) does not count.
+    svg_tokens = {
+        token
+        for tag in SVG_MARK_TAG_RE.finditer(source)
+        for match in SVG_TOKEN_RE.finditer(tag.group(0))
+        for token in (match.group(1) or match.group(2) or "").split()
+    }
     for match in STYLE_RE.finditer(source):
         found = CSS_MOVES_MARK_RE.search(match.group("body"))
         if found is not None:
@@ -446,6 +475,18 @@ def check_transforms(source: str, errors: list[str]) -> None:
                 f"CSS {found.group('prop').lower()!r} declaration can move verified "
                 "service-blueprint geometry; bake the movement into the coordinates instead"
             )
+        for rule in CSS_RULE_RE.finditer(COMMENT_CSS_RE.sub(" ", match.group("body"))):
+            sized = CSS_SIZE_RE.search(rule.group("body"))
+            if sized is None:
+                continue
+            for part in rule.group("selector").split(","):
+                names = set(re.findall(r"[.#]([\w-]+)", part))
+                if SVG_MARK_SELECTOR_RE.search(part) or names & svg_tokens:
+                    errors.append(
+                        f"CSS {sized.group('prop').lower()!r} declaration can resize "
+                        f"service-blueprint marks ({part.strip()}); state sizes as attributes instead"
+                    )
+                    break
 
 
 def check_layers(cells: list[Cell], errors: list[str]) -> dict[str, list[Cell]]:
