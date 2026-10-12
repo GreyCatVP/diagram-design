@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, readFile } from 'node:fs/promises'
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { test } from 'node:test'
 
@@ -269,11 +270,21 @@ test('a failed body load is retried, not cached for the process', async () => {
 })
 
 test('a missing command body is reported as an error result, not thrown', async () => {
-  const empty = await mkdtemp(`${tmpdir()}/diagram-design-empty-`)
+  // Only doctor.md is missing. The handler loads all six bodies at once, so
+  // an entirely empty directory rejects with whichever read settles first —
+  // locally that was always doctor.md, on CI it was export-diagram.md — and
+  // asserting the exact file would race. Seeding the other five makes
+  // doctor.md the only possible rejection without touching the shared load.
+  const sparse = await mkdtemp(`${tmpdir()}/diagram-design-sparse-`)
+  for (const name of COMMAND_NAMES) {
+    if (name === 'doctor') continue
+    const raw = await readFile(new URL(`../lib/command-bodies/${name}.md`, import.meta.url), 'utf8')
+    await writeFile(join(sparse, `${name}.md`), raw)
+  }
   const { ctx, registered } = fakeContext()
   registerCommands(ctx, {
     skillDirectory: SKILL_DIRECTORY,
-    bodiesDirectory: empty,
+    bodiesDirectory: sparse,
     messageFactory: fakeMessageFactory,
   })
   const { agent, steered, submitted } = fakeAgent()
