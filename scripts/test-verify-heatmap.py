@@ -149,6 +149,14 @@ def main() -> int:
         live_transform = original.replace('</style>', 'rect {/**/transform: translateX(12px); }\n</style>', 1)
         case(failures, d, "N-comment-prefixed-transform.html", live_transform, original, False,
              "a CSS comment before a property cannot hide an active transform")
+        for name, css in (
+            ("legacy-html-markers", "<!-- rect { transform: translateX(12px); } -->"),
+            ("quoted-comment-opener", 'rect { --note: "/*"; transform: translateX(12px); /* note */ }'),
+            ("escaped-quote-comment-opener", r'rect { --note: "\"/*"; transform: translateX(12px); /* note */ }'),
+        ):
+            live_css = original.replace('</style>', css + '\n</style>', 1)
+            case(failures, d, f"N-{name}.html", live_css, original, False,
+                 "quoted comment markers and HTML legacy markers cannot hide active CSS")
 
         # ── Negative: mutations that must be rejected ─────────────────────────
 
