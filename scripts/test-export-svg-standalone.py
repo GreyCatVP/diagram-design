@@ -16,6 +16,7 @@ import tempfile
 import unittest
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
 HELPER = ROOT / "skills/diagram-design/scripts/export_svg.py"
@@ -85,6 +86,20 @@ class ExportSvgStandaloneTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.mod = load_helper()
+
+    def test_cli_reports_source_read_errors_without_output(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.html"
+            source.write_text('<svg viewBox="0 0 10 10"></svg>', encoding="utf-8")
+            output = Path(directory) / "output.svg"
+            stderr = io.StringIO()
+            with patch.object(Path, "read_text", side_effect=PermissionError("source denied")):
+                with contextlib.redirect_stderr(stderr):
+                    result = self.mod.main([str(source), str(output)])
+            self.assertEqual(result, 2)
+            self.assertIn("error: source denied", stderr.getvalue())
+            self.assertNotIn("Traceback", stderr.getvalue())
+            self.assertFalse(output.exists())
 
     def test_cli_reports_output_io_errors_without_traceback(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
