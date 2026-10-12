@@ -54,7 +54,9 @@ LINE_RE = re.compile(r"<line\b(?P<attrs>[^>]*?)/?>", re.IGNORECASE)
 TEXT_RE = re.compile(
     r"<text\b(?P<attrs>[^>]*)>(?P<body>.*?)</text>", re.IGNORECASE | re.DOTALL
 )
-ATTR_RE = re.compile(r'(?P<name>[\w:-]+)="(?P<value>[^"]*)"')
+# Both quote styles are valid SVG; a skipped attribute would hide a mark
+# from every check.
+ATTR_RE = re.compile(r"""(?P<name>[\w:-]+)\s*=\s*(?:"(?P<dq>[^"]*)"|'(?P<sq>[^']*)')""")
 TAG_RE = re.compile(r"<[^>]+>")
 COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
 GROUP_OPEN_RE = re.compile(r"<(?:g|svg)\b(?P<attrs>[^>]*?)(?P<selfclose>/?)>", re.IGNORECASE)
@@ -89,7 +91,10 @@ WCAG_NON_TEXT = 3.0
 
 
 def attrs_of(tag_attrs: str) -> dict[str, str]:
-    return {m.group("name").lower(): m.group("value") for m in ATTR_RE.finditer(tag_attrs)}
+    return {
+        m.group("name").lower(): m.group("dq") if m.group("dq") is not None else m.group("sq")
+        for m in ATTR_RE.finditer(tag_attrs)
+    }
 
 
 def parse_number(raw: str | None) -> float | None:
@@ -590,6 +595,8 @@ def check_grid(headers: list[Header], cells: list[Cell], errors: list[str]) -> N
         ]
         if len(set(gutters)) > 1:
             errors.append(f"stage grid: gutters must be equal; found {gutters}")
+        if any(gutter < 0 for gutter in gutters):
+            errors.append(f"stage grid: columns overlap; gutters must be zero or more, found {gutters}")
     by_stage = {header.stage: header for header in ordered}
     for cell in cells:
         header = by_stage.get(cell.stage)

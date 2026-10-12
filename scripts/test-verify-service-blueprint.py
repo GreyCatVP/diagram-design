@@ -208,6 +208,34 @@ def main() -> int:
             else:
                 print(f"OK: {name} fails by name")
 
+        # Every column widened past the spacing: the gutters stay equal but
+        # are negative, so neighbouring stages overlap.
+        overlap = source.replace('width="208"', 'width="240"').replace(
+            'x2="1200" y2="268"', 'x2="1232" y2="268"'
+        )
+        if overlap == source:
+            failures.append("could not build the overlapping-columns fixture")
+        else:
+            code, output = run(str(write(directory, "overlapping-columns.html", overlap)))
+            if code == 0 or "columns overlap" not in output:
+                failures.append(f"overlapping columns: expected 'columns overlap', got:\n{output}")
+            else:
+                print("OK: overlapping columns fail by name")
+
+        # Single-quoted attributes are valid SVG; a cell written that way
+        # must still be checked. Evidence cells are not in the census, so a
+        # skipped one could sit below the line without any finding.
+        retry = '<rect x="96" y="80" width="208" height="48" rx="4" fill="#ffffff" stroke="#2d3142" stroke-width="1" data-stage="sign-up" data-name="Welcome email"/>'
+        moved = retry.replace('y="80"', 'y="400"').replace('"', "'")
+        if retry not in source:
+            failures.append("could not build the single-quoted-cell fixture (anchor missing)")
+        else:
+            code, output = run(str(write(directory, "single-quoted-cell.html", source.replace(retry, moved, 1))))
+            if code == 0 or "visibility: evidence cell 'Welcome email'" not in output:
+                failures.append(f"single-quoted cell: expected a visibility finding, got:\n{output}")
+            else:
+                print("OK: single-quoted cell below the line fails by name")
+
     if failures:
         print("FAIL")
         for item in failures:
