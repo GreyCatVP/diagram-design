@@ -617,22 +617,28 @@ def merge_style_into_defs(svg: str, style_css: str, system_fonts: bool = False) 
 
 def find_defs_ids(svg: str) -> list[str]:
     """IDs on referenceable elements living under <defs>."""
-    defs_blocks = re.findall(r"<defs\b[^>]*>(.*?)</defs>", svg, re.IGNORECASE | re.DOTALL)
-    if not defs_blocks:
-        return []
-    tag_alt = "|".join(DEFS_ID_TAGS)
-    pattern = re.compile(
-        rf"<(?:{tag_alt})\b[^>]*\bid\s*=\s*[\"']([^\"']+)[\"']",
-        re.IGNORECASE,
-    )
+    live_svg = re.sub(r"<!--.*?-->", "", svg, flags=re.DOTALL)
+    defs_blocks = re.findall(r"<defs\b[^>]*>(.*?)</defs>", live_svg, re.IGNORECASE | re.DOTALL)
+    commented_defs_tags = {"marker", "pattern", "lineargradient", "radialgradient", "filter", "clippath", "mask", "symbol"}
+    live_defs_tags = {kind.lower() for kind in DEFS_ID_TAGS}
     found: list[str] = []
     seen: set[str] = set()
-    for block in defs_blocks:
-        for match in pattern.finditer(block):
-            ident = decode_xml_references(match.group(1))
-            if ident not in seen:
-                seen.add(ident)
-                found.append(ident)
+    regions = [(block, live_defs_tags) for block in defs_blocks]
+    regions += [(comment, commented_defs_tags) for comment in re.findall(r"<!--.*?-->", svg, re.DOTALL)]
+    for block, allowed_tags in regions:
+        for tag in START_TAG_RE.finditer(block):
+            name, attrs, _ = tag.groups()
+            if name.lower() not in allowed_tags:
+                continue
+            for attribute in TAG_ATTR_RE.finditer(attrs):
+                _, name, _, quoted = attribute.groups()
+                if name != "id" or quoted is None or quoted[0] not in "\"'":
+                    continue
+                ident = decode_xml_references(quoted[1:-1])
+                if ident not in seen:
+                    seen.add(ident)
+                    found.append(ident)
+                break
     return found
 
 
@@ -656,6 +662,8 @@ def namespace_defs_ids(svg: str, prefix: str) -> str:
     ids = find_defs_ids(svg)
     if not ids:
         return svg
+    live_ids = set(find_defs_ids(re.sub(r"<!--.*?-->", "", svg, flags=re.DOTALL)))
+    commented_defs_tags = {"marker", "pattern", "lineargradient", "radialgradient", "filter", "clippath", "mask", "symbol"}
     replacements = {old: html_entities.escape(f"{prefix}-{old}", quote=True) for old in ids}
     url_ref = re.compile(
         r"(?i:url)\(\s*(?P<quote>[\"']|&quot;|&apos;|)\s*#\s*"
@@ -679,14 +687,17 @@ def namespace_defs_ids(svg: str, prefix: str) -> str:
             return match.group(0)
         return f"url({match.group('quote')}#{new}{match.group('quote')})"
 
-    def rewrite_tag(tag: re.Match[str]) -> str:
+    def rewrite_tag(tag: re.Match[str], commented: bool = False) -> str:
         def attribute(match: re.Match[str]) -> str:
             space, name, equals, quoted = match.groups()
             if quoted is None or quoted[0] not in "\"'":
                 return match.group(0)
             raw = quoted[1:-1]
             value = decode_xml_references(raw)
-            if name == "id" and value in replacements:
+            if name == "id" and value in replacements and (
+                tag.group(1).lower() in commented_defs_tags if commented
+                else value in live_ids and tag.group(1).lower() in {kind.lower() for kind in DEFS_ID_TAGS}
+            ):
                 raw = replacements[value]
             elif name.lower() in {"href", "xlink:href"} and value.startswith("#") and value[1:] in replacements:
                 raw = "#" + replacements[value[1:]]
@@ -704,7 +715,7 @@ def namespace_defs_ids(svg: str, prefix: str) -> str:
     def rewrite_comment_token(match: re.Match[str]) -> str:
         token = match.group(0)
         tag = START_TAG_RE.fullmatch(token)
-        return rewrite_tag(tag) if tag is not None else rewrite_url(url_ref.fullmatch(token))
+        return rewrite_tag(tag, commented=True) if tag is not None else rewrite_url(url_ref.fullmatch(token))
 
     def retarget_style_selectors(region: str) -> str:
         # IDs are already decoded once, so CSS selectors compare against the

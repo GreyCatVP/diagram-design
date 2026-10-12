@@ -322,11 +322,25 @@ class ExportSvgStandaloneTests(unittest.TestCase):
         self.assertEqual(root.find("defs/marker").get("id"), "diagram-paint")
         self.assertEqual(root.find("use").get("href"), "#diagram-paint")
 
-    def test_template_commented_defs_keep_namespace(self) -> None:
+    def test_metadata_defs_382_preserve_data_id_and_data_href(self) -> None:
+        markup = '<svg><defs><marker id="arrow"/><g data-id="ghost"/></defs><g data-id="arrow" data-href="#arrow"/><use href="#arrow"/></svg>'
+        root = ET.fromstring(self.mod.namespace_defs_ids(markup, "d"))
+        self.assertEqual(root.find("g").get("data-id"), "arrow")
+        self.assertEqual(root.find("g").get("data-href"), "#arrow")
+        self.assertEqual(root.find("use").get("href"), "#d-arrow")
+        self.assertNotIn("ghost", self.mod.find_defs_ids(markup))
+
+    def test_metadata_defs_382_template_dots_keep_namespace(self) -> None:
         source = ASSETS / "template.html"
         exported = self.mod.export_svg_document(source.read_text(encoding="utf-8"), source)
         self.assertIn('id="template-dots"', exported)
         self.assertIn('url(#template-dots)', exported)
+
+    def test_metadata_defs_382_preserve_live_title_ids(self) -> None:
+        svg = '<svg aria-labelledby="name"><title id="name">Title</title><!-- <defs><marker id="name"/></defs> --></svg>'
+        result = self.mod.namespace_defs_ids(svg, "demo")
+        self.assertIn('aria-labelledby="name"><title id="name">Title</title>', result)
+        self.assertIn('<marker id="demo-name"/>', result)
 
     def test_helper_and_docs_exist(self) -> None:
         self.assertTrue(HELPER.is_file())

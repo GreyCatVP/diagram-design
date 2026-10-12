@@ -9,11 +9,7 @@ while retaining the original PR's targeted correctness fix.
 
 ## Decision
 
-Collect actual ID attributes from referenceable defs tags inside comments as well as live markup, retaining metadata protection and reference-like text preservation.
-
-Merge current upstream main before applying the correction. Leave package versions
-at upstream values and keep the change confined to the exporter, its tests, and
-its export reference.
+Rebase onto upstream 119ddae (plugin 2.6.81), preserving the export batch and #414 nested-SVG/comment validation. ID collection parses actual attributes. Optional comments use the explicit eight definition element types; live reusable definitions retain main namespacing. Metadata and live accessibility IDs are preserved. Regression methods use PR-specific names to avoid collisions.
 
 ## Alternatives
 
@@ -28,7 +24,4 @@ No render, network, release, or merge behavior is added by this correction.
 
 ## Validation
 
-The new shipped-template regression fails on the frozen pre-correction branch
-and passes after the correction. The standalone SVG export suite passes all
-32 tests, including its shipped asset checks. Full repository validation and
-hosted CI are separate gates; this scoped result does not claim either passed.
+The refreshed standalone SVG export suite passes 61 tests, including template-dots, live-title accessibility, and upstream shipped-asset regressions. Full policy and hosted checks are separate gates. Earlier frozen before/after controls remain in local evidence.
