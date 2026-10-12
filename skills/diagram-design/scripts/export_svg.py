@@ -235,12 +235,17 @@ def ensure_xmlns(svg: str) -> str:
 
 
 def ensure_viewbox(svg: str) -> None:
-    match = re.search(r"""\bviewBox\s*=\s*(["'])(.*?)\1""", svg, re.IGNORECASE | re.DOTALL)
-    if match is None:
+    opening = START_TAG_RE.match(svg)
+    raw = next(
+        (attr.group(4) for attr in TAG_ATTR_RE.finditer(opening.group(2))
+         if attr.group(2) == "viewBox"),
+        None,
+    ) if opening is not None and opening.group(1).lower() == "svg" else None
+    if raw is None:
         raise ValueError("SVG is missing a viewBox; refuse to guess")
-    value = decode_xml_references(match.group(2)).strip()
+    value = decode_xml_references(raw[1:-1] if raw[0] in "\"'" else raw).strip(" \t\r\n")
     number = r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?"
-    separator = r"(?:\s*,\s*|\s+)"
+    separator = r"(?:[ \t\r\n]*,[ \t\r\n]*|[ \t\r\n]+)"
     parsed = re.fullmatch(separator.join([f"({number})"] * 4), value)
     if parsed is None:
         raise ValueError("SVG viewBox must contain four finite numbers")
