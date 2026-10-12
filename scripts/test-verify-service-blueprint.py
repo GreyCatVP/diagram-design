@@ -208,6 +208,13 @@ def main() -> int:
             "CSS 'width' declaration can resize",
             False,
         ),
+        (
+            "cells widened by an attribute selector with a hash in its value",
+            "  </style>",
+            '    [fill="#ffffff"] { width: 400px; }\n  </style>',
+            "CSS 'width' declaration can resize",
+            False,
+        ),
     )
 
     with tempfile.TemporaryDirectory() as tmp:

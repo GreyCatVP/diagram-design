@@ -562,6 +562,30 @@ def _pseudo_functions(compound: str) -> tuple[str, list[tuple[str, str]]]:
     return "".join(outside), functions
 
 
+def _without_attribute_values(compound: str) -> str:
+    """Replace each [attribute...] block, quotes included, with an empty []."""
+    out: list[str] = []
+    depth = 0
+    quote = ""
+    for char in compound:
+        if depth:
+            if quote:
+                if char == quote:
+                    quote = ""
+            elif char in "\"'":
+                quote = char
+            elif char == "]":
+                depth = 0
+                out.append("]")
+            continue
+        if char == "[":
+            depth = 1
+            out.append("[")
+            continue
+        out.append(char)
+    return "".join(out)
+
+
 # Pseudo-classes whose argument is a selector list the element itself must match.
 MATCHES_ANY = frozenset({"is", "where", "matches", "-webkit-any", "-moz-any"})
 
@@ -580,6 +604,9 @@ def selector_can_reach_marks(selector: str, svg_tokens: set[str]) -> bool:
     if not subject:
         return False
     outside, functions = _pseudo_functions(subject)
+    # Attribute values are data, not selectors: "#ffffff" in [fill="#ffffff"]
+    # is not an id.
+    outside = _without_attribute_values(outside)
     element = re.match(r"[A-Za-z][\w-]*", outside)
     if element is not None:
         return element.group(0).lower() in SVG_MARK_ELEMENTS
