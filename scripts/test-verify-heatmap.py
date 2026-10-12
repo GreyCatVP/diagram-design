@@ -139,9 +139,26 @@ def main() -> int:
             if code != 0:
                 failures.append(f"{label}: shipped example failed:\n  {output.strip()}")
 
-        single_quoted = re.sub(r'="([^"<>]*)"', lambda match: "='" + match.group(1) + "'", original)
+        single_quoted = re.sub(
+            r'="([^"<>]*)"',
+            lambda match: "='" + match.group(1).replace("'", "&#39;") + "'",
+            original,
+        )
         case(failures, d, "P-single-quotes.html", single_quoted, original, True,
              "single-quoted attributes retain the same heatmap semantics")
+        mixed_quotes = original.replace(
+            FIRST_NONFOCAL,
+            FIRST_NONFOCAL.replace('fill="', 'data-note="fill=\'red\'" fill="', 1),
+        )
+        case(failures, d, "P-mixed-quotes.html", mixed_quotes, original, True,
+             "attribute-like metadata does not override the real fill")
+        mixed_single = single_quoted.replace(
+            "fill='rgba(45,49,66,0.29)'",
+            "data-note='fill=\"red\"' fill='rgba(45,49,66,0.29)'",
+            1,
+        )
+        case(failures, d, "P-mixed-single-quotes.html", mixed_single, single_quoted, True,
+             "double-quoted text inside metadata does not override a single-quoted fill")
 
         # ── Negative: mutations that must be rejected ─────────────────────────
 
