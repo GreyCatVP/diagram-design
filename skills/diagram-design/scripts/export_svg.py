@@ -103,7 +103,7 @@ def slug_for(path: Path) -> str:
 
 def mask_opaque_html(source: str, *, styles: bool = False) -> str:
     tags = "script|style"
-    pattern = re.compile(r"<!--.*?-->|<(?P<raw>" + tags + r")\b[^>]*>.*?</(?P=raw)\s*>", re.IGNORECASE | re.DOTALL)
+    pattern = re.compile(r"<!\[CDATA\[.*?\]\]>|<!--.*?-->|<(?P<raw>" + tags + r")\b[^>]*>.*?</(?P=raw)\s*>", re.IGNORECASE | re.DOTALL)
     def mask(match: re.Match[str]) -> str:
         if not styles and (match.group("raw") or "").lower() == "style":
             return match.group(0)

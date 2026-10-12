@@ -103,6 +103,15 @@ class ExportSvgStandaloneTests(unittest.TestCase):
         self.assertIn("stroke:blue", styles)
         self.assertIn('content:"<!-- note -->"', styles)
 
+    def test_svg_cdata_comment_marker_does_not_hide_closing_svg(self) -> None:
+        html = '<svg viewBox="0 0 10 10"><text><![CDATA[<!--]]></text></svg><!-- footer -->'
+        document = self.mod.export_svg_document(html, Path("cdata.html"))
+        root = ET.fromstring(document)
+        self.assertEqual(root.get("viewBox"), "0 0 10 10")
+        text = next(element for element in root.iter() if element.tag.endswith("}text"))
+        self.assertEqual(text.text, "<!--")
+        self.assertNotIn("footer", document)
+
     def test_helper_and_docs_exist(self) -> None:
         self.assertTrue(HELPER.is_file())
         self.assertTrue(EXPORT_MD.is_file())
