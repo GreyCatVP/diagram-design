@@ -312,6 +312,11 @@ class ExportSvgStandaloneTests(unittest.TestCase):
         self.assertIn(r"#diagram-A\&\#38\;B stop { stop-color:blue; }", css)
         self.assertEqual([element.get("fill") for element in root.iter() if element.tag.endswith("}rect")],
                          ["url(#diagram-A&B)", "url(#diagram-A&#38;B)"])
+    def test_optional_defs_387_template_dots_keep_namespace(self) -> None:
+        source = ASSETS / "template.html"
+        exported = self.mod.export_svg_document(source.read_text(encoding="utf-8"), source)
+        self.assertIn('id="template-dots"', exported)
+        self.assertIn('url(#template-dots)', exported)
 
     def test_helper_and_docs_exist(self) -> None:
         self.assertTrue(HELPER.is_file())
@@ -582,10 +587,21 @@ class ExportSvgStandaloneTests(unittest.TestCase):
             body = out.read_text(encoding="utf-8")
             self.assertIn("#example-loop-root .station", body)
 
-    def test_commented_defs_do_not_rename_live_ids(self) -> None:
+    def test_optional_defs_387_preserve_live_reusable_shape_ids(self) -> None:
+        svg = '<svg><defs><path id="live" d="M0 0"/></defs><g id="dots"/><!-- <defs><pattern id="dots"/><g id="optional-shape"/></defs> --><use href="#live"/></svg>'
+        result = self.mod.namespace_defs_ids(svg, "demo")
+        self.assertIn('<g id="dots"/>', result)
+        self.assertIn('<pattern id="demo-dots"/>', result)
+        self.assertIn('<g id="optional-shape"/>', result)
+        self.assertIn('<path id="demo-live"', result)
+        self.assertIn('href="#demo-live"', result)
+
+    def test_optional_defs_387_preserve_live_title_ids(self) -> None:
         svg = '<svg aria-labelledby="name"><title id="name">Title</title><!-- <defs><marker id="name"/></defs> --></svg>'
-        self.assertEqual(self.mod.find_defs_ids(svg), [])
-        self.assertEqual(self.mod.namespace_defs_ids(svg, "demo"), svg)
+        self.assertEqual(self.mod.find_defs_ids(svg), ["name"])
+        result = self.mod.namespace_defs_ids(svg, "demo")
+        self.assertIn('aria-labelledby="name"><title id="name">Title</title>', result)
+        self.assertIn('<marker id="demo-name"/>', result)
 
     def test_rgba_presentation_attrs_still_split(self) -> None:
         html = """<!DOCTYPE html><html><body>

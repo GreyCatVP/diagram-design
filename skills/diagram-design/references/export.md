@@ -232,4 +232,4 @@ If the target aspect ratio doesn't match the `viewBox` aspect ratio, say so and 
 - Auto-emits `.svg` or `.png` alongside HTML generation. Manual on every call.
 - Embeds an HTML wrapper (cards, headers) into the SVG via `foreignObject`. Too fragile across renderers.
 
-The exporter ignores commented-out defs when collecting IDs to namespace. Archived examples in SVG comments do not rename live elements.
+The exporter keeps optional defs in comments namespaced so they can be uncommented later. Only referenceable defs element types have their IDs renamed; live titles and other elements retain their IDs and accessibility references.
