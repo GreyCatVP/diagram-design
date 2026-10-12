@@ -194,6 +194,13 @@ def main() -> int:
             "CSS 'width' declaration can resize",
             False,
         ),
+        (
+            "cell widened by a selector with a quoted space",
+            "  </style>",
+            '    rect[data-name="Retry payment"] { width: 400px; }\n  </style>',
+            "CSS 'width' declaration can resize",
+            False,
+        ),
     )
 
     with tempfile.TemporaryDirectory() as tmp:

@@ -65,8 +65,6 @@ CSS_RULE_RE = re.compile(r"(?P<selector>[^{}]+)\{(?P<body>[^{}]*)\}")
 SVG_MARK_ELEMENTS = frozenset(
     {"rect", "line", "text", "tspan", "g", "path", "polygon", "polyline", "circle", "ellipse", "use"}
 )
-# The subject of a selector: its last compound, after any combinator.
-SELECTOR_SUBJECT_RE = re.compile(r"(?:^|[\s>+~])(?P<subject>[^\s>+~]+)\s*$")
 SVG_MARK_TAG_RE = re.compile(
     r"<(?:rect|line|text|tspan|g|path|polygon|polyline|circle|ellipse|use)\b[^>]*>", re.IGNORECASE
 )
@@ -478,13 +476,57 @@ def check_transforms(source: str, errors: list[str]) -> None:
             sized = CSS_SIZE_RE.search(rule.group("body"))
             if sized is None:
                 continue
-            for part in rule.group("selector").split(","):
+            for part in split_selector_list(rule.group("selector")):
                 if selector_can_reach_marks(part, svg_tokens):
                     errors.append(
                         f"CSS {sized.group('prop').lower()!r} declaration can resize "
                         f"service-blueprint marks ({part.strip()}); state sizes as attributes instead"
                     )
                     break
+
+
+def _selector_boundaries(selector: str, stops: str) -> list[int]:
+    """Offsets of stop characters outside quoted strings, brackets and parens."""
+    found: list[int] = []
+    depth = 0
+    quote = ""
+    index = 0
+    while index < len(selector):
+        char = selector[index]
+        if quote:
+            if char == "\\":
+                index += 2
+                continue
+            if char == quote:
+                quote = ""
+        elif char in "\"'":
+            quote = char
+        elif char in "[(":
+            depth += 1
+        elif char in "])":
+            depth = max(0, depth - 1)
+        elif depth == 0 and (char in stops or (" " in stops and char.isspace())):
+            found.append(index)
+        index += 1
+    return found
+
+
+def split_selector_list(selectors: str) -> list[str]:
+    """Split a selector list on top-level commas only."""
+    parts: list[str] = []
+    start = 0
+    for comma in _selector_boundaries(selectors, ","):
+        parts.append(selectors[start:comma])
+        start = comma + 1
+    parts.append(selectors[start:])
+    return [part for part in parts if part.strip()]
+
+
+def selector_subject(selector: str) -> str:
+    """The last compound of a selector, after its final top-level combinator."""
+    text = selector.strip()
+    cuts = _selector_boundaries(text, " >+~")
+    return text[cuts[-1] + 1:].strip() if cuts else text
 
 
 def selector_can_reach_marks(selector: str, svg_tokens: set[str]) -> bool:
@@ -495,10 +537,9 @@ def selector_can_reach_marks(selector: str, svg_tokens: set[str]) -> bool:
     named, an attribute selector or a class/id carried by an SVG mark can
     reach a mark.
     """
-    found = SELECTOR_SUBJECT_RE.search(selector.strip())
-    if found is None:
+    subject = selector_subject(selector)
+    if not subject:
         return False
-    subject = found.group("subject")
     element = re.match(r"[A-Za-z][\w-]*", subject)
     if element is not None:
         return element.group(0).lower() in SVG_MARK_ELEMENTS
