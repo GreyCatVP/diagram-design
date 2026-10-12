@@ -978,11 +978,24 @@ def _parse_state(
     diagram: Diagram, lines: list[tuple[int, str]], header_position: int
 ) -> None:
     containers: list[str] = []
+    note_start: int | None = None
     descriptions: dict[str, list[str]] = {}
     pending_descriptions = diagram._state_descriptions
     for line_number, raw in lines[header_position + 1 :]:
         text = raw.strip()
         if not text:
+            continue
+        if note_start is not None:
+            if re.fullmatch(r"end\s+note", text, re.I):
+                note_start = None
+            continue
+        note = re.fullmatch(
+            r"note\s+(?:left|right)\s+of\s+[^\s:]+(?:\s*:\s*(.*))?", text, re.I
+        )
+        if note:
+            # A colon marks a single-line note; otherwise ignore its opaque body
+            # through `end note` before interpreting states, edges or braces.
+            note_start = line_number if note.group(1) is None else None
             continue
         if _discard_nonsemantic(diagram, text):
             continue
@@ -1045,6 +1058,13 @@ def _parse_state(
         plain = re.match(r"^state\s+([\w.:-]+)$", text, re.I)
         if plain:
             diagram.add_node(plain.group(1), plain.group(1), "state", parent)
+            continue
+        if text != "--" and re.fullmatch(r"[\w.:-]+", text):
+            if text not in diagram.node_map:
+                diagram.add_node(text, text, "state", parent)
+
+    if note_start is not None:
+        _fail(f"unterminated state note at line {note_start}")
 
     # Materialize each accumulated label once; later explicit aliases still win.
     for node_id, parts in pending_descriptions.items():

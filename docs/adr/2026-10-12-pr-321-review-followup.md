@@ -2,30 +2,22 @@
 
 ## Context
 
-Blanket parent RGBA preservation avoids alpha inheritance changes but leaves safely inherited parent paint unusable by strict SVG importers.
+The published candidate `7838453e57a00680ec101157f8d112ba7f17ed87` preserves parent RGBA whenever any page CSS rule declares the paint property. The maintainer's unrelated `.paint { fill:#000 }` reproduction therefore stays RGBA although current main normalizes the unpainted child case. Current main also includes export batch #411 and stricter channel/alpha clamping and executable recipe checks.
 
 ## Decision
 
-Normalize a parent when descendants inherit its paint; retain the conservative fallback for descendant paint overrides or unresolved CSS opacity. Keep numeric opacity combination and inert-content protection. Restore the export recipe as a call to the packaged helper.
+Integrate upstream `eb23fba57faaeea8ab331b4dd9235ed01ae18558` (including export batch `09c1428`) and retain its manifests. Exclude simple CSS selectors whose final tag/class/ID compound cannot target either the painted element or its descendants. Preserve RGBA for possible paint overrides, unsupported selector syntax, CSS opacity and independently inherited presentation opacity. Clamp channels and alpha consistently with upstream, and combine existing numeric opacity without duplicate attributes.
 
-Integrate current upstream main without rewriting published history or changing
-package versions relative to upstream.
+Keep step 7 a complete executable recipe, synchronized with the helper, including conservative CSS handling and inert comment/CDATA protection. Tests execute the recipe against clamping, unrelated page paint, child paint override and existing opacity cases.
 
 ## Alternatives
 
-Keeping the old candidate preserves the reported regression. Blanket conversion
-or flattening conditional CSS changes browser behavior. Preserve the relevant
-contracts and use narrow conservative fallback where resolution is uncertain.
+Ignoring every stylesheet paint rule would change alpha when CSS overrides child or parent paint. Keeping the blanket guard leaves the maintainer reproduction unnormalized. A full CSS cascade engine is outside this dependency-free helper's scope; unknown selector syntax remains conservative.
 
 ## Consequences
 
-The correction preserves the existing export interface. External font sources in
-normal font mode retain their authored declaration; system-font mode retains its
-existing behavior. No network validation, release or deployment is performed.
+Unrelated simple page CSS no longer blocks safe presentation paint normalization. Possible CSS overrides retain their original RGBA alpha. The export interface and current upstream package versions remain unchanged. Unsupported selector syntax can still conservatively prevent conversion.
 
 ## Validation
 
-The new review regression fails before correction and passes afterward. All 34
-standalone SVG export tests pass, including shipped-asset controls. Raw local
-logs record the frozen failure and candidate result. Complete repository gates
-and hosted CI are separate checks and are not claimed by this scoped result.
+The new unrelated-page-paint regression fails on the frozen published head and passes on frozen current main. The integrated candidate passes all 61 standalone SVG export tests, including inherited and overridden paint, CSS opacity, clamping, inert-content and shipped-asset controls. Export wait tests skip because Playwright is unavailable in the system Python; no browser-render claim is made. Raw comparison and candidate logs are local evidence. Full repository policy and hosted CI are separate gates.
