@@ -1204,7 +1204,6 @@ def check_standalone_er_regression(tmp: Path) -> None:
 
 
 def check_standalone_state_regression(tmp: Path) -> None:
-def check_standalone_state_regression(tmp: Path) -> None:
     path = tmp / "supported-form.mmd"
     path.write_text('stateDiagram-v2\nDisconnected\n[*] --> Active\n', encoding="utf-8")
     payload = json.loads(run_extract([str(path), "--json"]))["diagrams"][0]
