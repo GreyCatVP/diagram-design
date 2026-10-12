@@ -62,12 +62,11 @@ TAG_RE = re.compile(r"<[^>]+>")
 CSS_SIZE_RE = re.compile(r"(?:^|[{;}\n])\s*(?P<prop>width|height)\s*:", re.IGNORECASE)
 COMMENT_CSS_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
 CSS_RULE_RE = re.compile(r"(?P<selector>[^{}]+)\{(?P<body>[^{}]*)\}")
-# Selector parts that can reach the diagram's own marks: an SVG shape or text
-# element, or an attribute selector. Page chrome (svg, .frame, .card) cannot.
-SVG_MARK_SELECTOR_RE = re.compile(
-    r"(?<![\w.#-])(?:rect|line|text|tspan|g|path|polygon|polyline|circle|ellipse|use)(?![\w-])|\[",
-    re.IGNORECASE,
+SVG_MARK_ELEMENTS = frozenset(
+    {"rect", "line", "text", "tspan", "g", "path", "polygon", "polyline", "circle", "ellipse", "use"}
 )
+# The subject of a selector: its last compound, after any combinator.
+SELECTOR_SUBJECT_RE = re.compile(r"(?:^|[\s>+~])(?P<subject>[^\s>+~]+)\s*$")
 SVG_MARK_TAG_RE = re.compile(
     r"<(?:rect|line|text|tspan|g|path|polygon|polyline|circle|ellipse|use)\b[^>]*>", re.IGNORECASE
 )
@@ -480,13 +479,31 @@ def check_transforms(source: str, errors: list[str]) -> None:
             if sized is None:
                 continue
             for part in rule.group("selector").split(","):
-                names = set(re.findall(r"[.#]([\w-]+)", part))
-                if SVG_MARK_SELECTOR_RE.search(part) or names & svg_tokens:
+                if selector_can_reach_marks(part, svg_tokens):
                     errors.append(
                         f"CSS {sized.group('prop').lower()!r} declaration can resize "
                         f"service-blueprint marks ({part.strip()}); state sizes as attributes instead"
                     )
                     break
+
+
+def selector_can_reach_marks(selector: str, svg_tokens: set[str]) -> bool:
+    """Whether a selector's subject can be one of the diagram's SVG marks.
+
+    A named element decides it: an SVG shape or text element can be a mark;
+    any other element (div, svg, section) is page layout. With no element
+    named, an attribute selector or a class/id carried by an SVG mark can
+    reach a mark.
+    """
+    found = SELECTOR_SUBJECT_RE.search(selector.strip())
+    if found is None:
+        return False
+    subject = found.group("subject")
+    element = re.match(r"[A-Za-z][\w-]*", subject)
+    if element is not None:
+        return element.group(0).lower() in SVG_MARK_ELEMENTS
+    names = set(re.findall(r"[.#]([\w-]+)", subject))
+    return "[" in subject or bool(names & svg_tokens)
 
 
 def check_layers(cells: list[Cell], errors: list[str]) -> dict[str, list[Cell]]:

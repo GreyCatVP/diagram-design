@@ -229,6 +229,20 @@ def main() -> int:
             else:
                 print(f"OK: {name} fails by name")
 
+        # Sizing HTML around the figure is page layout, not a mark, even when
+        # the selector uses an attribute.
+        wrapper = source.replace(
+            "  </style>", '    div[class="diagram-container"] { width: 100%; }\n  </style>', 1
+        )
+        if wrapper == source:
+            failures.append("could not build the HTML-wrapper fixture")
+        else:
+            code, output = run(str(write(directory, "html-wrapper-width.html", wrapper)))
+            if code != 0:
+                failures.append(f"HTML-only attribute selector was rejected:\n{output}")
+            else:
+                print("OK: HTML-only attribute selector passes")
+
         # Every column widened past the spacing: the gutters stay equal but
         # are negative, so neighbouring stages overlap.
         overlap = source.replace('width="208"', 'width="240"').replace(
