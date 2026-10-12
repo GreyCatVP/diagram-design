@@ -24,6 +24,8 @@ The extractor parses bounded text. It **never renders, fetches, or executes** Pl
 
 Supported kinds are `sequence` and `class`. Sequence keeps lifelines, message order, activation spans, combined fragments (`alt` / `opt` / `loop`), notes, and dividers. Class keeps classifier names, stereotypes, attributes/operations, and relationship kind plus cardinality (`inheritance`, `composition`, `aggregation`, `association`). The digest mirrors the other import IRs: diagram list, nodes/edges/containers, fragments, type candidates, budget flags, hubs, entries, terminals, unconnected nodes, and tables. PlantUML has no source coordinates, so it reports `source layout: none (PlantUML is layout-free)`.
 
+Sequence edges are numbered in source order (the `#` column). Each fragment branch lists the message span it covers (`alt(token expired) msgs 3-7; else(token valid) msg 8`), dividers say which message they follow, and each activation records the message it follows (`api:activate@1`), so branches and activation bars land on the right calls. The node table carries a `stereotype` column, and classes declared inside a package get a package-qualified id (`billing.User`) so same-named classes in different packages stay separate.
+
 - `--diagram N` selects one `@startuml` block (or fenced block) before parsing, so a malformed or unsupported block elsewhere in the file does not stop it. `--diagram all` selects every block and fails if any of them fails. Default is diagram 0.
 - `--json` emits the full IR, including fragments, activations, and class members.
 - `--max-rows N` controls digest table length; default 40.

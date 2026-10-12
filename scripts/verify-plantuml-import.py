@@ -160,8 +160,18 @@ def check_sequence() -> None:
     alts = [item for item in fragments if item["kind"] == "alt"]
     if len(alts) != 1 or alts[0]["label"] != "token expired":
         fail(f"sequence alt fragment missing: {fragments}")
-    if "token valid" not in alts[0]["regions"]:
-        fail("sequence alt else region was not retained")
+    regions = [
+        (region["label"], region["first_message"], region["last_message"])
+        for region in alts[0]["regions"]
+    ]
+    if regions != [("token expired", 3, 7), ("token valid", 8, 8)]:
+        fail(f"sequence alt branches lost their message spans: {regions}")
+    timeline = [
+        (item["participant"], item["action"], item["after_message"])
+        for item in diagram["activations"]
+    ]
+    if timeline[:2] != [("api", "activate", 1), ("api", "deactivate", 2)]:
+        fail(f"sequence activations lost their message positions: {timeline}")
     if diagram["discarded"]["skin"] != 4:
         fail(f"sequence skinparam discard count wrong: {diagram['discarded']}")
     if not diagram["activations"]:
@@ -175,7 +185,9 @@ def check_sequence() -> None:
         "type candidates: sequence",
         "budget:",
         "- discarded: 4 skinparam",
-        "alt(token expired)",
+        "alt(token expired) msgs 3-7; else(token valid) msg 8",
+        "api:activate@1",
+        "| # | source | target | label | style |",
         "### Nodes",
         "### Edges",
         "+",
@@ -212,6 +224,111 @@ def check_class() -> None:
     if "inheritance" not in digest or "composition" not in digest:
         fail("class digest omitted relationship kinds")
     ok("class parses: members, inheritance, composition, cardinality")
+
+
+def write_puml(tmp: Path, name: str, body: str) -> Path:
+    path = tmp / name
+    path.write_text(f"@startuml\n{body}\n@enduml\n", encoding="utf-8")
+    return path
+
+
+def extract_json(path: Path) -> dict:
+    return json.loads(run_extract([str(path), "--json"]))["diagrams"][0]
+
+
+def check_review_regressions(tmp: Path) -> None:
+    """Pin the import-fidelity fixes from the PR #358 review threads."""
+    # Declaration tails are parsed, never used as ids.
+    diagram = extract_json(
+        write_puml(
+            tmp,
+            "tails.puml",
+            "participant A #red\nparticipant B #red\nparticipant C <<svc>> order 3\n"
+            "A -> B : hi\nB -> C : go",
+        )
+    )
+    ids = [node["id"] for node in diagram["nodes"]]
+    if ids != ["A", "B", "C"]:
+        fail(f"participant tails became ids: {ids}")
+    if diagram["nodes"][2]["stereotype"] != "svc":
+        fail("participant stereotype was not kept")
+    diagram = extract_json(write_puml(tmp, "inline.puml", "class A { +id: int }\nclass B\nA --> B"))
+    nodes = {node["id"]: node for node in diagram["nodes"]}
+    if set(nodes) != {"A", "B"} or nodes["A"]["fields"] != ["+id: int"]:
+        fail(f"inline class body became an id or lost its member: {diagram['nodes']}")
+    expect_error([str(write_puml(tmp, "tail-junk.puml", "participant A extra\nA -> A : x"))], "malformed statement at line 2")
+    expect_error([str(write_puml(tmp, "class-junk.puml", "class A extends B\nA --> C"))], "malformed statement at line 2")
+
+    # Exact ids are case-sensitive.
+    diagram = extract_json(write_puml(tmp, "case.puml", "participant a\nparticipant A\na -> A : ping"))
+    edge = diagram["edges"][0]
+    if (edge["source"], edge["target"]) != ("a", "A"):
+        fail(f"letter case redirected a message: {edge}")
+
+    # Same-named classes in different packages stay separate.
+    diagram = extract_json(
+        write_puml(
+            tmp,
+            "packages.puml",
+            "package billing {\n  class User {\n    +plan\n  }\n}\n"
+            "package auth {\n  class User {\n    +password\n  }\n  User --> Session\n}\n"
+            "billing.User --> auth.User",
+        )
+    )
+    nodes = {node["id"]: node for node in diagram["nodes"]}
+    if nodes.get("billing.User", {}).get("fields") != ["+plan"] or nodes.get("auth.User", {}).get("fields") != ["+password"]:
+        fail(f"classes merged across packages: {list(nodes)}")
+    pairs = [(edge["source"], edge["target"]) for edge in diagram["edges"]]
+    if pairs != [("auth.User", "Session"), ("billing.User", "auth.User")]:
+        fail(f"package-qualified relationships resolved wrongly: {pairs}")
+    expect_error(
+        [str(write_puml(tmp, "ambiguous.puml", "package a {\n class User\n}\npackage b {\n class User\n}\nUser --> X"))],
+        "ambiguous class name `User`",
+    )
+
+    # Styling commands match whole words only.
+    diagram = extract_json(write_puml(tmp, "show.puml", "ShowService -> Client : result\nScale -> Client : size"))
+    if [edge["label"] for edge in diagram["edges"]] != ["result", "size"]:
+        fail(f"styling prefix dropped a message: {diagram['edges']}")
+    diagram = extract_json(write_puml(tmp, "show-member.puml", "class View {\n  show(): void\n  hide(): void\n}"))
+    if diagram["nodes"][0]["fields"] != ["show(): void", "hide(): void"]:
+        fail(f"styling prefix dropped class members: {diagram['nodes'][0]['fields']}")
+
+    # Multi-line styling blocks are consumed whole.
+    diagram = extract_json(
+        write_puml(
+            tmp,
+            "skin-block.puml",
+            "skinparam sequence {\n  ArrowColor red\n  LifeLineBorderColor blue\n}\n"
+            "legend right\n  shorthand\nendlegend\nAlice -> Bob : hi",
+        )
+    )
+    if [edge["label"] for edge in diagram["edges"]] != ["hi"] or diagram["discarded"]["skin"] != 2:
+        fail(f"multiline styling block was not consumed: {diagram['discarded']}")
+    expect_error([str(write_puml(tmp, "skin-open.puml", "Alice -> Bob : hi\nskinparam sequence {\n  ArrowColor red"))], "unterminated styling block at line 3")
+
+    # Open class or package bodies fail instead of swallowing relationships.
+    expect_error([str(write_puml(tmp, "brace.puml", "class A {\n  +id\nA --> B"))], "unterminated class body at line 2")
+    expect_error([str(write_puml(tmp, "package-open.puml", "package p {\n  class A\nA --> B"))], "unterminated package at line 2")
+
+    # Region splitting honors block comments.
+    commented = tmp / "comment-end.puml"
+    commented.write_text(
+        "@startuml\nAlice -> Bob : one\n/'\n@enduml\n'/\nBob -> Alice : two\n@enduml\n",
+        encoding="utf-8",
+    )
+    diagram = extract_json(commented)
+    if [edge["label"] for edge in diagram["edges"]] != ["one", "two"]:
+        fail(f"@enduml inside a block comment cut the diagram short: {diagram['edges']}")
+    open_comment = tmp / "comment-open.puml"
+    open_comment.write_text("@startuml\nAlice -> Bob : one\n/'\n@enduml\n", encoding="utf-8")
+    expect_error([str(open_comment)], "unterminated block comment at line 3")
+
+    # Stereotypes reach the default digest.
+    digest = run_extract([str(write_puml(tmp, "stereo.puml", "class Account <<entity>>\nclass Ledger\nLedger --> Account"))])
+    if "| Account | Account | class | entity |" not in digest:
+        fail(f"class stereotype missing from the default digest: {digest!r}")
+    ok("review regressions: timeline positions, declaration tails, case, packages, styling, braces, comments, stereotypes")
 
 
 def check_multi_diagram() -> None:
@@ -560,6 +677,7 @@ def main() -> int:
         check_sequence()
         check_class()
         check_multi_diagram()
+        check_review_regressions(tmp)
         check_adversarial(tmp)
         check_errors_and_limits(tmp)
         check_legacy_stdout_encoding(tmp)

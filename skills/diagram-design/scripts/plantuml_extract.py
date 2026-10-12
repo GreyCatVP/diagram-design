@@ -121,7 +121,7 @@ CLASSIFIER_KINDS = {
     "interface": "interface",
     "enum": "enum",
 }
-SKIN_PREFIXES = (
+SKIN_COMMANDS = (
     "skinparam",
     "!theme",
     "autonumber",
@@ -134,9 +134,22 @@ SKIN_PREFIXES = (
     "scale",
     "sprite",
     "!pragma",
-    "order ",
+    "order",
     "left to right direction",
     "top to bottom direction",
+)
+# A styling command is a whole word followed by whitespace, `{`, or the end of
+# the statement, so `ShowService -> Client` and `show(): void` stay content.
+SKIN_RE = re.compile(
+    r"^(?:"
+    + "|".join(re.escape(command).replace(r"\ ", r"\s+") for command in SKIN_COMMANDS)
+    + r")(?=\s|\{|$)",
+    re.I,
+)
+# Multi-line text blocks that end with a matching `end...` line.
+TEXT_BLOCK_RE = re.compile(
+    r"^(?:(?:left|right|center)\s+)?(header|footer|legend)(?:\s+(?:left|right|center|top|bottom))*\s*$",
+    re.I,
 )
 UNSUPPORTED_SEQUENCE = {
     "par",
@@ -221,18 +234,45 @@ class Diagram:
     )
     _nodes_by_id: dict[str, Node] = field(default_factory=dict, init=False, repr=False)
     _aliases: dict[str, str] = field(default_factory=dict, init=False, repr=False)
+    _bare_names: dict[str, list[str]] = field(default_factory=dict, init=False, repr=False)
 
     @property
     def node_map(self) -> dict[str, Node]:
         return self._nodes_by_id
 
-    def resolve(self, token: str) -> str:
+    def resolve(self, token: str, scope: list[str] | None = None) -> str:
+        """Resolve a name exactly (PlantUML names are case-sensitive).
+
+        Class names declared inside a package get a package-qualified id. A
+        bare reference resolves against the enclosing *scope* first, then to
+        the one class with that bare name; an ambiguous bare name fails.
+        """
         key = token.strip()
-        return self._aliases.get(key, self._aliases.get(key.casefold(), key))
+        if key in self._nodes_by_id:
+            return key
+        if key in self._aliases:
+            return self._aliases[key]
+        for package in reversed(scope or []):
+            qualified = f"{package}.{key}"
+            if qualified in self._nodes_by_id:
+                return qualified
+        matches = self._bare_names.get(key, [])
+        if len(matches) > 1:
+            _fail(
+                f"ambiguous class name `{key}` (declared in several packages: "
+                f"{', '.join(matches)}); qualify it"
+            )
+        if matches:
+            return matches[0]
+        return key
 
     def alias(self, alias: str, node_id: str) -> None:
-        self._aliases[alias] = node_id
-        self._aliases[alias.casefold()] = node_id
+        self._aliases.setdefault(alias, node_id)
+
+    def bare_name(self, name: str, node_id: str) -> None:
+        ids = self._bare_names.setdefault(name, [])
+        if node_id not in ids:
+            ids.append(node_id)
 
     def add_node(
         self,
@@ -315,12 +355,18 @@ class Diagram:
         self.edges.append(edge)
         return edge
 
-    def add_activation(self, participant: str, action: str) -> None:
+    def add_activation(self, participant: str, action: str, after_message: int | None = None) -> None:
+        """Record an activation change on the message timeline.
+
+        ``after_message`` is the order of the last message before the bar
+        starts or ends (0 = before the first message).
+        """
         self.activations.append(
             {
                 "participant": participant,
                 "action": action,
                 "order": len(self.activations) + 1,
+                "after_message": len(self.edges) if after_message is None else after_message,
             }
         )
 
@@ -366,12 +412,17 @@ def _read_bounded(path: Path) -> str:
 
 
 def _split_uml_regions(text: str, base_line: int) -> list[tuple[int, str, str]]:
-    """Return (start_line, body, start_kind) for each @start/@end region."""
+    """Return (start_line, body, start_kind) for each @start/@end region.
+
+    Block comments are tracked inside a region, so an ``@enduml`` line inside
+    ``/' ... '/`` does not close the diagram early.
+    """
     regions: list[tuple[int, str, str]] = []
     lines = text.splitlines()
     start: int | None = None
     kind = "uml"
     body: list[str] = []
+    comment_start: int | None = None
     for offset, raw in enumerate(lines):
         stripped = raw.strip()
         opened = START_RE.match(stripped)
@@ -382,12 +433,23 @@ def _split_uml_regions(text: str, base_line: int) -> list[tuple[int, str, str]]:
                 kind = opened.group(1).casefold()
                 body = []
             continue
+        if comment_start is not None:
+            if "'/" in raw:
+                comment_start = None
+            body.append(raw)
+            continue
+        if stripped.startswith("/'") and "'/" not in stripped[2:]:
+            comment_start = base_line + offset
+            body.append(raw)
+            continue
         if closed:
             regions.append((start, "\n".join(body), kind))
             start = None
             body = []
             continue
         body.append(raw)
+    if comment_start is not None:
+        _fail(f"unterminated block comment at line {comment_start}")
     if start is not None:
         regions.append((start, "\n".join(body), kind))
     return regions
@@ -462,6 +524,8 @@ def _blank_comments(lines: list[str]) -> list[str]:
             prepared.append("")
             continue
         prepared.append(raw.rstrip())
+    if in_block:
+        _fail("unterminated block comment")
     return prepared
 
 
@@ -550,7 +614,78 @@ def _quoted_or_token(text: str) -> tuple[str, str]:
     return match.group(1), match.group(2).strip()
 
 
-def _parse_classifier_header(text: str) -> tuple[str, str, str, str, bool] | None:
+COLOR_TOKEN_RE = re.compile(r"^#{1,2}(?:\[[^\]]*\])?[\w:;.#-]*$")
+
+
+def _parse_declaration_tail(
+    rest: str,
+    line_number: int,
+    *,
+    allow_order: bool = False,
+    allow_generic: bool = False,
+) -> tuple[str, str, str, list[str]]:
+    """Parse ``name [as alias] [<<stereo>>] [#color] ...`` fully.
+
+    Returns (node_id, label, stereotype, leftover) where leftover holds an
+    inline ``{ ... }`` body or an opening ``{``. Anything else left over is a
+    malformed statement, so a tail never becomes a node id.
+    """
+    stereotype = ""
+    stereo = re.search(r"<<\s*(?:\(\s*[^)]*\)\s*)?([^>]*?)\s*>>", rest)
+    if stereo:
+        stereotype = clean_label(stereo.group(1))
+        rest = (rest[: stereo.start()] + " " + rest[stereo.end() :]).strip()
+    body: list[str] = []
+    search_from = rest.find(rest[0], 1) + 1 if rest[:1] in "\"'" else 0
+    brace = rest.find("{", search_from) if search_from or rest[:1] not in "\"'" else -1
+    if brace != -1:
+        tail = rest[brace:].strip()
+        rest = rest[:brace].strip()
+        if tail == "{":
+            body = ["{"]
+        elif tail.endswith("}") and tail.count("{") == 1 and tail.count("}") == 1:
+            inner = tail[1:-1].strip()
+            body = ["{}"] + ([inner] if inner else [])
+        else:
+            _fail(f"malformed statement at line {line_number}")
+    if not rest:
+        _fail(f"malformed statement at line {line_number}")
+    display, remainder = _quoted_or_token(rest)
+    quoted_display = rest[:1] in "\"'"
+    generic = ""
+    if allow_generic and not quoted_display:
+        generic_match = re.match(r"^(<[^<>]*>)\s*(.*)$", remainder)
+        if generic_match:
+            generic, remainder = generic_match.group(1), generic_match.group(2).strip()
+    node_id = display
+    label = display + generic
+    as_match = re.match(r"^as\s+(.*)$", remainder, re.I)
+    if as_match:
+        alias_text = as_match.group(1).strip()
+        alias, remainder = _quoted_or_token(alias_text)
+        if not alias:
+            _fail(f"malformed statement at line {line_number}")
+        if alias_text[:1] in "\"'" and not quoted_display:
+            node_id, label = display, alias
+        else:
+            node_id = alias
+    tokens = remainder.split()
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if COLOR_TOKEN_RE.match(token):
+            index += 1
+            continue
+        if allow_order and token.casefold() == "order" and index + 1 < len(tokens) and re.match(r"^-?\d+$", tokens[index + 1]):
+            index += 2
+            continue
+        _fail(f"malformed statement at line {line_number}")
+    return node_id, clean_label(label) or node_id, stereotype, body
+
+
+def _parse_classifier_header(
+    text: str, line_number: int = 0
+) -> tuple[str, str, str, str, bool, list[str]] | None:
     match = re.match(
         r"^(abstract\s+class|class|interface|enum)\s+(.+)$",
         text,
@@ -558,31 +693,16 @@ def _parse_classifier_header(text: str) -> tuple[str, str, str, str, bool] | Non
     )
     if not match:
         return None
-    kind = match.group(1).casefold()
-    rest = match.group(2).strip()
-    opens = rest.endswith("{")
-    if opens:
-        rest = rest[:-1].strip()
-    stereotype = ""
-    stereo = re.search(r"<<\s*(?:\(\s*[^)]*\)\s*)?([^>]*?)\s*>>", rest)
-    if stereo:
-        stereotype = clean_label(stereo.group(1))
-        rest = (rest[: stereo.start()] + rest[stereo.end() :]).strip()
-    display, remainder = _quoted_or_token(rest)
-    node_id = display
-    label = display
-    as_match = re.match(r"^as\s+(\S+)\s*$", remainder, re.I)
-    if as_match:
-        node_id = as_match.group(1)
-        label = display
-    elif remainder:
-        leftover = remainder.split()
-        if leftover:
-            node_id = leftover[0]
-    return node_id, clean_label(label) or node_id, CLASSIFIER_KINDS[kind], stereotype, opens
+    kind = re.sub(r"\s+", " ", match.group(1).casefold())
+    node_id, label, stereotype, body = _parse_declaration_tail(
+        match.group(2).strip(), line_number, allow_generic=True
+    )
+    opens = body == ["{"]
+    members = body[1:] if body[:1] == ["{}"] else []
+    return node_id, label, CLASSIFIER_KINDS[kind], stereotype, opens, members
 
 
-def _parse_participant(text: str) -> tuple[str, str, str] | None:
+def _parse_participant(text: str, line_number: int = 0) -> tuple[str, str, str, str] | None:
     match = re.match(
         r"^(participant|actor|boundary|control|entity|database|collections|queue)\s+(.+)$",
         text,
@@ -591,22 +711,12 @@ def _parse_participant(text: str) -> tuple[str, str, str] | None:
     if not match:
         return None
     kind = match.group(1).casefold()
-    rest = match.group(2).strip()
-    order = re.search(r"\border\s+\d+\b", rest, re.I)
-    if order:
-        rest = (rest[: order.start()] + rest[order.end() :]).strip()
-    display, remainder = _quoted_or_token(rest)
-    node_id = display
-    label = display
-    as_match = re.match(r"^as\s+(\S+)\s*$", remainder, re.I)
-    if as_match:
-        node_id = as_match.group(1)
-        label = display
-    elif remainder and not remainder.lower().startswith("order"):
-        leftover = remainder.split()
-        if leftover and leftover[0].lower() != "order":
-            node_id = leftover[0]
-    return node_id, clean_label(label) or node_id, LIFELINE_KINDS[kind]
+    node_id, label, stereotype, body = _parse_declaration_tail(
+        match.group(2).strip(), line_number, allow_order=True
+    )
+    if body:
+        _fail(f"malformed statement at line {line_number}")
+    return node_id, label, LIFELINE_KINDS[kind], stereotype
 
 
 def _find_arrow(text: str, arrows: tuple[str, ...]) -> tuple[str, str, str] | None:
@@ -695,8 +805,59 @@ def _consume_activation_marks(text: str) -> tuple[str, str | None]:
 
 
 def _is_skin(text: str) -> bool:
-    lowered = text.casefold()
-    return any(lowered.startswith(prefix) for prefix in SKIN_PREFIXES)
+    if re.match(r"^(?:left|right|center)\s+(?:header|footer)\b", text, re.I):
+        return True
+    match = SKIN_RE.match(text)
+    if not match:
+        return False
+    # `Scale -> Client : x` or `Show <|-- Base` uses the word as a name.
+    split = _find_arrow(text, SEQ_ARROWS + CLASS_ARROWS)
+    if split:
+        left, _cardinality = _split_cardinality(split[0])
+        if left.strip().casefold() == match.group(0).casefold():
+            return False
+    return True
+
+
+class _SkinBlocks:
+    """Consume multi-line styling: `skinparam x {` ... `}` and
+    `legend` / `header` / `footer` ... `endlegend` / `endheader` / `endfooter`."""
+
+    def __init__(self) -> None:
+        self.brace_depth = 0
+        self.text_end: str | None = None
+        self.start_line = 0
+
+    @property
+    def open(self) -> bool:
+        return self.brace_depth > 0 or self.text_end is not None
+
+    def consume(self, diagram: Diagram, text: str, line_number: int) -> bool:
+        """Return True when *text* is styling that the caller must skip."""
+        if self.text_end is not None:
+            if re.match(rf"^end\s*{self.text_end}$", text, re.I):
+                self.text_end = None
+            return True
+        if self.brace_depth:
+            if text.endswith("{"):
+                self.brace_depth += 1
+            elif text == "}":
+                self.brace_depth -= 1
+            return True
+        if not _is_skin(text):
+            return False
+        diagram.discarded["skin"] += 1
+        self.start_line = line_number
+        block = TEXT_BLOCK_RE.match(text)
+        if block:
+            self.text_end = block.group(1).casefold()
+        elif text.endswith("{"):
+            self.brace_depth = 1
+        return True
+
+    def check_closed(self) -> None:
+        if self.open:
+            _fail(f"unterminated styling block at line {self.start_line}")
 
 
 def _parse_sequence(diagram: Diagram, lines: list[tuple[int, str]]) -> None:
@@ -704,7 +865,16 @@ def _parse_sequence(diagram: Diagram, lines: list[tuple[int, str]]) -> None:
     note_target: str | None = None
     note_lines: list[str] = []
     note_start = 0
-    skip_until_end = None
+    skin = _SkinBlocks()
+
+    def next_message() -> int:
+        return len(diagram.edges) + 1
+
+    def close_region(entry: dict[str, Any]) -> None:
+        region = entry["regions"][-1]
+        region["last_message"] = len(diagram.edges)
+        if region["last_message"] < region["first_message"]:
+            region["first_message"] = region["last_message"] = None
 
     def close_note() -> None:
         nonlocal note_target, note_lines
@@ -731,21 +901,16 @@ def _parse_sequence(diagram: Diagram, lines: list[tuple[int, str]]) -> None:
                 continue
             note_lines.append(text)
             continue
-        if skip_until_end is not None:
-            if lowered == "end":
-                skip_until_end = None
-            continue
-        if _is_skin(text):
-            diagram.discarded["skin"] += 1
+        if skin.consume(diagram, text, line_number):
             continue
         title = re.match(r"^title\s+(.+)$", text, re.I)
         if title:
             diagram.title = clean_label(title.group(1))
             continue
-        participant = _parse_participant(text)
+        participant = _parse_participant(text, line_number)
         if participant:
-            node_id, label, shape = participant
-            diagram.add_node(node_id, label, shape)
+            node_id, label, shape, stereotype = participant
+            diagram.add_node(node_id, label, shape, stereotype=stereotype)
             if node_id != label:
                 diagram.alias(label, node_id)
             continue
@@ -757,18 +922,29 @@ def _parse_sequence(diagram: Diagram, lines: list[tuple[int, str]]) -> None:
                     "label": clean_label(divider.group(1)),
                     "line": line_number,
                     "depth": len(fragment_stack),
+                    "after_message": len(diagram.edges),
                     "regions": [],
                 }
             )
             continue
         fragment = re.match(r"^(alt|opt|loop)\b\s*(.*)$", text, re.I)
         if fragment:
+            label = clean_label(fragment.group(2))
             entry = {
                 "kind": fragment.group(1).casefold(),
-                "label": clean_label(fragment.group(2)),
+                "label": label,
                 "line": line_number,
                 "depth": len(fragment_stack),
-                "regions": [],
+                "first_message": next_message(),
+                "last_message": None,
+                "regions": [
+                    {
+                        "label": label,
+                        "line": line_number,
+                        "first_message": next_message(),
+                        "last_message": None,
+                    }
+                ],
             }
             diagram.fragments.append(entry)
             fragment_stack.append(entry)
@@ -777,11 +953,24 @@ def _parse_sequence(diagram: Diagram, lines: list[tuple[int, str]]) -> None:
         if region:
             if not fragment_stack:
                 _fail(f"malformed statement at line {line_number}")
-            fragment_stack[-1]["regions"].append(clean_label(region.group(1)))
+            close_region(fragment_stack[-1])
+            fragment_stack[-1]["regions"].append(
+                {
+                    "label": clean_label(region.group(1)),
+                    "line": line_number,
+                    "first_message": next_message(),
+                    "last_message": None,
+                }
+            )
             continue
         if lowered == "end":
             if fragment_stack:
-                fragment_stack.pop()
+                entry = fragment_stack.pop()
+                close_region(entry)
+                entry["last_message"] = len(diagram.edges)
+                entry["end_line"] = line_number
+                if entry["last_message"] < entry["first_message"]:
+                    entry["first_message"] = entry["last_message"] = None
                 continue
             _fail(f"malformed statement at line {line_number}")
         first = lowered.split(maxsplit=1)[0]
@@ -855,39 +1044,42 @@ def _parse_sequence(diagram: Diagram, lines: list[tuple[int, str]]) -> None:
         _fail(f"malformed statement at line {line_number}")
     if note_target is not None or note_lines:
         _fail(f"unterminated note at line {note_start}")
+    skin.check_closed()
     if fragment_stack:
         _fail(f"unterminated fragment at line {fragment_stack[-1]['line']}")
 
 
 def _parse_class(diagram: Diagram, lines: list[tuple[int, str]]) -> None:
     current: Node | None = None
+    current_line = 0
     packages: list[str] = []
-    in_skin_block = False
+    package_lines: list[int] = []
+    skin = _SkinBlocks()
     for line_number, raw in lines:
         text = raw.strip()
         if not text:
             continue
         if len(text) > MAX_STATEMENT_CHARS:
             _statement_too_long(line_number)
-        if in_skin_block:
+        if current is not None:
+            # Everything inside a class body is a member until its `}`.
             if text == "}":
-                in_skin_block = False
+                current = None
+                continue
+            if text in {"--", "..", "==", "__"}:
+                continue
+            current.fields.append(clean_label(text))
             continue
-        if _is_skin(text):
-            diagram.discarded["skin"] += 1
-            if text.endswith("{"):
-                in_skin_block = True
+        if skin.consume(diagram, text, line_number):
             continue
         title = re.match(r"^title\s+(.+)$", text, re.I)
         if title:
             diagram.title = clean_label(title.group(1))
             continue
         if text == "}":
-            if current is not None:
-                current = None
-                continue
             if packages:
                 packages.pop()
+                package_lines.pop()
                 continue
             _fail(f"malformed statement at line {line_number}")
         package = re.match(r"^(package|namespace|together)\b\s*(.*)$", text, re.I)
@@ -897,27 +1089,30 @@ def _parse_class(diagram: Diagram, lines: list[tuple[int, str]]) -> None:
             if opens:
                 rest = rest[:-1].strip()
             display, remainder = _quoted_or_token(rest or package.group(1))
-            node_id = display or f"group{len(packages) + 1}"
+            name = display or f"group{len(packages) + 1}"
             if remainder.lower().startswith("as "):
-                node_id = remainder.split(None, 1)[1].strip() or node_id
+                name = remainder.split(None, 1)[1].strip() or name
             parent = packages[-1] if packages else None
-            diagram.add_node(node_id, clean_label(display) or node_id, "container", parent, True)
+            node_id = f"{parent}.{name}" if parent else name
+            diagram.add_node(node_id, clean_label(display) or name, "container", parent, True)
             if opens:
                 packages.append(node_id)
+                package_lines.append(line_number)
             continue
-        header = _parse_classifier_header(text)
+        header = _parse_classifier_header(text, line_number)
         if header:
-            node_id, label, shape, stereotype, opens = header
+            name, label, shape, stereotype, opens, members = header
             parent = packages[-1] if packages else None
+            node_id = f"{parent}.{name}" if parent and "." not in name else name
             node = diagram.add_node(node_id, label, shape, parent, stereotype=stereotype)
-            if node_id != label:
+            node.fields.extend(clean_label(member) for member in members)
+            if node_id != name:
+                diagram.bare_name(name, node_id)
+            if label not in (name, node_id):
                 diagram.alias(label, node_id)
-            current = node if opens else None
-            continue
-        if current is not None:
-            if text in {"--", "..", "==", "__"}:
-                continue
-            current.fields.append(clean_label(text))
+            if opens:
+                current = node
+                current_line = line_number
             continue
         note = re.match(
             r"^note\s+(?:left|right|top|bottom)(?:\s+of)?\s+([^:]+?)(?:\s*:\s*(.*))?$",
@@ -929,7 +1124,7 @@ def _parse_class(diagram: Diagram, lines: list[tuple[int, str]]) -> None:
             body = note.group(2)
             if body is None:
                 _fail(f"malformed statement at line {line_number}")
-            target = diagram.resolve(target_token)
+            target = diagram.resolve(target_token, packages)
             if target not in diagram.node_map:
                 diagram.add_node(target, target_token, "class")
             cleaned = clean_label(body)
@@ -950,8 +1145,8 @@ def _parse_class(diagram: Diagram, lines: list[tuple[int, str]]) -> None:
             if reverse:
                 source_name, target_name = target_name, source_name
                 left_card, right_card = right_card, left_card
-            source = diagram.resolve(source_name)
-            target = diagram.resolve(target_name)
+            source = diagram.resolve(source_name, packages)
+            target = diagram.resolve(target_name, packages)
             if source not in diagram.node_map:
                 diagram.add_node(source, source_name, "class")
             if target not in diagram.node_map:
@@ -976,6 +1171,11 @@ def _parse_class(diagram: Diagram, lines: list[tuple[int, str]]) -> None:
         if first in UNSUPPORTED_CLASS:
             _fail(f"unsupported class construct: {first}")
         _fail(f"malformed statement at line {line_number}")
+    if current is not None:
+        _fail(f"unterminated class body at line {current_line}")
+    if packages:
+        _fail(f"unterminated package at line {package_lines[-1]}")
+    skin.check_closed()
 
 
 def parse_block(block: SourceBlock) -> Diagram:
@@ -1108,6 +1308,30 @@ def _escape_table(text: str) -> str:
     return _escape_markdown(text.replace("\n", " ⏎ "))
 
 
+def _message_span(first: int | None, last: int | None) -> str:
+    if first is None or last is None:
+        return "no messages"
+    return f"msg {first}" if first == last else f"msgs {first}-{last}"
+
+
+def _fragment_summary(item: dict[str, Any]) -> str:
+    label = _escape_markdown(item["label"] or "unlabeled")
+    if item["kind"] == "divider":
+        return f"divider({label}) after msg {item['after_message']}"
+    indent = f"depth {item['depth']}, " if item["depth"] else ""
+    regions = item["regions"]
+    parts = [
+        f"{item['kind']}({label}) {indent}"
+        f"{_message_span(regions[0]['first_message'], regions[0]['last_message'])}"
+    ]
+    for region in regions[1:]:
+        parts.append(
+            f"else({_escape_markdown(region['label'] or 'unlabeled')}) "
+            f"{_message_span(region['first_message'], region['last_message'])}"
+        )
+    return "; ".join(parts)
+
+
 def _block_summary(block: SourceBlock, selected: list[Diagram]) -> str:
     """One header entry. A block that was not selected is parsed only to
     describe it, so a failure there is listed instead of ending the run."""
@@ -1159,17 +1383,23 @@ def digest(
                 parts.append(f"{diagram.discarded['includes']} includes")
             output.append(f"- discarded: {', '.join(parts)}")
         if diagram.fragments:
-            fragments = ", ".join(
-                f"{item['kind']}({_escape_markdown(item['label'] or 'unlabeled')})"
-                for item in diagram.fragments
+            output.append(
+                "- fragments (message numbers are the edge `#` column):"
             )
-            output.append(f"- fragments: {fragments}")
+            for item in diagram.fragments:
+                output.append(f"  - {_fragment_summary(item)}")
         if diagram.activations:
             output.append(
-                "- activations: "
+                "- activations (after message #): "
                 + ", ".join(
                     f"{_escape_markdown(item['participant'])}:{item['action']}"
-                    for item in diagram.activations[:12]
+                    f"@{item['after_message']}"
+                    for item in diagram.activations[:max_rows]
+                )
+                + (
+                    f", +{len(diagram.activations) - max_rows} more (use --json)"
+                    if len(diagram.activations) > max_rows
+                    else ""
                 )
             )
         if diagram.notes:
@@ -1209,19 +1439,21 @@ def digest(
                 "",
                 "### Nodes",
                 "",
-                "| id | label | shape | depth | parent | deg | fields |",
-                "|---|---|---|---|---|---|---|",
+                "| id | label | shape | stereotype | depth | parent | deg | fields |",
+                "|---|---|---|---|---|---|---|---|",
             ]
         )
         for node in diagram.nodes[:max_rows]:
             output.append(
                 f"| {_escape_table(node.id)} | {_escape_table(node.label)} | {node.shape} | "
-                f"{node.depth} | {node.parent or '-'} | {node.in_degree}/{node.out_degree} | "
+                f"{_escape_table(node.stereotype) or '-'} | "
+                f"{node.depth} | {_escape_table(node.parent) if node.parent else '-'} | "
+                f"{node.in_degree}/{node.out_degree} | "
                 f"{_escape_table('; '.join(node.fields)) or '-'} |"
             )
         if len(diagram.nodes) > max_rows:
             output.append(
-                f"| … | +{len(diagram.nodes) - max_rows} more (use --json) | | | | | |"
+                f"| … | +{len(diagram.nodes) - max_rows} more (use --json) | | | | | | |"
             )
 
         output.extend(
@@ -1229,8 +1461,8 @@ def digest(
                 "",
                 "### Edges",
                 "",
-                "| source | target | label | style |",
-                "|---|---|---|---|",
+                "| # | source | target | label | style |",
+                "|---|---|---|---|---|",
             ]
         )
         names = {node.id: node.label.split("\n")[0] for node in diagram.nodes}
@@ -1243,13 +1475,13 @@ def digest(
             if edge.cardinality:
                 marks.append(edge.cardinality)
             output.append(
-                f"| {_escape_table(names.get(edge.source, edge.source))} | "
+                f"| {edge.order} | {_escape_table(names.get(edge.source, edge.source))} | "
                 f"{_escape_table(names.get(edge.target, edge.target))} | "
                 f"{_escape_table(edge.label) or '-'} | {' '.join(marks)} |"
             )
         if len(diagram.edges) > max_rows:
             output.append(
-                f"| … | +{len(diagram.edges) - max_rows} more (use --json) | | |"
+                f"| … | +{len(diagram.edges) - max_rows} more (use --json) | | | |"
             )
     output.append("")
     return "\n".join(output)
