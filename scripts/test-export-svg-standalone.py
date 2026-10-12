@@ -93,6 +93,21 @@ class ExportSvgStandaloneTests(unittest.TestCase):
         result = self.mod.namespace_defs_ids(escaped, "diagram")
         self.assertIn(r'#diagram-paint\.v1 stop', result)
 
+    def test_defs_selectors_decode_xml_and_preserve_escaped_braces(self) -> None:
+        for ident, selector, expected_id, expected_selector in (
+            ("p&#46;v", r"#p\.v", "diagram-p.v", r"#diagram-p\.v"),
+            ("paint{v", r"#paint\{v", "diagram-paint{v", r"#diagram-paint\{v"),
+            ("A&amp;B", r"#A\&amp;B", "diagram-A&B", r"#diagram-A\&B"),
+        ):
+            with self.subTest(ident=ident):
+                html = '<svg viewBox="0 0 10 10"><defs><linearGradient id="' + ident + '"/></defs>'
+                html += '<style>' + selector + ' stop { stop-color:#fff; }</style></svg>'
+                root = ET.fromstring(self.mod.export_svg_document(html, Path("diagram.html")))
+                gradient = next(element for element in root.iter() if element.tag.endswith("}linearGradient"))
+                self.assertEqual(gradient.get("id"), expected_id)
+                css = "".join(element.text or "" for element in root.iter() if element.tag.endswith("}style"))
+                self.assertIn(expected_selector + " stop { stop-color:#fff; }", css)
+
     def test_helper_and_docs_exist(self) -> None:
         self.assertTrue(HELPER.is_file())
         self.assertTrue(EXPORT_MD.is_file())
