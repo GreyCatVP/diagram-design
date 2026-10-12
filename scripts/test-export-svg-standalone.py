@@ -322,6 +322,12 @@ class ExportSvgStandaloneTests(unittest.TestCase):
         self.assertEqual(root.find("defs/marker").get("id"), "diagram-paint")
         self.assertEqual(root.find("use").get("href"), "#diagram-paint")
 
+    def test_template_commented_defs_keep_namespace(self) -> None:
+        source = ASSETS / "template.html"
+        exported = self.mod.export_svg_document(source.read_text(encoding="utf-8"), source)
+        self.assertIn('id="template-dots"', exported)
+        self.assertIn('url(#template-dots)', exported)
+
     def test_helper_and_docs_exist(self) -> None:
         self.assertTrue(HELPER.is_file())
         self.assertTrue(EXPORT_MD.is_file())
