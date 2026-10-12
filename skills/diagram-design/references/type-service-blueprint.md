@@ -30,7 +30,7 @@
 - **Hairlines:** 8px band including stroke. Interaction and internal-interaction are 1px `rule` (`data-role="interaction"` / `data-role="internal-interaction"`). Visibility is 2px `ink` at 0.55 opacity (`data-role="visibility"`), which must clear 3:1 on paper — 0.45 fails that bar on light paper, so do not go thinner.
 - **Cells:** one action per stage per layer. Geist 12px, one line, centered on the column. A second muted mono line is allowed for a system or wait (`dunning-job · 4h`). Empty required cells are allowed only with an explicit `—` or `Not applicable` as `data-name` and as the printed text.
 - **Fills:** customer and frontstage are paper/white with `ink` stroke. Backstage and support take a light `ink` tint so the below-the-line band reads as hidden work, not another onstage row.
-- **Focal cell (≤1, optional):** the failure, wait, or handoff the figure exists to show — usually on or below the visibility line. Accent fill `rgba(235,108,54,0.12)` (dark: `rgba(240,138,89,0.18)`), accent stroke, `data-focal="true"`.
+- **Focal cell (≤1, optional):** the failure, wait, or handoff the figure exists to show — usually on or below the visibility line. Accent fill `rgba(191,69,32,0.12)` (dark: `rgba(240,138,89,0.18)`), accent stroke, `data-focal="true"`.
 - **Legend:** horizontal strip after a hairline rule, three keys in this order — visibility line, backstage layer, focal cell.
 
 ### Machine-readable data contract
@@ -67,10 +67,10 @@ No `transform`, geometry `style`, or `<style>` rules that move marks.
       data-role="visibility"/>
 
 <g data-layer="backstage">
-  <rect x="544" y="272" width="208" height="64" rx="4" fill="rgba(235,108,54,0.12)"
-        stroke="#eb6c36" stroke-width="1" data-stage="hit-limit"
+  <rect x="544" y="272" width="208" height="64" rx="4" fill="rgba(191,69,32,0.12)"
+        stroke="#bf4520" stroke-width="1" data-stage="hit-limit"
         data-name="dunning-job timeout" data-focal="true"/>
-  <text x="648" y="300" fill="#eb6c36" font-size="12" font-weight="600"
+  <text x="648" y="300" fill="#bf4520" font-size="12" font-weight="600"
         font-family="'Geist', sans-serif" text-anchor="middle">dunning-job timeout</text>
   <text x="648" y="318" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace"
         text-anchor="middle">dunning-job · 4h</text>
