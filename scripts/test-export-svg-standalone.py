@@ -214,7 +214,7 @@ class ExportSvgStandaloneTests(unittest.TestCase):
         match = re.search(r"```python\n(.*?)\n   ```", section, re.DOTALL)
         self.assertIsNotNone(match)
         recipe = "\n".join(line[3:] if line.startswith("   ") else line for line in match.group(1).splitlines())
-        for svg in ('<svg><rect fill="rgba(300,-10,20,2)"/></svg>', '<svg><rect stroke="rgba(-4,1,2,-.5)"/></svg>', '<svg><style>.paint{fill:#000}</style><g fill="rgba(255,0,0,0.5)"><rect/></g></svg>', '<svg><style>.paint{fill:#000}</style><g fill="rgba(255,0,0,0.5)"><rect class="paint"/></g></svg>', '<svg><rect fill="rgba(255,0,0,0.5)" fill-opacity="0.5"/></svg>'):
+        for svg in ('<svg><rect fill="rgba(255,0,0,0.5)" fill-opacity="0.5" style="fill:#0000ff"/></svg>', '<svg><rect stroke="rgba(255,0,0,0.5)" stroke-opacity="0.5" style="stroke:#0000ff"/></svg>', '<svg><rect fill="rgba(300,-10,20,2)"/></svg>', '<svg><rect stroke="rgba(-4,1,2,-.5)"/></svg>', '<svg><style>.paint{fill:#000}</style><g fill="rgba(255,0,0,0.5)"><rect/></g></svg>', '<svg><style>.paint{fill:#000}</style><g fill="rgba(255,0,0,0.5)"><rect class="paint"/></g></svg>', '<svg><rect fill="rgba(255,0,0,0.5)" fill-opacity="0.5"/></svg>'):
             with self.subTest(svg=svg):
                 namespace = {"svg": svg}
                 exec(recipe, namespace)
@@ -525,6 +525,18 @@ class ExportSvgStandaloneTests(unittest.TestCase):
             self.assertEqual(group.get(prop), "rgba(255,0,0,0.5)")
             self.assertEqual(group.get(f"{prop}-opacity"), "0.5")
             self.assertEqual(group[0].get(prop), "#0000ff")
+
+    def test_rgba_keeps_opacity_when_own_inline_paint_overrides_color(self) -> None:
+        for prop in ("fill", "stroke"):
+            for declaration in (f"{prop}:#0000ff", f"{prop.upper()}:#0000ff", f"/* inline */ {prop}:#0000ff"):
+                with self.subTest(paint=prop, declaration=declaration):
+                    html = (f'<svg viewBox="0 0 10 10"><rect {prop}="rgba(255,0,0,0.5)" '
+                            f'{prop}-opacity="0.5" style="{declaration}"/></svg>')
+                    root = ET.fromstring(self.mod.export_svg_document(html, Path("inline.html")))
+                    rect = root.find("{http://www.w3.org/2000/svg}rect")
+                    self.assertEqual(rect.get(f"{prop}-opacity"), "0.5")
+                    self.assertEqual(rect.get(prop), "rgba(255,0,0,0.5)")
+                    self.assertEqual(rect.get("style"), declaration)
 
     def test_rgba_css_guard_reads_entities_and_escaped_property_names(self) -> None:
         for prop in ("fill", "stroke"):

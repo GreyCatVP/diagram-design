@@ -227,6 +227,10 @@ Source read and output write failures return exit 2 with an error diagnostic. Th
                # Converting a parent is safe when descendants inherit its paint.
                # Preserve alpha if a descendant overrides that paint, including
                # a conservatively detected stylesheet or inline declaration.
+               inline_paint = re.search(
+                   rf"(?:^|[;{{])\s*{prop}\s*:",
+                   _decoded_css_property_text(element.get("style", "")), re.I,
+               )
                descendant_paint = any(
                    prop in child.attrib
                    or re.search(rf"(?:^|[;{{])\s*{prop}\s*:",
@@ -239,7 +243,7 @@ Source read and output write failures return exit 2 with an error diagnostic. Th
                    for style in STYLE_BLOCK_RE.findall(svg)
                    for rule in RULE_RE.finditer(CSS_COMMENT_RE.sub("", style))
                )
-               if descendant_paint or stylesheet_paint or opacity_name in css_opacity or opacity_counts[opacity_name] > int(opacity_name in values):
+               if inline_paint or descendant_paint or stylesheet_paint or opacity_name in css_opacity or opacity_counts[opacity_name] > int(opacity_name in values):
                    continue
                opacity = alpha if 0 <= float(alpha) <= 1 else "0" if float(alpha) < 0 else "1"
                if opacity_name in values:
