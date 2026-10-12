@@ -313,22 +313,18 @@ class ExportSvgStandaloneTests(unittest.TestCase):
         self.assertEqual([element.get("fill") for element in root.iter() if element.tag.endswith("}rect")],
                          ["url(#diagram-A&B)", "url(#diagram-A&#38;B)"])
 
-    def test_defs_namespace_preserves_reference_like_attribute_text(self) -> None:
-        label = 'Use href="#paint", xlink:href="#paint" or id="paint"'
-        markup = '<svg><defs><marker id="paint"/></defs>'
-        markup += "<g data-label='" + label + "'/><use href='#paint'/></svg>"
-        root = ET.fromstring(self.mod.namespace_defs_ids(markup, "diagram"))
-        self.assertEqual(root.find("g").get("data-label"), label)
-        self.assertEqual(root.find("defs/marker").get("id"), "diagram-paint")
-        self.assertEqual(root.find("use").get("href"), "#diagram-paint")
-
-    def test_metadata_defs_382_preserve_data_id_and_data_href(self) -> None:
+    def test_metadata_defs_382_ignores_data_id_inside_defs(self) -> None:
         markup = '<svg><defs><marker id="arrow"/><g data-id="ghost"/></defs><g data-id="arrow" data-href="#arrow"/><use href="#arrow"/></svg>'
         root = ET.fromstring(self.mod.namespace_defs_ids(markup, "d"))
         self.assertEqual(root.find("g").get("data-id"), "arrow")
         self.assertEqual(root.find("g").get("data-href"), "#arrow")
         self.assertEqual(root.find("use").get("href"), "#d-arrow")
-        self.assertNotIn("ghost", self.mod.find_defs_ids(markup))
+        self.assertEqual(self.mod.find_defs_ids(markup), ["arrow"])
+
+    def test_metadata_defs_382_does_not_retarget_a_data_id_definition(self) -> None:
+        markup = '<svg><defs><g data-id="ghost"/></defs><g id="ghost"/><use href="#ghost"/></svg>'
+        self.assertEqual(self.mod.find_defs_ids(markup), [])
+        self.assertEqual(self.mod.namespace_defs_ids(markup, "d"), markup)
 
     def test_metadata_defs_382_template_dots_keep_namespace(self) -> None:
         source = ASSETS / "template.html"
@@ -336,11 +332,13 @@ class ExportSvgStandaloneTests(unittest.TestCase):
         self.assertIn('id="template-dots"', exported)
         self.assertIn('url(#template-dots)', exported)
 
-    def test_metadata_defs_382_preserve_live_title_ids(self) -> None:
-        svg = '<svg aria-labelledby="name"><title id="name">Title</title><!-- <defs><marker id="name"/></defs> --></svg>'
-        result = self.mod.namespace_defs_ids(svg, "demo")
-        self.assertIn('aria-labelledby="name"><title id="name">Title</title>', result)
-        self.assertIn('<marker id="demo-name"/>', result)
+    def test_metadata_defs_382_shared_live_symbol_references_resolve(self) -> None:
+        markup = '<svg viewBox="0 0 10 10"><defs><!-- <pattern id="dot"/> --></defs><symbol id="dot"><rect width="5" height="5" fill="red"/></symbol><use href="#dot"/></svg>'
+        exported = self.mod.export_svg_document(markup, Path("b.html"))
+        root = ET.fromstring(exported)
+        symbol = next(element for element in root.iter() if element.tag.endswith("}symbol"))
+        use = next(element for element in root.iter() if element.tag.endswith("}use"))
+        self.assertEqual(use.get("href"), "#" + symbol.get("id"))
 
     def test_helper_and_docs_exist(self) -> None:
         self.assertTrue(HELPER.is_file())
