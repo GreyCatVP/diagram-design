@@ -723,6 +723,27 @@ def check_mobile_example() -> None:
     ok("worked example is contained and locally scrollable at 390px")
 
 
+def check_json_nesting_diagnostic(tmp: Path) -> None:
+    source = tmp / "deeply-nested.excalidraw"
+    # Stay well below the byte cap while exceeding CPython's JSON stack limit.
+    source.write_text(
+        '{"type":"excalidraw","elements":[],"appState":'
+        + "[" * 20000 + "0" + "]" * 20000 + "}",
+        encoding="utf-8",
+    )
+    for flags in ([], ["--json"]):
+        process = invoke([str(source), *flags])
+        if process.returncode != 2 or "nesting exceeds the parser limit" not in process.stderr:
+            fail(f"deeply nested JSON did not produce exit 2: {process.stderr!r}")
+        if "Traceback" in process.stderr or process.stdout:
+            fail("deeply nested JSON leaked a traceback or partial digest")
+    source.write_text(scene("shallow-control", []), encoding="utf-8")
+    payload = json.loads(run_extract([str(source), "--json"]))
+    if payload["scene"]["nodes"] or payload["scene"]["edges"]:
+        fail("shallow JSON control unexpectedly changed the empty scene")
+    ok("deeply nested JSON fails cleanly; shallow JSON still imports")
+
+
 def check_unimported_container_text(tmp: Path) -> None:
     source = tmp / "unsupported-container.excalidraw"
     source.write_text(json.dumps({"type": "excalidraw", "elements": [
@@ -740,6 +761,7 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="diagram-design-excalidraw-") as directory:
         tmp = Path(directory)
         check_files()
+        check_json_nesting_diagnostic(tmp)
         check_unimported_container_text(tmp)
         check_whiteboard()
         check_bindings_and_shapes(tmp)
