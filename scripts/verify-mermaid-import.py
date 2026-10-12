@@ -202,6 +202,32 @@ def check_flowchart() -> None:
     ok("flowchart parses: shapes, subgraphs, labels, cycle, budgets, tables")
 
 
+def check_entity_label_codes(tmp: Path) -> None:
+    source = tmp / "entity-labels.mmd"
+    source.write_text(
+        'flowchart LR\n'
+        'A["#35; #9829; #copy;"] -->|"#35; #9829; #copy;"| B["&#35; &#9829; &copy;"]\n'
+        'C["#amp;copy; &amp;copy; #35;copy; #unknown; #0; #1114112;"]\n'
+        'D["Use #42;value#42; &ast;html&ast; #60;br#62;"] -->|"#42;edge#42;"| E["*markup*"]\n',
+        encoding="utf-8",
+    )
+    diagram = json.loads(run_extract([str(source), "--json"]))["diagrams"][0]
+    nodes = {node["id"]: node for node in diagram["nodes"]}
+    for node_id in ("A", "B"):
+        if nodes[node_id]["label"] != "# ♥ ©":
+            fail(f"entity codes lost in node {node_id}: {nodes[node_id]['label']!r}")
+    if diagram["edges"][0]["label"] != "# ♥ ©":
+        fail("Mermaid numeric/named entity codes lost in an edge label")
+    expected = "&copy; &copy; #copy; #unknown; #0; #1114112;"
+    if nodes["C"]["label"] != expected:
+        fail(f"entity labels were decoded twice or unknown codes changed: {nodes['C']['label']!r}")
+    if nodes["D"]["label"] != "Use *value* *html* <br>":
+        fail("encoded label characters were interpreted as Markdown or HTML markup")
+    if nodes["E"]["label"] != "markup" or diagram["edges"][1]["label"] != "*edge*":
+        fail("literal entity characters and actual label markup were confused")
+    ok("Mermaid decimal/named entity labels decode once in nodes and edges")
+
+
 def check_shape_and_edge_vocabulary(tmp: Path) -> None:
     extractor = load_extractor_module()
     expected_shapes = {
@@ -668,6 +694,64 @@ CUSTOMER ||--o{ ORDER : places
     ok("Markdown selection plus sequence, state, and ER grammars parse")
 
 
+def check_state_descriptions(tmp: Path) -> None:
+    cases = (
+        ("idle : Waiting for message\nidle : Retrying previous request\n[*] --> idle\n", "Waiting for message\nRetrying previous request"),
+        ("[*] --> idle\nidle : Waiting for message\n", "Waiting for message"),
+        ("idle : idle\nidle : Next step\nidle --> [*]\n", "idle\nNext step"),
+        ('state "Idle display" as idle\nidle : Waiting for message\nidle --> [*]\n', "Idle display\nWaiting for message"),
+        ('idle : Waiting for message\nstate "Latest display" as idle\nidle --> [*]\n', "Latest display"),
+        ('idle : First\nidle : Second\nstate "idle" as idle\nidle --> [*]\n', "First\nSecond"),
+        ('idle : First\nidle : Second\nstate "" as idle\nidle --> [*]\n', "First\nSecond"),
+        ('idle : <br/>\nidle --> [*]\n', "idle"),
+        ('idle : First\nstate "Latest" as idle\nidle : Last\nidle --> [*]\n', "Latest\nLast"),
+        ('idle : First\nstate "idle" as idle\nidle : Last\nidle --> [*]\n', "First\nLast"),
+    )
+    for index, (body, label) in enumerate(cases):
+        path = tmp / f"state-descriptions-{index}.mmd"
+        path.write_text("stateDiagram-v2\n" + body, encoding="utf-8")
+        diagram = json.loads(run_extract([str(path), "--json"]))["diagrams"][0]
+        node = next(node for node in diagram["nodes"] if node["id"] == "idle")
+        if node["label"] != label:
+            fail(f"state descriptions lost source-ordered text: {node['label']!r}")
+        if len(diagram["edges"]) != 1:
+            fail("state descriptions changed transition extraction")
+    # Exercise a large valid one-node import without copying its growing label
+    # for every line. The native benchmark is recorded separately; avoid a
+    # wall-clock assertion whose result would depend on CI host contention.
+    count = 4000
+    path = tmp / "state-descriptions-large.mmd"
+    lines = [f"description {index}" for index in range(count)]
+    path.write_text("stateDiagram-v2\n" + "".join(f"idle : {line}\n" for line in lines) + "idle --> [*]\n", encoding="utf-8")
+    diagram = json.loads(run_extract([str(path), "--json"]))["diagrams"][0]
+    node = next(node for node in diagram["nodes"] if node["id"] == "idle")
+    if node["label"] != "\n".join(lines) or len(diagram["edges"]) != 1:
+        fail("large repeated descriptions lost text or transitions")
+    ok("multiple state descriptions retain source order and ordinary transitions")
+
+
+def check_named_composite_states(tmp: Path) -> None:
+    for declaration, expected in (("state \"Processing request\" as processing {", "Processing request"), ("state processing {", "processing")):
+        path = tmp / "named-composite.mmd"
+        path.write_text("stateDiagram-v2\n" + declaration + "\n[*] --> queued\nqueued --> done\n}\nprocessing --> [*]\n", encoding="utf-8")
+        diagram = json.loads(run_extract([str(path), "--json"]))["diagrams"][0]
+        nodes = {node["id"]: node for node in diagram["nodes"]}
+        parent = nodes.get("processing")
+        if parent is None or parent["label"] != expected or not parent["container"]:
+            fail("named composite state lost its ID, label or container")
+        for child in ("queued", "done"):
+            if (nodes[child]["parent"], nodes[child]["depth"]) != ("processing", 1):
+                fail("named composite state lost child membership")
+        if diagram["analysis"]["containers"] != 1 or len(diagram["edges"]) != 3:
+            fail("named composite state changed transitions or container counts")
+    path.write_text('stateDiagram-v2\nstate "Waiting for work" as Waiting\nWaiting --> [*]\n', encoding="utf-8")
+    diagram = json.loads(run_extract([str(path), "--json"]))["diagrams"][0]
+    node = next(node for node in diagram["nodes"] if node["id"] == "Waiting")
+    if node["label"] != "Waiting for work" or node["container"]:
+        fail("ordinary quoted state alias changed")
+    ok("named composite states retain aliases, child membership and transitions")
+
+
 def check_selection_before_parse(tmp: Path) -> None:
     """A malformed block fails only when it is selected (#209)."""
     bad_first = tmp / "bad-first-block.md"
@@ -1031,14 +1115,111 @@ def check_docs_and_wiring() -> None:
     ok("reference, SKILL.md, command, prompt, and example stay in sync")
 
 
+def check_bidirectional_analysis(tmp: Path) -> None:
+    source = tmp / "bidirectional.mmd"
+    source.write_text("flowchart LR\nA <--> B\n", encoding="utf-8")
+    diagram = json.loads(run_extract([str(source), "--json"]))["diagrams"][0]
+    analysis = diagram["analysis"]
+    if not analysis["has_cycle"]:
+        fail("bidirectional links must contribute their reverse edge to cycle analysis")
+    for node in diagram["nodes"]:
+        if (node["in_degree"], node["out_degree"]) != (1, 1):
+            fail("bidirectional links must contribute both inbound and outbound degrees")
+    if analysis["entry_points"] or analysis["terminals"]:
+        fail("a bidirectional pair has no one-way entry point or terminal")
+    ok("bidirectional flowchart analysis preserves both directions")
+
+
+def check_node_shape_updates(tmp: Path) -> None:
+    flow = tmp / "shape-updates.mmd"
+    flow.write_text("flowchart LR\nA{Decision}\nA[Work]\nA --> B\n", encoding="utf-8")
+    diagram = json.loads(run_extract([str(flow), "--json"]))["diagrams"][0]
+    node = next(node for node in diagram["nodes"] if node["id"] == "A")
+    if node["shape"] != "rect" or node["label"] != "Work":
+        fail("an explicit rectangle declaration must replace the earlier diamond")
+    flow.write_text(
+        'flowchart LR\nA{Decision}\nA@{ label: "Updated" }\n'
+        'B@{ label: "New" }\nC{Keep}\nC@{ shape: rect, label: "Reset" }\n',
+        encoding="utf-8",
+    )
+    diagram = json.loads(run_extract([str(flow), "--json"]))["diagrams"][0]
+    nodes = {node["id"]: (node["shape"], node["label"]) for node in diagram["nodes"]}
+    if nodes != {"A": ("rhombus", "Updated"), "B": ("rect", "New"), "C": ("rect", "Reset")}:
+        fail("label-only expanded attributes must retain existing shapes and default new nodes")
+    state = tmp / "fork-reference.mmd"
+    state.write_text("stateDiagram-v2\nstate Fork <<fork>>\nFork --> Done\n", encoding="utf-8")
+    diagram = json.loads(run_extract([str(state), "--json"]))["diagrams"][0]
+    node = next(node for node in diagram["nodes"] if node["id"] == "Fork")
+    if node["shape"] != "fork":
+        fail("a bare transition endpoint must preserve the declared fork shape")
+    ok("node declarations update shapes while bare references preserve them")
+
+
+def check_unicode_state_regression(tmp: Path) -> None:
+    path = tmp / "unicode-state.mmd"
+    path.write_text('stateDiagram-v2\n待机 : 等待输入\n待机 --> 完成\n', encoding="utf-8")
+    payload = json.loads(run_extract([str(path), "--json"]))["diagrams"][0]
+    nodes = {node["id"]: node for node in payload["nodes"]}
+    if nodes["待机"]["label"] != "等待输入":
+        fail("Unicode state description was discarded")
+    ok("Unicode state identifiers keep their colon-form descriptions")
+
+
+def check_unicode_er_regression(tmp: Path) -> None:
+    path = tmp / "unicode-er.mmd"
+    path.write_text('erDiagram\n订单 {\n string 编号\n}\n客户 ||--o{ 订单 : 下单\n', encoding="utf-8")
+    payload = json.loads(run_extract([str(path), "--json"]))["diagrams"][0]
+    nodes = {node["id"]: node for node in payload["nodes"]}
+    if (
+        set(nodes) != {"订单", "客户"}
+        or nodes["订单"]["fields"] != ["string 编号"]
+        or len(payload["edges"]) != 1
+        or payload["edges"][0]["source"] != "客户"
+        or payload["edges"][0]["target"] != "订单"
+        or payload["edges"][0]["label"] != "|| -- o{ · 下单"
+    ):
+        fail("ER Unicode identifiers or their attributes/relationships were lost")
+    path.write_text("erDiagram\n1客户 ||--o{ 订单 : 下单\n", encoding="utf-8")
+    expect_error([str(path)], "malformed edge at line 2")
+    # Non-decimal numerals are \w but not \d, so a regex alone lets them lead.
+    path.write_text("erDiagram\n²客户 ||--o{ 订单 : 下单\n", encoding="utf-8")
+    expect_error([str(path)], "malformed edge at line 2")
+    path.write_text("erDiagram\n½订单\n²表 {\n string 编号\n}\nCUSTOMER ||--o{ ORDER : places\n", encoding="utf-8")
+    payload = json.loads(run_extract([str(path), "--json"]))["diagrams"][0]
+    if {node["id"] for node in payload["nodes"]} != {"CUSTOMER", "ORDER"}:
+        fail("ER identifiers led by a non-decimal numeral were accepted")
+    ok("Unicode ER entity blocks and relationships keep identifiers, fields and endpoints")
+
+
+def check_standalone_er_regression(tmp: Path) -> None:
+    path = tmp / "standalone-er.mmd"
+    path.write_text('erDiagram\nINDEPENDENT\n客户\nÉquipe\n_独立\nCUSTOMER ||--o{ ORDER : places\n', encoding="utf-8")
+    payload = json.loads(run_extract([str(path), "--json"]))["diagrams"][0]
+    nodes = {node["id"]: node for node in payload["nodes"]}
+    if set(nodes) != {"INDEPENDENT", "客户", "Équipe", "_独立", "CUSTOMER", "ORDER"} or any(
+        nodes[name]["shape"] != "table" for name in ("INDEPENDENT", "客户", "Équipe", "_独立")
+    ):
+        fail("Standalone ER entity was discarded")
+    ok("standalone ER entity declarations, including Unicode names, become tables")
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="diagram-design-mermaid-") as directory:
         tmp = Path(directory)
+        check_unicode_state_regression(tmp)
+        check_unicode_er_regression(tmp)
+        check_standalone_er_regression(tmp)
         check_files()
+        expect_error([str(FLOW), "--diagram", "²"], "--diagram must be an index")
         check_flowchart()
+        check_bidirectional_analysis(tmp)
+        check_node_shape_updates(tmp)
+        check_entity_label_codes(tmp)
         check_shape_and_edge_vocabulary(tmp)
         check_frontmatter(tmp)
         check_markdown_and_grammars(tmp)
+        check_state_descriptions(tmp)
+        check_named_composite_states(tmp)
         check_selection_before_parse(tmp)
         check_legacy_stdout_encoding(tmp)
         check_sequence_grammar_forms(tmp)
