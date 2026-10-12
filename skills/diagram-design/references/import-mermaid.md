@@ -127,3 +127,7 @@ Markdown is the Mermaid analogue of multi-page draw.io. The header lists every f
 | One-to-one node mapping regardless of budget | A faithful wiring dump is not an editorial diagram |
 | Dropping sequence fragments or ER cardinality | Those structures carry meaning, not styling |
 | Silently dropping content | Every import ships a fidelity ledger |
+
+Bare state declarations are retained even when disconnected from transitions.
+Multiline state notes are opaque annotation text through `end note`; a missing
+terminator exits with the extractor's exit-2 diagnostic and the opening line number.
