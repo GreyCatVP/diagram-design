@@ -105,6 +105,14 @@ Every validation gate below must pass before a PR is ready. They also run automa
 
 The semantic-pattern gate also caps `skills/diagram-design/SKILL.md` at 40,000 bytes so the installed skill remains practical to load. If that gate fails, reduce duplication or move detail into a routed reference; do not remove routing vocabulary from frontmatter. SKILL.md is a router: SVG markup and the long form of the connector rules live in `references/primitives-core.md`, and the 4px grid table, per-type complexity budget rows, page layout, and summary cards live in `references/layout-budget.md` (ADR 0004, 2026-09-27 amendment). A new type's budget row goes in `layout-budget.md`, not SKILL.md.
 
+### Keep diagram claims checked
+
+Every diagram gets the common skin, accessibility, render, and geometry gates above. A chart with a numerical or structural claim also needs a type-specific verifier: identify the claim (for example, waterfall running totals, Sankey flow conservation, or treemap area shares), bind each displayed value to machine-readable data, and compare the rendered marks and labels with recomputed values. Add a complete valid example and at least one **plausible rendered error** as an adversarial fixture. The [waterfall case](docs/pr-previews/waterfall/plausible-wrong.md) shows a chart whose end label says 236 when its signed contributions sum to 238.
+
+Name the pair `scripts/verify-<type>.py` and `scripts/test-verify-<type>.py`, then run both on the shipped variants in CI. `scripts/test-maintainer-policy.py` now fails if any verifier or its adversarial test is missing from the CI-backed local gate list. This guards the wiring as new checkers arrive.
+
+The current type checkers verify **internal consistency** of the chart and its declarations. They cannot prove that a correctly drawn number matches an external budget, spreadsheet, or API. To cover that boundary for generated diagrams, keep an independent source-data file, make the type verifier compare it with the chart's declarations, package the verifier with the installed skill, and call it from the generated-output self-check. Until a type has that path, run its repository verifier explicitly and do not describe the source data as verified.
+
 Keep native plugin and marketplace `description` fields within 500 characters
 for Cowork installation compatibility ([#208](https://github.com/cathrynlavery/diagram-design/issues/208)).
 They must still name every visual type; keep fuller feature details in the skill
