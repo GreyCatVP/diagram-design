@@ -100,9 +100,12 @@ def main() -> int:
         directory = Path(raw)
 
         valid_px = source.replace('font-size="14"', 'font-size="14px"', 1)
-        code, output = run(write(directory, "valid-px-font.html", valid_px))
-        if code != 0:
-            failures.append(f"valid px font-size regressed the existing conservative behavior: {output}")
+        if valid_px == source:
+            failures.append("could not build the valid-px-font fixture (anchor moved)")
+        else:
+            code, output = run(write(directory, "valid-px-font.html", valid_px))
+            if code != 0:
+                failures.append(f"valid px font-size regressed the existing conservative behavior: {output}")
 
         for field, value in (("font-size", "nan"), ("x", "inf"), ("y", "-inf"), ("font-size", "0"), ("font-size", "-1")):
             malformed = re.sub(r'(<text\b[^>]*\b' + field + r'=)"[^"]*"',
