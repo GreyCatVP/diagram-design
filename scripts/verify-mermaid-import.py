@@ -1091,10 +1091,12 @@ def check_docs_and_wiring() -> None:
 
 def check_import_regression(tmp: Path) -> None:
     path = tmp / "supported-form.mmd"
-    path.write_text('erDiagram\nINDEPENDENT\nCUSTOMER ||--o{ ORDER : places\n', encoding="utf-8")
+    path.write_text('erDiagram\nINDEPENDENT\n客户\nÉquipe\n_独立\nCUSTOMER ||--o{ ORDER : places\n', encoding="utf-8")
     payload = json.loads(run_extract([str(path), "--json"]))["diagrams"][0]
     nodes = {node["id"]: node for node in payload["nodes"]}
-    if set(nodes) != {"INDEPENDENT", "CUSTOMER", "ORDER"} or nodes["INDEPENDENT"]["shape"] != "table":
+    if set(nodes) != {"INDEPENDENT", "客户", "Équipe", "_独立", "CUSTOMER", "ORDER"} or any(
+        nodes[name]["shape"] != "table" for name in ("INDEPENDENT", "客户", "Équipe", "_独立")
+    ):
         fail("Standalone ER entity was discarded")
 
 
