@@ -347,6 +347,33 @@ class ExportSvgStandaloneTests(unittest.TestCase):
         self.assertEqual([element.get("fill") for element in root.iter() if element.tag.endswith("}rect")],
                          ["url(#diagram-A&B)", "url(#diagram-A&#38;B)"])
 
+    def test_metadata_defs_382_ignores_data_id_inside_defs(self) -> None:
+        markup = '<svg><defs><marker id="arrow"/><g data-id="ghost"/></defs><g data-id="arrow" data-href="#arrow"/><use href="#arrow"/></svg>'
+        root = ET.fromstring(self.mod.namespace_defs_ids(markup, "d"))
+        self.assertEqual(root.find("g").get("data-id"), "arrow")
+        self.assertEqual(root.find("g").get("data-href"), "#arrow")
+        self.assertEqual(root.find("use").get("href"), "#d-arrow")
+        self.assertEqual(self.mod.find_defs_ids(markup), ["arrow"])
+
+    def test_metadata_defs_382_does_not_retarget_a_data_id_definition(self) -> None:
+        markup = '<svg><defs><g data-id="ghost"/></defs><g id="ghost"/><use href="#ghost"/></svg>'
+        self.assertEqual(self.mod.find_defs_ids(markup), [])
+        self.assertEqual(self.mod.namespace_defs_ids(markup, "d"), markup)
+
+    def test_metadata_defs_382_template_dots_keep_namespace(self) -> None:
+        source = ASSETS / "template.html"
+        exported = self.mod.export_svg_document(source.read_text(encoding="utf-8"), source)
+        self.assertIn('id="template-dots"', exported)
+        self.assertIn('url(#template-dots)', exported)
+
+    def test_metadata_defs_382_shared_live_symbol_references_resolve(self) -> None:
+        markup = '<svg viewBox="0 0 10 10"><defs><!-- <pattern id="dot"/> --></defs><symbol id="dot"><rect width="5" height="5" fill="red"/></symbol><use href="#dot"/></svg>'
+        exported = self.mod.export_svg_document(markup, Path("b.html"))
+        root = ET.fromstring(exported)
+        symbol = next(element for element in root.iter() if element.tag.endswith("}symbol"))
+        use = next(element for element in root.iter() if element.tag.endswith("}use"))
+        self.assertEqual(use.get("href"), "#" + symbol.get("id"))
+
     def test_helper_and_docs_exist(self) -> None:
         self.assertTrue(HELPER.is_file())
         self.assertTrue(EXPORT_MD.is_file())

@@ -619,23 +619,25 @@ def merge_style_into_defs(svg: str, style_css: str, system_fonts: bool = False) 
 
 
 def find_defs_ids(svg: str) -> list[str]:
-    """IDs on referenceable elements living under <defs>."""
+    """IDs on referenceable elements living under <defs>, including comments."""
     defs_blocks = re.findall(r"<defs\b[^>]*>(.*?)</defs>", svg, re.IGNORECASE | re.DOTALL)
-    if not defs_blocks:
-        return []
-    tag_alt = "|".join(DEFS_ID_TAGS)
-    pattern = re.compile(
-        rf"<(?:{tag_alt})\b[^>]*\bid\s*=\s*[\"']([^\"']+)[\"']",
-        re.IGNORECASE,
-    )
+    allowed_tags = {kind.lower() for kind in DEFS_ID_TAGS}
     found: list[str] = []
     seen: set[str] = set()
     for block in defs_blocks:
-        for match in pattern.finditer(block):
-            ident = decode_xml_references(match.group(1))
-            if ident not in seen:
-                seen.add(ident)
-                found.append(ident)
+        for tag in START_TAG_RE.finditer(block):
+            name, attrs, _ = tag.groups()
+            if name.lower() not in allowed_tags:
+                continue
+            for attribute in TAG_ATTR_RE.finditer(attrs):
+                _, name, _, quoted = attribute.groups()
+                if name != "id" or quoted is None or quoted[0] not in "\"'":
+                    continue
+                ident = decode_xml_references(quoted[1:-1])
+                if ident not in seen:
+                    seen.add(ident)
+                    found.append(ident)
+                break
     return found
 
 
