@@ -6,6 +6,7 @@ skills/diagram-design/references/export.md against local fixtures:
 
 - a stalled stylesheet request is cancelled with window.stop(), the snippet
   warns about fallback typography, and capture completes quickly;
+- an actual stalled font download is cancelled and font readiness finishes;
 - a normal load captures cleanly with no warning;
 - non-timeout errors are not swallowed by the fallback.
 
@@ -18,7 +19,9 @@ from __future__ import annotations
 import contextlib
 import io
 import re
+import subprocess
 import sys
+import struct
 import tempfile
 import threading
 import time
@@ -132,18 +135,18 @@ class _StallHandler(BaseHTTPRequestHandler):
         pass
 
 
-def start_stall_server() -> ThreadingHTTPServer:
-    server = ThreadingHTTPServer(("127.0.0.1", 0), _StallHandler)
+def start_stall_server(handler: type[BaseHTTPRequestHandler] = _StallHandler) -> ThreadingHTTPServer:
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
     server.daemon_threads = True
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server
 
 
-def run_snippet(snippet: str, src: Path, out: Path) -> str:
+def run_snippet(snippet: str, src: Path, out: Path, scale: str | None = None) -> str:
     """Exec the doc snippet with the given argv; return captured stderr."""
     stderr = io.StringIO()
     old_argv, old_stderr = sys.argv, sys.stderr
-    sys.argv = ["export", str(src), str(out)]
+    sys.argv = ["export", str(src), str(out)] + ([scale] if scale is not None else [])
     try:
         with contextlib.redirect_stderr(stderr):
             exec(compile(snippet, str(EXPORT_DOC), "exec"), {"__name__": "export_snippet"})
@@ -207,6 +210,59 @@ def require_stalled_fallback(snippet: str, tmp: Path) -> None:
         server.server_close()
 
 
+def require_stalled_font_fallback(snippet: str, tmp: Path) -> None:
+    fast = snippet.replace("timeout=15000", FAST_IDLE_TIMEOUT).replace(
+        "wait_for_timeout(4000)", FAST_SETTLE
+    )
+    font_requested = threading.Event()
+
+    class FontStallHandler(_StallHandler):
+        def do_GET(self) -> None:  # noqa: N802 - stdlib naming
+            if self.path == "/stall.woff2":
+                font_requested.set()
+            super().do_GET()
+
+    server = start_stall_server(FontStallHandler)
+    try:
+        port = server.server_address[1]
+        src = tmp / "stalled-font.html"
+        src.write_text(
+            "<!doctype html><meta charset='utf-8'><style>"
+            "@font-face{font-family:OwnedStalledFont;src:url("
+            f"http://127.0.0.1:{port}/stall.woff2) format('woff2')}}"
+            "</style><svg xmlns='http://www.w3.org/2000/svg' "
+            "viewBox='0 0 400 240' width='400' height='240'>"
+            "<text x='20' y='120' font-family='OwnedStalledFont,sans-serif'>"
+            "stalled font fixture</text></svg>",
+            encoding="utf-8",
+        )
+        out = tmp / "stalled-font.png"
+        started = time.monotonic()
+        result = subprocess.run(
+            [sys.executable, "-c", fast, str(src), str(out)],
+            capture_output=True, text=True, check=True,
+            timeout=FALLBACK_BUDGET_SECONDS,
+        )
+        stderr = result.stderr
+        elapsed = time.monotonic() - started
+        if not font_requested.is_set():
+            raise AssertionError("stalled-font: fixture never started its font download")
+        require_png(out, "stalled-font")
+        if not out.read_bytes().startswith(b"\x89PNG\r\n\x1a\n"):
+            raise AssertionError("stalled-font: output is not a PNG")
+        if WARNING_ANCHOR not in stderr:
+            raise AssertionError(f"stalled-font: fallback warning did not fire\n{stderr}")
+        if elapsed > FALLBACK_BUDGET_SECONDS:
+            raise AssertionError(
+                f"stalled-font: capture took {elapsed:.1f}s, over the "
+                f"{FALLBACK_BUDGET_SECONDS:.0f}s budget after font cancellation"
+            )
+        print(f"OK: actual stalled font cancels, fonts.ready finishes, and PNG captures in {elapsed:.1f}s")
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 def require_normal_load(snippet: str, tmp: Path) -> None:
     src = tmp / "normal-fixture.html"
     src.write_text(
@@ -230,6 +286,58 @@ def require_normal_load(snippet: str, tmp: Path) -> None:
     print("OK: normal load captures with no fallback warning")
 
 
+def require_encoded_paths(snippet: str, tmp: Path) -> None:
+    # Both characters are legal filename content, not a URL fragment/escape.
+    original = tmp / "normal-fixture.html"
+    for filename in ("diagram #1.html", "diagram %25.html", "diagram ?draft.html"):
+        # Question marks are not valid Windows filename characters.
+        if "?" in filename and sys.platform == "win32":
+            continue
+        source = tmp / filename
+        source.write_text(original.read_text(encoding="utf-8"), encoding="utf-8")
+        output = tmp / (filename + ".png")
+        stderr = run_snippet(snippet, source, output)
+        require_png(output, filename)
+        if stderr:
+            raise AssertionError(f"encoded-path capture emitted a warning: {stderr}")
+    print("OK: legal filename characters are encoded in the file URL")
+
+
+def require_fractional_scales(snippet: str, tmp: Path) -> None:
+    source = tmp / "normal-fixture.html"  # 400 by 240 viewBox units
+    # Page layout must not change dimensions promised by the viewBox contract.
+    source.write_text(source.read_text(encoding="utf-8").replace("</head>", "<style>svg { width:1200px; min-width:1200px; height:auto; }</style></head>"), encoding="utf-8")
+    for scale, dimensions in (("1", (400, 240)), ("1.25", (500, 300)),
+                               ("1.5", (600, 360)), ("3", (1200, 720)), ("4", (1600, 960))):
+        output = tmp / f"scale-{scale}.png"
+        run_snippet(snippet, source, output, scale)
+        require_png(output, scale)
+        actual = struct.unpack(">II", output.read_bytes()[16:24])
+        if actual != dimensions:
+            raise AssertionError(f"scale {scale}: expected {dimensions}, got {actual}")
+    for viewbox in ("0 0 0 240", "0 0 400 0", "not-a-viewbox"):
+        broken = tmp / "invalid-viewbox.html"
+        broken.write_text(source.read_text(encoding="utf-8").replace("viewBox='0 0 400 240'", f"viewBox='{viewbox}'"), encoding="utf-8")
+        output = tmp / "invalid-viewbox.png"
+        try:
+            run_snippet(snippet, broken, output, "2")
+        except Exception as exc:
+            if "viewBox" not in str(exc) or output.exists():
+                raise AssertionError(f"invalid viewBox failed incorrectly: {exc}")
+        else:
+            raise AssertionError(f"invalid viewBox {viewbox!r} was accepted")
+    for scale in ("0.5", "4.1", "nan", "inf", "not-a-number"):
+        output = tmp / "invalid-scale.png"
+        try:
+            run_snippet(snippet, source, output, scale)
+        except ValueError:
+            if output.exists():
+                raise AssertionError(f"invalid scale {scale} wrote a PNG")
+        else:
+            raise AssertionError(f"invalid scale {scale} was accepted")
+    print("OK: fractional scales produce exact dimensions; invalid scales fail")
+
+
 def require_other_errors_propagate(snippet: str, tmp: Path) -> None:
     missing = tmp / "does-not-exist.html"
     out = tmp / "never.png"
@@ -246,6 +354,39 @@ def require_other_errors_propagate(snippet: str, tmp: Path) -> None:
     raise AssertionError("missing-source: expected goto on a missing file to raise")
 
 
+
+def require_static_motion_frame(snippet: str, tmp: Path) -> None:
+    # Exercise the exact shipped controller, avoiding external font requests.
+    source = (ROOT / "skills/diagram-design/assets/example-policy-trace-animated.html").read_text(encoding="utf-8")
+    source = re.sub(r"<link\b[^>]*>", "", source, flags=re.I)
+    src = tmp / "motion-fixture.html"
+    src.write_text(source, encoding="utf-8")
+    observed = snippet.replace(
+        "    svg.screenshot(path=out, omit_background=True)",
+        "    assert page.locator('[data-motion-root]').first.get_attribute('data-frame') == 'static', 'motion frame is incomplete'\n"
+        "    svg.screenshot(path=out, omit_background=True)",
+    )
+    first, second = tmp / "motion-first.png", tmp / "motion-second.png"
+    run_snippet(observed, src, first)
+    run_snippet(observed, src, second)
+    require_png(first, "static-motion")
+    if first.read_bytes() != second.read_bytes():
+        raise AssertionError("motion captures from the same static source are not identical")
+
+    # A broken controller must fail rather than silently capture hidden steps.
+    broken = re.sub(r"<script\b[^>]*>.*?</script>", "", source, flags=re.I | re.S)
+    broken = broken.replace('data-frame="static" data-static-frame=', 'data-frame="start" data-static-frame=', 1)
+    src.write_text(broken, encoding="utf-8")
+    never = tmp / "incomplete.png"
+    try:
+        run_snippet(snippet, src, never)
+    except RuntimeError as exc:
+        if "static" not in str(exc) or never.exists():
+            raise AssertionError(f"incomplete motion frame failed incorrectly: {exc}")
+    else:
+        raise AssertionError("incomplete motion frame was exported without an error")
+    print("OK: motion exports show the complete static frame, repeat identically, and reject incomplete roots")
+
 def main() -> int:
     try:
         import playwright  # noqa: F401
@@ -258,8 +399,12 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="diagram-export-wait-") as raw_tmp:
         tmp = Path(raw_tmp)
         require_stalled_fallback(snippet, tmp)
+        require_stalled_font_fallback(snippet, tmp)
         require_normal_load(snippet, tmp)
+        require_encoded_paths(snippet, tmp)
+        require_fractional_scales(snippet, tmp)
         require_other_errors_propagate(snippet, tmp)
+        require_static_motion_frame(snippet, tmp)
     print("All export-wait cases passed.")
     return 0
 

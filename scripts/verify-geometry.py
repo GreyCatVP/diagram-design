@@ -64,15 +64,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 ASSET_DIR = ROOT / "skills/diagram-design/assets"
 
-RECT_RE = re.compile(
-    r"<rect\b[^>]*?"
-    r'\bx="(?P<x>-?[\d.]+)"\s+'
-    r'y="(?P<y>-?[\d.]+)"\s+'
-    r'width="(?P<w>[\d.]+)"\s+'
-    r'height="(?P<h>[\d.]+)"',
-    re.IGNORECASE,
-)
-
 NODE_MIN_W = 60.0
 NODE_MIN_H = 40.0
 MASK_MIN_W = 20.0
@@ -102,18 +93,16 @@ class Rect:
 
 
 def parse_rects(source: str) -> list[Rect]:
+    """Mask and node bounds in the same translated canvas as connectors."""
     rects: list[Rect] = []
-    for match in RECT_RE.finditer(source):
-        rects.append(
-            Rect(
-                float(match.group("x")),
-                float(match.group("y")),
-                float(match.group("w")),
-                float(match.group("h")),
-                source.count("\n", 0, match.start()) + 1,
-                match.start(),
-            )
-        )
+    for tag, attrs, start, frame in shapes(source):
+        if tag != "rect" or frame is None:
+            continue
+        x, y, w, h = (number(attrs, key) for key in ("x", "y", "width", "height"))
+        if None in (x, y, w, h):
+            continue
+        rects.append(Rect(x + frame[0], y + frame[1], w, h,
+                          source.count("\n", 0, start) + 1, start))
     return rects
 
 
@@ -134,7 +123,7 @@ def contained(inner: Rect, outer: Rect) -> bool:
 
 
 TAG_RE = re.compile(
-    r"<(?P<close>/?)(?P<tag>g|svg|rect|path|line)\b(?P<attrs>[^>]*?)(?P<empty>/?)>",
+    r"<!--[\s\S]*?-->|<(?P<close>/?)(?P<tag>g|svg|defs|symbol|marker|pattern|clipPath|mask|rect|path|line)\b(?P<attrs>(?:\"[^\"]*\"|'[^']*'|[^'\">])*?)(?P<empty>/?)>",
     re.IGNORECASE,
 )
 TRANSLATE_RE = re.compile(
@@ -317,6 +306,7 @@ def path_segments(d: str) -> list[Segment] | None:
 
 
 Offset = tuple[float, float]
+DEFINITION_TAGS = {"defs", "symbol", "marker", "pattern", "clippath", "mask"}
 
 
 def translation(attrs: str) -> Offset | None:
@@ -337,19 +327,28 @@ def shapes(source: str):
     Offsets accumulate `translate()` on enclosing groups, so panels drawn with
     the same local coordinates (architecture delta snapshots) are compared in
     canvas space. Under any other transform, or inside a nested `<svg>` icon,
-    the offset is None and the element is left out of connector checks.
+    the offset is None and the element is left out of connector checks. Shapes
+    inside definition-only containers do not paint at their source coordinates
+    and are also left out; this does not resolve referenced <use> instances.
     """
 
     stack: list[Offset | None] = []
+    containers: list[str] = []
     for match in TAG_RE.finditer(source):
+        if match.group("tag") is None:  # Inert comments cannot change paint custody.
+            continue
         tag, attrs = match.group("tag").lower(), match.group("attrs")
-        if tag in {"g", "svg"}:
+        if tag in {"g", "svg"} or tag in DEFINITION_TAGS:
             if match.group("close"):
                 if stack:
                     stack.pop()
+                    containers.pop()
             elif not match.group("empty"):
                 nested_svg = tag == "svg" and bool(stack)
                 stack.append(None if nested_svg else translation(attrs))
+                containers.append(tag)
+            continue
+        if any(container in DEFINITION_TAGS for container in containers):
             continue
         frame: Offset | None = (0.0, 0.0)
         for step in stack + [translation(attrs)]:
