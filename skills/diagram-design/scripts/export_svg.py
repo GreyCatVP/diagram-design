@@ -949,8 +949,8 @@ def export_svg_document(html: str, source_path: Path, system_fonts: bool = False
     diagram_css = diagram_css_from_html(html, root_id, original_root_id)
     svg = merge_style_into_defs(svg, diagram_css, system_fonts)
     svg = namespace_defs_ids(svg, slug)
-    svg = normalize_rgba_presentation_attrs(svg)
     svg = xml_safe_comments(svg)
+    svg = normalize_rgba_presentation_attrs(svg)
     assert_export_gate(svg)
     document = '<?xml version="1.0" encoding="UTF-8"?>\n' + svg + "\n"
     # Catch any remaining XML-breaking characters in carried content.

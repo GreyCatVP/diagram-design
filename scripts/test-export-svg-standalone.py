@@ -882,7 +882,13 @@ class ExportSvgStandaloneTests(unittest.TestCase):
                 html = source.read_text(encoding="utf-8")
                 slug = source.stem
                 svg = self.mod.export_svg_document(html, source)
-                ET.fromstring(svg)
+                root = ET.fromstring(svg)
+                for element in root.iter():
+                    for paint in ("fill", "stroke"):
+                        self.assertNotRegex(
+                            element.get(paint, ""), r"(?i)^\s*rgba\(",
+                            f"{source.name}: {paint} presentation paint must export without rgba",
+                        )
                 css = embedded_css(svg)
                 page_css = re.sub(
                     r"/\*.*?\*/", "", "\n".join(PAGE_STYLE_RE.findall(html)), flags=re.DOTALL
