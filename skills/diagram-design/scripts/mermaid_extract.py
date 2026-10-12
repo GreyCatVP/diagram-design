@@ -572,6 +572,8 @@ def _parse_expanded_attributes(text: str) -> tuple[str, str] | None:
             shape_name = "image"
         elif "icon" in values:
             shape_name = "icon"
+        elif "shape" not in values:
+            return values.get("label", ""), ""
         else:
             shape_name = "rect"
     if not re.fullmatch(r"[a-z][a-z0-9-]*", shape_name):

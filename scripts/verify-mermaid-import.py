@@ -1096,6 +1096,15 @@ def check_node_shape_updates(tmp: Path) -> None:
     node = next(node for node in diagram["nodes"] if node["id"] == "A")
     if node["shape"] != "rect" or node["label"] != "Work":
         fail("an explicit rectangle declaration must replace the earlier diamond")
+    flow.write_text(
+        'flowchart LR\nA{Decision}\nA@{ label: "Updated" }\n'
+        'B@{ label: "New" }\nC{Keep}\nC@{ shape: rect, label: "Reset" }\n',
+        encoding="utf-8",
+    )
+    diagram = json.loads(run_extract([str(flow), "--json"]))["diagrams"][0]
+    nodes = {node["id"]: (node["shape"], node["label"]) for node in diagram["nodes"]}
+    if nodes != {"A": ("rhombus", "Updated"), "B": ("rect", "New"), "C": ("rect", "Reset")}:
+        fail("label-only expanded attributes must retain existing shapes and default new nodes")
     state = tmp / "fork-reference.mmd"
     state.write_text("stateDiagram-v2\nstate Fork <<fork>>\nFork --> Done\n", encoding="utf-8")
     diagram = json.loads(run_extract([str(state), "--json"]))["diagrams"][0]
