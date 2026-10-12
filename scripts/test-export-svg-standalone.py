@@ -313,6 +313,15 @@ class ExportSvgStandaloneTests(unittest.TestCase):
         self.assertEqual([element.get("fill") for element in root.iter() if element.tag.endswith("}rect")],
                          ["url(#diagram-A&B)", "url(#diagram-A&#38;B)"])
 
+    def test_defs_namespace_preserves_reference_like_attribute_text(self) -> None:
+        label = 'Use href="#paint", xlink:href="#paint" or id="paint"'
+        markup = '<svg><defs><marker id="paint"/></defs>'
+        markup += "<g data-label='" + label + "'/><use href='#paint'/></svg>"
+        root = ET.fromstring(self.mod.namespace_defs_ids(markup, "diagram"))
+        self.assertEqual(root.find("g").get("data-label"), label)
+        self.assertEqual(root.find("defs/marker").get("id"), "diagram-paint")
+        self.assertEqual(root.find("use").get("href"), "#diagram-paint")
+
     def test_helper_and_docs_exist(self) -> None:
         self.assertTrue(HELPER.is_file())
         self.assertTrue(EXPORT_MD.is_file())
