@@ -96,7 +96,11 @@ DEFS_ID_TAGS = (
 )
 
 STYLE_BLOCK_RE = re.compile(r"<style\b[^>]*>(.*?)</style\s*>", re.IGNORECASE | re.DOTALL)
-SVG_BLOCK_RE = re.compile(r"<svg\b[^>]*>.*?</svg>", re.IGNORECASE | re.DOTALL)
+# Opening and closing <svg> tags, so nested icon <svg> elements can be
+# balanced instead of ending the diagram at the first </svg>.
+SVG_TAG_RE = re.compile(
+    r"<svg(?=[\s/>])(?:[^>\"']|\"[^\"]*\"|'[^']*')*>|</svg\s*>", re.IGNORECASE
+)
 CDATA_SECTION_RE = re.compile(r"<!\[CDATA\[(.*?)\]\]>", re.DOTALL)
 # Each alternative starts on a different character, and a comment cannot run
 # past its first "*/", so a failed match backtracks linearly, not
@@ -130,10 +134,67 @@ def mask_opaque_html(source: str, *, styles: bool = False) -> str:
 
 
 def extract_first_svg(html: str) -> str:
-    match = SVG_BLOCK_RE.search(mask_opaque_html(html, styles=True))
-    if not match:
-        raise ValueError("no <svg> block found in source")
-    return html[match.start():match.end()]
+    """Return the first top-level <svg> element, including nested <svg> icons."""
+    start = None
+    depth = 0
+    for tag in SVG_TAG_RE.finditer(mask_opaque_html(html, styles=True)):
+        token = tag.group(0)
+        if token.startswith("</"):
+            if start is None:
+                continue
+            depth -= 1
+            if depth == 0:
+                return html[start:tag.end()]
+        elif not token.endswith("/>"):
+            if start is None:
+                start = tag.start()
+            depth += 1
+    raise ValueError("no <svg> block found in source")
+
+
+def xml_safe_comments(svg: str) -> str:
+    """Make HTML comments valid XML comments; CDATA is copied unchanged.
+
+    HTML allows `--` inside a comment and a body ending in `-`; XML allows
+    neither. Each `--` becomes `- -` and a trailing `-` gets a space, so the
+    comment text stays readable. Comments that are already valid XML are
+    copied byte for byte.
+    """
+    out: list[str] = []
+    pos = 0
+    while True:
+        opener = XML_OPAQUE_OPEN_RE.search(svg, pos)
+        if opener is None:
+            out.append(svg[pos:])
+            break
+        out.append(svg[pos:opener.start()])
+        if opener.group(0) == "<!--":
+            close_at = svg.find("-->", opener.end())
+            if close_at == -1:
+                out.append(svg[opener.start():])
+                break
+            body = svg[opener.end():close_at]
+            # Browsers end these comments earlier than the next "-->", so the
+            # markup after them is live; rewriting would silently drop it.
+            if body.startswith((">", "->")) or "--!>" in body:
+                raise ValueError(
+                    "exported SVG has a comment a browser closes early "
+                    "(<!-->, <!--->, or --!>); fix the comment in the source"
+                )
+            while "--" in body:
+                body = body.replace("--", "- -")
+            if body.endswith("-"):
+                body += " "
+            out.append("<!--" + body + "-->")
+            pos = close_at + 3
+        else:
+            close_at = svg.find("]]>", opener.end())
+            stop = len(svg) if close_at == -1 else close_at + 3
+            out.append(svg[opener.start():stop])
+            pos = stop
+            if close_at == -1:
+                break
+    return "".join(out)
 
 
 def _xml_start_tag(match: re.Match[str]) -> str:
@@ -889,6 +950,7 @@ def export_svg_document(html: str, source_path: Path, system_fonts: bool = False
     svg = merge_style_into_defs(svg, diagram_css, system_fonts)
     svg = namespace_defs_ids(svg, slug)
     svg = normalize_rgba_presentation_attrs(svg)
+    svg = xml_safe_comments(svg)
     assert_export_gate(svg)
     document = '<?xml version="1.0" encoding="UTF-8"?>\n' + svg + "\n"
     # Catch any remaining XML-breaking characters in carried content.

@@ -23,31 +23,10 @@ HELPER = ROOT / "skills/diagram-design/scripts/export_svg.py"
 EXPORT_MD = ROOT / "skills/diagram-design/references/export.md"
 ASSETS = ROOT / "skills/diagram-design/assets"
 
-# Shipped assets the helper refuses (loudly) because their markup is not
-# well-formed XML for reasons outside the CSS carry: the first `</svg>` match
-# stops at a nested icon <svg>, or a comment contains `--`. Keep this list
-# exact so a newly unexportable asset, or a fixed one, shows up here.
-KNOWN_UNEXPORTABLE = frozenset(
-    {
-        # nested icon <svg> truncates the first-</svg> extraction
-        "example-datalake.html",
-        "example-datalake-dark.html",
-        "example-datalake-full.html",
-        "example-high-level.html",
-        "example-high-level-dark.html",
-        "example-high-level-full.html",
-        "example-high-level-vertical.html",
-        "example-high-level-vertical-dark.html",
-        "example-high-level-vertical-full.html",
-        # `--` inside an XML comment
-        "example-slopegraph.html",
-        "example-slopegraph-dark.html",
-        "example-slopegraph-full.html",
-        "example-streamgraph.html",
-        "example-streamgraph-dark.html",
-        "example-streamgraph-full.html",
-    }
-)
+# Shipped assets the helper refuses (loudly). Empty since #407: nested icon
+# <svg> elements and `--` inside comments both export. Keep this list exact so
+# a newly unexportable asset shows up here instead of in a user's export.
+KNOWN_UNEXPORTABLE: frozenset[str] = frozenset()
 
 # Motion files named in #202; they use valueless HTML attributes.
 MOTION_FILES = (
@@ -929,6 +908,43 @@ class ExportSvgStandaloneTests(unittest.TestCase):
                         rf"#{re.escape(slug)}-root[^{{}},]*\.{re.escape(cls)}(?![\w-])",
                         f"class {cls!r} is styled on the page but has no scoped rule",
                     )
+
+    def test_nested_icon_svg_does_not_end_the_extraction(self) -> None:
+        html = ('<p>intro</p><svg viewBox="0 0 100 50"><g><svg x="2" y="2" width="8" height="8" viewBox="0 0 8 8">'
+                '<path d="M0 0h8v8z"/></svg><svg x="12" y="2" width="8" height="8"/></g>'
+                '<rect id="after" width="10" height="10"/></svg><svg viewBox="0 0 1 1"><rect id="second"/></svg>')
+        extracted = self.mod.extract_first_svg(html)
+        self.assertTrue(extracted.startswith('<svg viewBox="0 0 100 50">'))
+        self.assertTrue(extracted.endswith('<rect id="after" width="10" height="10"/></svg>'))
+        self.assertNotIn('id="second"', extracted)
+        root = ET.fromstring(self.mod.export_svg_document(html, Path("nested.html")))
+        self.assertTrue(any(element.get("id") == "after" for element in root.iter()))
+
+    def test_comments_with_double_hyphens_export_as_xml(self) -> None:
+        html = ('<svg viewBox="0 0 10 10"><!-- focal -- and worse --><!-- trailing dash--->'
+                '<!-- fine --><style><![CDATA[.a { --x: 1; }]]></style><rect class="a"/></svg>')
+        svg = self.mod.export_svg_document(html, Path("comments.html"))
+        ET.fromstring(svg)
+        self.assertIn("<!-- fine -->", svg)
+        self.assertIn("<!-- focal - - and worse -->", svg)
+        self.assertIn("<!-- trailing dash- -->", svg)
+        self.assertIn("<![CDATA[.a { --x: 1; }]]>", svg)
+        for comment in re.findall(r"<!--(.*?)-->", svg, flags=re.DOTALL):
+            self.assertNotIn("--", comment)
+            self.assertFalse(comment.endswith("-"), comment)
+
+    def test_svg_extraction_reads_quoted_attributes_and_whole_tag_names(self) -> None:
+        html = ('<svg-icon name="x"></svg-icon><svg viewBox="0 0 9 9" aria-label="in/out />">'
+                '<svg viewBox="0 0 8 8"><path id="icon"/></svg><rect id="after"/></svg>')
+        extracted = self.mod.extract_first_svg(html)
+        self.assertTrue(extracted.startswith('<svg viewBox="0 0 9 9"'), extracted)
+        self.assertTrue(extracted.endswith('<rect id="after"/></svg>'), extracted)
+
+    def test_comments_browsers_close_early_are_refused(self) -> None:
+        for comment in ("<!-- a --!>", "<!-->", "<!--->"):
+            html = '<svg viewBox="0 0 9 9">' + comment + '<rect id="live"/><!-- x --></svg>'
+            with self.subTest(comment=comment), self.assertRaises(ValueError):
+                self.mod.export_svg_document(html, Path("comment.html"))
 
     def test_known_unexportable_assets_are_refused_loudly(self) -> None:
         for name in sorted(KNOWN_UNEXPORTABLE):
