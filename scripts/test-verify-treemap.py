@@ -105,6 +105,18 @@ def main() -> int:
         if code == 0 or "parseable treemap cells" not in output:
             failures.append("commented-out data-share cells were treated as drawn geometry")
 
+        unfinished = "<!--\n" + re.sub(r"<!--.*?-->", "", source, flags=re.DOTALL)
+        code, output = run(write(directory, "unfinished-comment.html", unfinished))
+        if code == 0 or "parseable treemap cells" not in output:
+            failures.append("an unfinished HTML comment left hidden treemap cells available")
+
+        inline_comment = source.replace(
+            ">South America</text>", ">South<!--" + "\n" * 30 + "--> America</text>",
+        )
+        code, output = run(write(directory, "inline-comment.html", inline_comment))
+        if inline_comment == source or code != 0:
+            failures.append(f"inline comment newlines changed label geometry: {output.strip()}")
+
         # 1. Every shipped Latin example must pass untouched, proving the
         #    Unicode estimator did not move the calibrated Latin baseline.
         shipped_clean = True
@@ -166,6 +178,16 @@ def main() -> int:
                 failures.append(f"overflow reported without a fit finding: {output.strip()}")
             else:
                 print("OK: a label wider than its cell is rejected")
+
+        shifted = "<!--" + "\n" * 30 + "-->\n" + overflowing
+        label_match = re.search(r"<text\b[^>]*>South America and the Caribbean Basin</text>", shifted)
+        if label_match is None:
+            failures.append("could not locate the shifted overflowing label (anchor moved)")
+        else:
+            line = shifted.count("\n", 0, label_match.start()) + 1
+            code, output = run(write(directory, "shifted-label.html", shifted))
+            if code == 0 or f"shifted-label.html:{line}: label" not in output:
+                failures.append(f"comment removal changed diagnostic line tracking: {output.strip()}")
 
         # 4a. Reproduce #115: most glyphs in this Korean translation are
         #     full-width. The old 0.60em character-count estimate called it
