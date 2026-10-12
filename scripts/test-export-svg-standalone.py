@@ -92,6 +92,18 @@ class ExportSvgStandaloneTests(unittest.TestCase):
         self.assertEqual(root[1].get("href"), "#diagram-A&B")
         self.assertEqual(root[2].get("fill"), "url(#diagram-A&B)")
 
+    def test_distinct_once_decoded_ids_keep_distinct_definitions_and_references(self) -> None:
+        markup = '<svg><defs><linearGradient id="A&#38;B"/><linearGradient id="A&amp;#38;B"/></defs>'
+        markup += '<use href="#A&#38;B"/><use href="#A&amp;#38;B"/>'
+        markup += '<rect fill="url(#A&#38;B)"/><rect fill="url(#A&amp;#38;B)"/></svg>'
+        root = ET.fromstring(self.mod.namespace_defs_ids(markup, "diagram"))
+        self.assertEqual([element.get("id") for element in root.find("defs")],
+                         ["diagram-A&B", "diagram-A&#38;B"])
+        self.assertEqual([element.get("href") for element in root.findall("use")],
+                         ["#diagram-A&B", "#diagram-A&#38;B"])
+        self.assertEqual([element.get("fill") for element in root.findall("rect")],
+                         ["url(#diagram-A&B)", "url(#diagram-A&#38;B)"])
+
     def test_helper_and_docs_exist(self) -> None:
         self.assertTrue(HELPER.is_file())
         self.assertTrue(EXPORT_MD.is_file())

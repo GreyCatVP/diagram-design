@@ -537,52 +537,62 @@ REFERENCE_REGION_RE = re.compile(
 )
 
 
-def xml_id_pattern(value: str) -> str:
-    names = {"&": "amp", "<": "lt", ">": "gt", '"': "quot", "'": "apos"}
-    pieces = []
-    for char in value:
-        forms = [re.escape(char), rf"&#0*{ord(char)};", rf"&#[xX]0*(?i:{ord(char):x});"]
-        if char in names:
-            forms.append("&" + names[char] + ";")
-        pieces.append("(?:" + "|".join(forms) + ")")
-    return "".join(pieces)
-
-
 def namespace_defs_ids(svg: str, prefix: str) -> str:
-    """Prefix defs IDs and rewrite url(#…)/href="#…" references, longest first.
-
-    Only tags and <style> blocks are rewritten; visible text keeps its wording.
-    """
+    """Prefix defs IDs and compare each reference after exactly one XML decode."""
     ids = find_defs_ids(svg)
     if not ids:
         return svg
-
-    def rewrite(region: str) -> str:
-        for old in sorted(ids, key=len, reverse=True):
-            new = html_entities.escape(f"{prefix}-{old}", quote=True)
-            old_pattern = xml_id_pattern(old)
-            region = re.sub(
-                rf'(\bid\s*=\s*[\'"]){old_pattern}([\'"])',
-                lambda match: match.group(1) + new + match.group(2),
-                region,
-            )
-            region = re.sub(
-                rf"(?i:url)\(\s*(?P<quote>[\"']|&quot;|&apos;|)\s*#\s*"
-                rf"{old_pattern}\s*(?P=quote)\s*\)",
-                lambda match: f"url({match.group('quote')}#{new}{match.group('quote')})",
-                region,
-            )
-            region = re.sub(
-                rf"""((?i:(?:xlink:)?href)\s*=\s*['"])#{old_pattern}(['"])""",
-                lambda match: match.group(1) + "#" + new + match.group(2),
-                region,
-            )
-        return region
-
-    return REFERENCE_REGION_RE.sub(
-        lambda match: match.group(0) if match.group("skip") else rewrite(match.group(0)),
-        svg,
+    replacements = {old: html_entities.escape(f"{prefix}-{old}", quote=True) for old in ids}
+    url_ref = re.compile(
+        r"(?i:url)\(\s*(?P<quote>[\"']|&quot;|&apos;|)\s*#\s*"
+        r"(?P<ident>.*?)\s*(?P=quote)\s*\)", re.DOTALL,
     )
+
+    def rewrite_url(match: re.Match[str]) -> str:
+        new = replacements.get(decode_xml_references(match.group("ident")))
+        if new is None:
+            return match.group(0)
+        return f"url({match.group('quote')}#{new}{match.group('quote')})"
+
+    def rewrite_tag(tag: re.Match[str]) -> str:
+        def attribute(match: re.Match[str]) -> str:
+            space, name, equals, quoted = match.groups()
+            if quoted is None or quoted[0] not in "\"'":
+                return match.group(0)
+            raw = quoted[1:-1]
+            value = decode_xml_references(raw)
+            if name == "id" and value in replacements:
+                raw = replacements[value]
+            elif name.lower() in {"href", "xlink:href"} and value.startswith("#") and value[1:] in replacements:
+                raw = "#" + replacements[value[1:]]
+            else:
+                raw = url_ref.sub(rewrite_url, raw)
+            return space + name + equals + quoted[0] + raw + quoted[-1]
+
+        name, attrs, end = tag.groups()
+        return "<" + name + TAG_ATTR_RE.sub(attribute, attrs) + end + ">"
+
+    # A complete tag consumes all quoted values before any URL-like metadata
+    # can be considered separately. Every original reference is visited once.
+    comment_tokens = re.compile(START_TAG_RE.pattern + "|" + url_ref.pattern, re.DOTALL)
+
+    def rewrite_comment_token(match: re.Match[str]) -> str:
+        token = match.group(0)
+        tag = START_TAG_RE.fullmatch(token)
+        return rewrite_tag(tag) if tag is not None else rewrite_url(url_ref.fullmatch(token))
+
+    def rewrite(region: re.Match[str]) -> str:
+        token = region.group(0)
+        if region.group("skip"):
+            return token
+        tag = START_TAG_RE.fullmatch(token)
+        if tag is not None:
+            return rewrite_tag(tag)
+        if token.startswith("<!--"):
+            return comment_tokens.sub(rewrite_comment_token, token)
+        return url_ref.sub(rewrite_url, token)
+
+    return REFERENCE_REGION_RE.sub(rewrite, svg)
 
 
 def normalize_rgba_presentation_attrs(svg: str) -> str:
