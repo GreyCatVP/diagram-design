@@ -542,12 +542,28 @@ def main() -> int:
                 print(f"OK: {label} data-share geometry fails closed")
 
     with tempfile.TemporaryDirectory() as tmp:
-        encoded = re.sub(r'(\b(?:x|y|width|height|data-value|data-share)="[^"<>]*)[0-9]',
+        encoded = re.sub(r'(\b(?:x|y|width|height|cx|cy|r|data-value|data-share)="[^"<>]*)[0-9]',
                          lambda match: match.group(0)[:-1] + f"&#{ord(match.group(0)[-1])};",
                          GOOD.read_text(encoding="utf-8"))
         code, output = run(write(Path(tmp), "encoded-attributes.html", encoded))
         if code != 0:
             failures.append(f"XML-encoded numeric attributes rejected: {output.strip()}")
+
+        encoded_marker_over = re.sub(
+            r'(\b(?:cx|cy|r)="[^"<>]*)[0-9]',
+            lambda match: match.group(0)[:-1] + f"&#{ord(match.group(0)[-1])};",
+            marker_over,
+        )
+        if encoded_marker_over == marker_over:
+            failures.append("could not encode the overflowing-marker fixture (anchor moved)")
+        else:
+            code, output = run(write(Path(tmp), "encoded-marker-overflow.html", encoded_marker_over))
+            if code == 0:
+                failures.append("XML-encoded information mark overflowing its cell was accepted")
+            elif "information marker" not in output:
+                failures.append(f"encoded marker overflow lacked a marker finding: {output.strip()}")
+            else:
+                print("OK: XML-encoded cx/cy/r retain marker containment checks")
 
     for failure in failures:
         print(f"FAIL: {failure}")
