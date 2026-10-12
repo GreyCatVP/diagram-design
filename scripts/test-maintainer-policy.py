@@ -3,8 +3,14 @@
 
 ``gates.local_commands`` in ``.maintainer-policy.json`` must list exactly the
 gates that ``.github/workflows/ci.yml`` runs, so the local suite a maintainer
-runs on a pull request head is the same suite CI enforces. The set of CI gates
-is derived from the workflow's ``run:`` steps with these rules:
+runs on a pull request head is the same suite CI enforces. Every
+``verify-*.py`` script must also have a registered CI gate and an adversarial
+``test-verify-*.py`` gate. The two older exceptions below have their own test
+arrangement. This prevents a new diagram contract from being implemented but
+omitted from continuous checking.
+
+The set of CI gates is derived from the workflow's ``run:`` steps with these
+rules:
 
 - Every ``python``/``python3`` invocation of a ``.py`` file is one gate, even
   inside ``$(...)`` or an ``if`` branch. ``python`` is spelled ``python3``
@@ -44,6 +50,14 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 POLICY = ROOT / ".maintainer-policy.json"
 CI_WORKFLOW = ROOT / ".github/workflows/ci.yml"
+SCRIPTS = ROOT / "scripts"
+
+# These predate the verify-X/test-verify-X pairing: the import verifier carries
+# its own adversarial cases, and package verification uses test-plugin-package.
+ALTERNATE_TESTS = {
+    "mermaid-import": None,
+    "plugin-package": "test-plugin-package.py",
+}
 
 EXPECTED_MANIFESTS = {
     ".claude-plugin/plugin.json",
@@ -300,6 +314,34 @@ def policy_failures(policy: dict, workflow: str) -> list[str]:
                 ", ".join(stale)
             )
         )
+    return failures
+
+
+def verifier_coverage_failures(commands: set[str], scripts: set[str]) -> list[str]:
+    """Require every verifier and its regression test in the CI-backed policy."""
+    failures: list[str] = []
+    commands = {normalize(command) for command in commands}
+    for filename in sorted(
+        s for s in scripts if s.startswith("verify-") and s.endswith(".py")
+    ):
+        stem = filename[len("verify-") : -len(".py")]
+        verify_command = f"python3 scripts/{filename}"
+        if not any(
+            command.startswith(verify_command + " ") or command == verify_command
+            for command in commands
+        ):
+            failures.append(f"{filename} has no registered CI gate")
+        test_filename = ALTERNATE_TESTS.get(stem, f"test-verify-{stem}.py")
+        if test_filename is None:
+            continue
+        if test_filename not in scripts:
+            failures.append(f"{filename} has no adversarial test {test_filename}")
+        test_command = f"python3 scripts/{test_filename}"
+        if not any(
+            command.startswith(test_command + " ") or command == test_command
+            for command in commands
+        ):
+            failures.append(f"{test_filename} has no registered CI gate")
     return failures
 
 
@@ -614,6 +656,24 @@ def self_test() -> list[str]:
             problems.append(f"self-test '{name}': expected no failures, got {failures}")
         elif expected is not None and not any(expected in failure for failure in failures):
             problems.append(f"self-test '{name}': expected {expected!r}, got {failures}")
+    coverage_cases = (
+        ("paired verifier and test", {"verify-waterfall.py", "test-verify-waterfall.py"},
+         {"python3 scripts/verify-waterfall.py --all", "python3 scripts/test-verify-waterfall.py"}, None),
+        ("normalized verifier and test commands", {"verify-waterfall.py", "test-verify-waterfall.py"},
+         {"python   scripts/verify-waterfall.py   --all", "python scripts/test-verify-waterfall.py"}, None),
+        ("unregistered verifier", {"verify-waterfall.py", "test-verify-waterfall.py"},
+         {"python3 scripts/test-verify-waterfall.py"}, "verify-waterfall.py has no registered CI gate"),
+        ("missing adversarial test", {"verify-waterfall.py"},
+         {"python3 scripts/verify-waterfall.py --all"}, "verify-waterfall.py has no adversarial test"),
+        ("unregistered adversarial test", {"verify-waterfall.py", "test-verify-waterfall.py"},
+         {"python3 scripts/verify-waterfall.py --all"}, "test-verify-waterfall.py has no registered CI gate"),
+    )
+    for name, scripts, commands, expected in coverage_cases:
+        failures = verifier_coverage_failures(commands, scripts)
+        if expected is None and failures:
+            problems.append(f"self-test '{name}': expected no failures, got {failures}")
+        elif expected is not None and not any(expected in failure for failure in failures):
+            problems.append(f"self-test '{name}': expected {expected!r}, got {failures}")
     return problems
 
 
@@ -628,6 +688,9 @@ def main() -> int:
     policy = json.loads(POLICY.read_text(encoding="utf-8"))
     workflow = CI_WORKFLOW.read_text(encoding="utf-8")
     failures = policy_failures(policy, workflow)
+    failures.extend(verifier_coverage_failures(
+        set(policy["gates"]["local_commands"]), {path.name for path in SCRIPTS.glob("*.py")}
+    ))
     if failures:
         print("FAIL maintainer policy")
         for failure in failures:

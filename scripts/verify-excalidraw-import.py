@@ -670,7 +670,7 @@ def check_docs_and_wiring() -> None:
     example = EXAMPLE.read_text(encoding="utf-8")
     if 'viewBox="0 0 960 600"' not in example:
         fail("worked example does not use the doc-inline viewBox")
-    if example.count("#eb6c36") > 4:
+    if example.count("#bf4520") > 4:
         fail("worked example uses the accent on more than the focal node + legend")
     if '<div class="diagram-container">' not in example or "overflow-x:auto" not in example:
         fail("worked example must contain its wide SVG in a local horizontal scroller")
@@ -723,10 +723,24 @@ def check_mobile_example() -> None:
     ok("worked example is contained and locally scrollable at 390px")
 
 
+def check_unimported_container_text(tmp: Path) -> None:
+    source = tmp / "unsupported-container.excalidraw"
+    source.write_text(json.dumps({"type": "excalidraw", "elements": [
+        {"id": "future", "type": "future-shape", "x": 0, "y": 0, "width": 10, "height": 10},
+        {"id": "label", "type": "text", "text": "Visible annotation", "containerId": "future",
+         "x": 0, "y": 0, "width": 10, "height": 10},
+    ]}), encoding="utf-8")
+    scene = json.loads(run_extract([str(source), "--json"]))["scene"]
+    if not any(node["id"] == "label" and node["label"] == "Visible annotation" for node in scene["nodes"]):
+        fail("bound text must remain standalone when its container cannot be imported")
+    ok("visible text survives unsupported containers")
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="diagram-design-excalidraw-") as directory:
         tmp = Path(directory)
         check_files()
+        check_unimported_container_text(tmp)
         check_whiteboard()
         check_bindings_and_shapes(tmp)
         check_arrow_directions(tmp)

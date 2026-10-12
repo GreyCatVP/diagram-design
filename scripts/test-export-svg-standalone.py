@@ -7,6 +7,8 @@ the contract documented in references/export.md (issues #202 and #203).
 
 from __future__ import annotations
 
+import contextlib
+import io
 import importlib.util
 import re
 import sys
@@ -14,37 +16,17 @@ import tempfile
 import unittest
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
 HELPER = ROOT / "skills/diagram-design/scripts/export_svg.py"
 EXPORT_MD = ROOT / "skills/diagram-design/references/export.md"
 ASSETS = ROOT / "skills/diagram-design/assets"
 
-# Shipped assets the helper refuses (loudly) because their markup is not
-# well-formed XML for reasons outside the CSS carry: the first `</svg>` match
-# stops at a nested icon <svg>, or a comment contains `--`. Keep this list
-# exact so a newly unexportable asset, or a fixed one, shows up here.
-KNOWN_UNEXPORTABLE = frozenset(
-    {
-        # nested icon <svg> truncates the first-</svg> extraction
-        "example-datalake.html",
-        "example-datalake-dark.html",
-        "example-datalake-full.html",
-        "example-high-level.html",
-        "example-high-level-dark.html",
-        "example-high-level-full.html",
-        "example-high-level-vertical.html",
-        "example-high-level-vertical-dark.html",
-        "example-high-level-vertical-full.html",
-        # `--` inside an XML comment
-        "example-slopegraph.html",
-        "example-slopegraph-dark.html",
-        "example-slopegraph-full.html",
-        "example-streamgraph.html",
-        "example-streamgraph-dark.html",
-        "example-streamgraph-full.html",
-    }
-)
+# Shipped assets the helper refuses (loudly). Empty since #407: nested icon
+# <svg> elements and `--` inside comments both export. Keep this list exact so
+# a newly unexportable asset shows up here instead of in a user's export.
+KNOWN_UNEXPORTABLE: frozenset[str] = frozenset()
 
 # Motion files named in #202; they use valueless HTML attributes.
 MOTION_FILES = (
@@ -84,6 +66,314 @@ class ExportSvgStandaloneTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.mod = load_helper()
 
+    def test_rgba_parent_normalizes_with_unrelated_page_paint(self) -> None:
+        for prop in ("fill", "stroke"):
+            for selector in (".paint", "rect.paint", "#unrelated", ".unused .paint"):
+                with self.subTest(prop=prop, selector=selector):
+                    html = f'<style>{selector}{{{prop}:#000}}</style><svg viewBox="0 0 10 10"><g {prop}="rgba(255,0,0,0.5)"><rect width="5" height="5"/></g></svg>'
+                    group = ET.fromstring(self.mod.export_svg_document(html, Path("parent.html"))).find("{http://www.w3.org/2000/svg}g")
+                    self.assertEqual(group.get(prop), "#ff0000")
+                    self.assertEqual(group.get(prop + "-opacity"), "0.5")
+
+    def test_rgba_parent_retains_alpha_when_page_paint_can_override_children(self) -> None:
+        for prop in ("fill", "stroke"):
+            for selector in (".paint", "rect", "g > rect", "rect:first-child", "[width]"):
+                with self.subTest(prop=prop, selector=selector):
+                    html = f'<style>{selector}{{{prop}:#000}}</style><svg viewBox="0 0 10 10"><g {prop}="rgba(255,0,0,0.5)"><rect class="paint" width="5" height="5"/></g></svg>'
+                    group = ET.fromstring(self.mod.export_svg_document(html, Path("parent.html"))).find("{http://www.w3.org/2000/svg}g")
+                    self.assertEqual(group.get(prop), "rgba(255,0,0,0.5)")
+                    self.assertNotIn(prop + "-opacity", group.attrib)
+
+    def test_rgba_keeps_alpha_when_css_overrides_the_painted_element(self) -> None:
+        for prop in ("fill", "stroke"):
+            for tag in ("g", "rect"):
+                html = f'<style>.paint{{{prop}:#000}}</style><svg viewBox="0 0 10 10"><{tag} class="paint" {prop}="rgba(255,0,0,0.5)"><rect width="5" height="5"/></{tag}></svg>'
+                shape = ET.fromstring(self.mod.export_svg_document(html, Path("parent.html"))).find("{http://www.w3.org/2000/svg}" + tag)
+                self.assertEqual(shape.get(prop), "rgba(255,0,0,0.5)")
+                self.assertNotIn(prop + "-opacity", shape.attrib)
+
+    def test_rgba_parent_with_unpainted_child_normalizes(self) -> None:
+        for prop in ("fill", "stroke"):
+            html = f'<svg viewBox="0 0 10 10"><g {prop}="rgba(255,0,0,0.5)" {prop}-opacity="0.5"><rect width="10" height="10"/></g></svg>'
+            exported = self.mod.export_svg_document(html, Path("parent.html"))
+            root = ET.fromstring(exported)
+            group = root.find("{http://www.w3.org/2000/svg}g")
+            self.assertEqual(group.get(prop), "#ff0000")
+            self.assertEqual(group.get(prop + "-opacity"), "0.25")
+    def test_cli_reports_source_read_errors_without_output(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.html"
+            source.write_text('<svg viewBox="0 0 10 10"></svg>', encoding="utf-8")
+            output = Path(directory) / "output.svg"
+            stderr = io.StringIO()
+            with patch.object(Path, "read_text", side_effect=PermissionError("source denied")):
+                with contextlib.redirect_stderr(stderr):
+                    result = self.mod.main([str(source), str(output)])
+            self.assertEqual(result, 2)
+            self.assertIn("error: source denied", stderr.getvalue())
+            self.assertNotIn("Traceback", stderr.getvalue())
+            self.assertFalse(output.exists())
+
+    def test_cli_reports_output_io_errors_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.html"
+            source.write_text('<svg viewBox="0 0 10 10"><rect width="10" height="10"/></svg>', encoding="utf-8")
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                result = self.mod.main([str(source), directory])
+            self.assertEqual(result, 2)
+            self.assertIn("error:", stderr.getvalue())
+            self.assertNotIn("Traceback", stderr.getvalue())
+
+    def test_nested_namespace_does_not_replace_root_namespace(self) -> None:
+        markup = '<svg viewBox="0 0 10 10"><g xmlns="http://www.w3.org/2000/svg"><rect width="10" height="10"/></g></svg>'
+        result = self.mod.ensure_xmlns(markup)
+        self.assertEqual(ET.fromstring(result).tag, "{http://www.w3.org/2000/svg}svg")
+        with self.assertRaisesRegex(ValueError, "root namespace"):
+            self.mod.ensure_xmlns('<svg xmlns="https://example.invalid/other"/>')
+
+    def test_viewbox_has_four_finite_values_and_positive_extents(self) -> None:
+        for value in ("0 0 0 10", "0 0 -10 10", "0 0 nan 10", "0 0 1e309 10", "0 0 10", "0,,0,10,10", "٠ ٠ ١٠ ١٠"):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "viewBox"):
+                self.mod.ensure_viewbox(f'<svg viewBox="{value}"/>')
+        for value in ("-10,+10,100.5,50", "0 0 1e2 1e-2", "&#48; &#48; 10 10"):
+            self.mod.ensure_viewbox(f'<svg viewBox="{value}"/>')
+
+    def test_viewbox_reads_exact_root_attribute(self) -> None:
+        html = '<svg data-viewBox="preview" data-note=\'viewBox="preview"\' viewBox="0 0 100 100"></svg>'
+        root = ET.fromstring(self.mod.export_svg_document(html, Path("viewport.html")))
+        self.assertEqual(root.get("viewBox"), "0 0 100 100")
+        for svg in (
+            '<svg data-viewBox="0 0 100 100" viewBox="0 0 0 100"></svg>',
+            '<svg data-viewBox="0 0 100 100"></svg>',
+            '<svg><g viewBox="0 0 100 100"/></svg>',
+        ):
+            with self.subTest(svg=svg), self.assertRaisesRegex(ValueError, "viewBox"):
+                self.mod.export_svg_document(svg, Path("viewport.html"))
+
+    def test_viewbox_refuses_non_svg_whitespace(self) -> None:
+        for value in ("0&#160;0&#160;100&#160;100", "&#160;0 0 100 100", "0 0 100 100&#160;"):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "viewBox"):
+                self.mod.export_svg_document(f'<svg viewBox="{value}"></svg>', Path("viewport.html"))
+
+    def test_css_gate_ignores_non_class_and_empty_attributes(self) -> None:
+        for markup in (
+            '<svg data-class="metadata"><rect fill="#fff"/></svg>',
+            '<svg><!-- class="archived" --><rect fill="#fff"/></svg>',
+            '<svg class="  "><rect fill="#fff"/></svg>',
+            '<svg><text>class="example"</text></svg>',
+        ):
+            with self.subTest(markup=markup):
+                self.mod.assert_export_gate(markup)
+        with self.assertRaisesRegex(ValueError, "no diagram CSS"):
+            self.mod.assert_export_gate('<svg><rect class="paint"/></svg>')
+
+    def test_export_uses_live_svg_and_live_styles(self) -> None:
+        html = '<!-- <svg viewBox="0 0 1 1"></svg> --><script>const sample = "<svg viewBox=\"0 0 2 2\"></svg>";</script>'
+        html += '<!-- <style>.paint {fill:red;}</style> -->'
+        html += '<style>.paint {fill:blue;}</style><svg viewBox="0 0 10 10"><!-- archived </svg> --><rect class="paint" width="10" height="10"/></svg>'
+        document = self.mod.export_svg_document(html, Path("live.html"))
+        root = ET.fromstring(document)
+        self.assertEqual(root.get("viewBox"), "0 0 10 10")
+        self.assertIn("fill:blue", document)
+        self.assertNotIn("fill:red", document)
+        self.assertIn("<!-- archived </svg> -->", document)
+
+    def test_live_css_comment_markers_and_strings_are_preserved(self) -> None:
+        css = '.x { fill:red; /* <!-- */ stroke:blue; /* --> */ } .x::before { content:"<!-- note -->"; }'
+        html = f'<style>{css}</style><svg viewBox="0 0 10 10"><rect class="x" width="10" height="10"/></svg>'
+        root = ET.fromstring(self.mod.export_svg_document(html, Path("live-style.html")))
+        styles = "".join(element.text or "" for element in root.iter() if element.tag.endswith("}style"))
+        self.assertIn("stroke:blue", styles)
+        self.assertIn('content:"<!-- note -->"', styles)
+
+    def test_svg_cdata_comment_marker_does_not_hide_closing_svg(self) -> None:
+        html = '<svg viewBox="0 0 10 10"><text><![CDATA[<!--]]></text></svg><!-- footer -->'
+        document = self.mod.export_svg_document(html, Path("cdata.html"))
+        root = ET.fromstring(document)
+        self.assertEqual(root.get("viewBox"), "0 0 10 10")
+        text = next(element for element in root.iter() if element.tag.endswith("}text"))
+        self.assertEqual(text.text, "<!--")
+        self.assertNotIn("footer", document)
+
+    def test_rgba_normalization_clamps_channels_and_alpha(self) -> None:
+        for value, paint, opacity in (
+            ("rgba(300,0,0,0.5)", "#ff0000", "0.5"),
+            ("rgba(-12,300,10,0.5)", "#00ff0a", "0.5"),
+            ("rgba(45,49,66,-0.1)", "#2d3142", "0"),
+            ("rgba(45,49,66,1.5)", "#2d3142", "1"),
+        ):
+            with self.subTest(value=value):
+                normalized = self.mod.normalize_rgba_presentation_attrs(f'<svg><rect fill="{value}"/></svg>')
+                rect = ET.fromstring(normalized)[0]
+                self.assertEqual(rect.get("fill"), paint)
+                self.assertEqual(rect.get("fill-opacity"), opacity)
+
+    def test_manual_paint_recipe_retains_css_clamping(self) -> None:
+        section = EXPORT_MD.read_text(encoding="utf-8").split("7. Normalize colors", 1)[1]
+        match = re.search(r"```python\n(.*?)\n   ```", section, re.DOTALL)
+        self.assertIsNotNone(match)
+        recipe = "\n".join(line[3:] if line.startswith("   ") else line for line in match.group(1).splitlines())
+        for svg in ('<svg><rect fill="rgba(255,0,0,0.5)" fill-opacity="0.5" style="fill:#0000ff"/></svg>', '<svg><rect stroke="rgba(255,0,0,0.5)" stroke-opacity="0.5" style="stroke:#0000ff"/></svg>', '<svg><rect fill="rgba(300,-10,20,2)"/></svg>', '<svg><rect stroke="rgba(-4,1,2,-.5)"/></svg>', '<svg><style>.paint{fill:#000}</style><g fill="rgba(255,0,0,0.5)"><rect/></g></svg>', '<svg><style>.paint{fill:#000}</style><g fill="rgba(255,0,0,0.5)"><rect class="paint"/></g></svg>', '<svg><rect fill="rgba(255,0,0,0.5)" fill-opacity="0.5"/></svg>'):
+            with self.subTest(svg=svg):
+                namespace = {"svg": svg}
+                exec(recipe, namespace)
+                self.assertEqual(namespace["svg"], self.mod.normalize_rgba_presentation_attrs(svg))
+
+    def test_defs_id_selectors_follow_namespaced_ids(self) -> None:
+        markup = '<svg><defs><linearGradient id="abc"><stop/></linearGradient></defs><style>#abc stop { stop-color:#abc; } #abc-other { fill:#fff; }</style></svg>'
+        result = self.mod.namespace_defs_ids(markup, "diagram")
+        self.assertIn('#diagram-abc stop { stop-color:#abc; }', result)
+        self.assertIn('#abc-other { fill:#fff; }', result)
+        escaped = r'<svg><defs><linearGradient id="paint.v1"/></defs><style>#paint\.v1 stop { stop-color:#fff; }</style></svg>'
+        result = self.mod.namespace_defs_ids(escaped, "diagram")
+        self.assertIn(r'#diagram-paint\.v1 stop', result)
+
+    def test_defs_selector_retarget_keeps_cdata_stylesheets(self) -> None:
+        css = '.paint { fill:red; } #abc stop { stop-color:#fff; }'
+        markup = ('<svg viewBox="0 0 10 10"><defs><linearGradient id="abc"><stop/></linearGradient></defs>'
+                  '<style><![CDATA[' + css + ']]></style><rect class="paint" width="5" height="5"/></svg>')
+        result = self.mod.namespace_defs_ids(markup, "diagram")
+        self.assertIn('<style><![CDATA[.paint { fill:red; } #diagram-abc stop { stop-color:#fff; }]]></style>', result)
+        self.assertNotIn('&lt;![CDATA[', result)
+        root = ET.fromstring(self.mod.export_svg_document(markup, Path("diagram.html")))
+        texts = [element.text or "" for element in root.iter() if element.tag.endswith("}style")]
+        # The SVG's own <style> keeps working CSS after the defs rename.
+        self.assertIn('.paint { fill:red; } #diagram-abc stop { stop-color:#fff; }', texts)
+
+    def test_defs_selector_retarget_survives_quotes_in_css_comments(self) -> None:
+        for wrap in (lambda css: css, lambda css: "<![CDATA[" + css + "]]>"):
+            css = "#shape { /* user's color */ fill:red; }"
+            markup = ('<svg><defs><g id="shape"/></defs><style>' + wrap(css) + '</style>'
+                      '<use href="#shape"/></svg>')
+            with self.subTest(markup=markup):
+                result = self.mod.namespace_defs_ids(markup, "diagram")
+                self.assertIn("#diagram-shape { /* user's color */ fill:red; }", result)
+
+    def test_cdata_url_references_stay_raw_after_defs_rename(self) -> None:
+        markup = ('<svg><defs><linearGradient id="A&amp;B"/></defs>'
+                  '<style><![CDATA[.paint { fill:url(#A&B); }]]></style></svg>')
+        result = self.mod.namespace_defs_ids(markup, "diagram")
+        self.assertIn('id="diagram-A&amp;B"', result)
+        self.assertIn("<![CDATA[.paint { fill:url(#diagram-A&B); }]]>", result)
+        plain = ('<svg><defs><linearGradient id="A&amp;B"/></defs>'
+                 '<style>.paint { fill:url(#A&amp;B); }</style></svg>')
+        self.assertIn(".paint { fill:url(#diagram-A&amp;B); }", self.mod.namespace_defs_ids(plain, "diagram"))
+
+    def test_unfinished_rule_with_repeated_comments_does_not_stall(self) -> None:
+        import subprocess
+        markup = ('<svg><defs><g id="shape"/></defs><style>.paint { fill:red;'
+                  + "/*x*/" * 40 + '</style><use href="#shape"/></svg>')
+        code = ("import importlib.util, sys; spec = importlib.util.spec_from_file_location('e', sys.argv[1]); "
+                "mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod); "
+                "print(mod.namespace_defs_ids(sys.stdin.read(), 'diagram'))")
+        try:
+            result = subprocess.run([sys.executable, "-c", code, str(HELPER)], input=markup,
+                                    capture_output=True, text=True, timeout=10)
+        except subprocess.TimeoutExpired:
+            self.fail("an unfinished rule followed by repeated CSS comments stalled the rule matcher")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('id="diagram-shape"', result.stdout)
+
+    def test_style_closing_tag_whitespace_keeps_selectors_retargeted(self) -> None:
+        markup = '<svg><defs><g id="shape"/></defs><style>#shape { fill:red; }</style ><use href="#shape"/></svg>'
+        self.assertIn("#diagram-shape { fill:red; }", self.mod.namespace_defs_ids(markup, "diagram"))
+
+    def test_defs_selectors_decode_xml_and_preserve_escaped_braces(self) -> None:
+        for ident, selector, expected_id, expected_selector in (
+            ("p&#46;v", r"#p\.v", "diagram-p.v", r"#diagram-p\.v"),
+            ("paint{v", r"#paint\{v", "diagram-paint{v", r"#diagram-paint\{v"),
+            ("A&amp;B", r"#A\&amp;B", "diagram-A&B", r"#diagram-A\&B"),
+        ):
+            with self.subTest(ident=ident):
+                html = '<svg viewBox="0 0 10 10"><defs><linearGradient id="' + ident + '"/></defs>'
+                html += '<style>' + selector + ' stop { stop-color:#fff; }</style></svg>'
+                root = ET.fromstring(self.mod.export_svg_document(html, Path("diagram.html")))
+                gradient = next(element for element in root.iter() if element.tag.endswith("}linearGradient"))
+                self.assertEqual(gradient.get("id"), expected_id)
+                css = "".join(element.text or "" for element in root.iter() if element.tag.endswith("}style"))
+                self.assertIn(expected_selector + " stop { stop-color:#fff; }", css)
+
+    def test_reusable_defs_shapes_are_namespaced(self) -> None:
+        for tag in ("g", "path", "rect", "circle", "ellipse", "line", "polyline", "polygon", "text", "image", "use"):
+            with self.subTest(tag=tag):
+                markup = f'<svg><defs><{tag} id="shape"/></defs><use href="#shape"/><use xlink:href="#shape"/></svg>'
+                result = self.mod.namespace_defs_ids(markup, "diagram")
+                self.assertIn('id="diagram-shape"', result)
+                self.assertIn('href="#diagram-shape"', result)
+                self.assertIn('xlink:href="#diagram-shape"', result)
+
+    def test_reusable_shapes_keep_css_id_styles_after_public_export(self) -> None:
+        html = '<style>#abc { fill:#abc; } #holder > path { stroke:red; }</style>'
+        html += '<svg viewBox="0 0 10 10"><defs><g id="holder"><path id="abc" d="M0 0H10V10H0Z"/></g></defs>'
+        html += '<use href="#holder"/></svg>'
+        root = ET.fromstring(self.mod.export_svg_document(html, Path("diagram.html")))
+        css = "".join(element.text or "" for element in root.iter() if element.tag.endswith("}style"))
+        self.assertIn("#diagram-abc { fill:#abc; }", css)
+        self.assertIn("#diagram-holder > path { stroke:red; }", css)
+        self.assertEqual(next(element for element in root.iter() if element.tag.endswith("}path")).get("id"), "diagram-abc")
+        self.assertEqual(next(element for element in root.iter() if element.tag.endswith("}use")).get("href"), "#diagram-holder")
+
+    def test_defs_references_compare_decoded_xml_ids(self) -> None:
+        markup = '<svg><defs><linearGradient id="A&#38;B"/></defs><use href="#A&amp;B"/><rect fill="url(#A&#x26;B)"/></svg>'
+        result = self.mod.namespace_defs_ids(markup, "diagram")
+        root = ET.fromstring(result)
+        self.assertEqual(root[0][0].get("id"), "diagram-A&B")
+        self.assertEqual(root[1].get("href"), "#diagram-A&B")
+        self.assertEqual(root[2].get("fill"), "url(#diagram-A&B)")
+
+    def test_distinct_once_decoded_ids_keep_distinct_definitions_and_references(self) -> None:
+        markup = '<svg><defs><linearGradient id="A&#38;B"/><linearGradient id="A&amp;#38;B"/></defs>'
+        markup += '<use href="#A&#38;B"/><use href="#A&amp;#38;B"/>'
+        markup += '<rect fill="url(#A&#38;B)"/><rect fill="url(#A&amp;#38;B)"/></svg>'
+        root = ET.fromstring(self.mod.namespace_defs_ids(markup, "diagram"))
+        self.assertEqual([element.get("id") for element in root.find("defs")],
+                         ["diagram-A&B", "diagram-A&#38;B"])
+        self.assertEqual([element.get("href") for element in root.findall("use")],
+                         ["#diagram-A&B", "#diagram-A&#38;B"])
+        self.assertEqual([element.get("fill") for element in root.findall("rect")],
+                         ["url(#diagram-A&B)", "url(#diagram-A&#38;B)"])
+
+    def test_style_selectors_follow_once_decoded_distinct_defs_ids(self) -> None:
+        # #376 selector retargeting combined with #381 single-decode IDs:
+        # A&#38;B and A&amp;#38;B are different IDs and keep different rules.
+        html = r'<svg viewBox="0 0 10 10"><defs><linearGradient id="A&#38;B"/><linearGradient id="A&amp;#38;B"/></defs>'
+        html += r'<style>#A\&amp;B stop { stop-color:red; } #A\&amp;\#38\;B stop { stop-color:blue; }</style>'
+        html += '<rect fill="url(#A&#38;B)"/><rect fill="url(#A&amp;#38;B)"/></svg>'
+        root = ET.fromstring(self.mod.export_svg_document(html, Path("diagram.html")))
+        css = "".join(element.text or "" for element in root.iter() if element.tag.endswith("}style"))
+        self.assertIn(r"#diagram-A\&B stop { stop-color:red; }", css)
+        self.assertIn(r"#diagram-A\&\#38\;B stop { stop-color:blue; }", css)
+        self.assertEqual([element.get("fill") for element in root.iter() if element.tag.endswith("}rect")],
+                         ["url(#diagram-A&B)", "url(#diagram-A&#38;B)"])
+
+    def test_metadata_defs_382_ignores_data_id_inside_defs(self) -> None:
+        markup = '<svg><defs><marker id="arrow"/><g data-id="ghost"/></defs><g data-id="arrow" data-href="#arrow"/><use href="#arrow"/></svg>'
+        root = ET.fromstring(self.mod.namespace_defs_ids(markup, "d"))
+        self.assertEqual(root.find("g").get("data-id"), "arrow")
+        self.assertEqual(root.find("g").get("data-href"), "#arrow")
+        self.assertEqual(root.find("use").get("href"), "#d-arrow")
+        self.assertEqual(self.mod.find_defs_ids(markup), ["arrow"])
+
+    def test_metadata_defs_382_does_not_retarget_a_data_id_definition(self) -> None:
+        markup = '<svg><defs><g data-id="ghost"/></defs><g id="ghost"/><use href="#ghost"/></svg>'
+        self.assertEqual(self.mod.find_defs_ids(markup), [])
+        self.assertEqual(self.mod.namespace_defs_ids(markup, "d"), markup)
+
+    def test_metadata_defs_382_template_dots_keep_namespace(self) -> None:
+        source = ASSETS / "template.html"
+        exported = self.mod.export_svg_document(source.read_text(encoding="utf-8"), source)
+        self.assertIn('id="template-dots"', exported)
+        self.assertIn('url(#template-dots)', exported)
+
+    def test_metadata_defs_382_shared_live_symbol_references_resolve(self) -> None:
+        markup = '<svg viewBox="0 0 10 10"><defs><!-- <pattern id="dot"/> --></defs><symbol id="dot"><rect width="5" height="5" fill="red"/></symbol><use href="#dot"/></svg>'
+        exported = self.mod.export_svg_document(markup, Path("b.html"))
+        root = ET.fromstring(exported)
+        symbol = next(element for element in root.iter() if element.tag.endswith("}symbol"))
+        use = next(element for element in root.iter() if element.tag.endswith("}use"))
+        self.assertEqual(use.get("href"), "#" + symbol.get("id"))
+
     def test_helper_and_docs_exist(self) -> None:
         self.assertTrue(HELPER.is_file())
         self.assertTrue(EXPORT_MD.is_file())
@@ -120,6 +410,18 @@ class ExportSvgStandaloneTests(unittest.TestCase):
         self.assertIn("class=\"station\"", svg)
         self.assertIn("<style>", svg)
 
+    def test_system_fonts_export_makes_no_font_request(self) -> None:
+        source = ASSETS / "example-loop.html"
+        html = source.read_text(encoding="utf-8")
+        default = self.mod.export_svg_document(html, source)
+        self.assertIn("fonts.googleapis.com", default)
+        offline = self.mod.export_svg_document(html, source, system_fonts=True)
+        self.assertNotIn("fonts.googleapis.com", offline)
+        self.assertNotIn("@import", offline)
+        # The diagram CSS still ships, so class-styled marks keep their fills.
+        self.assertIn("#example-loop-root .station", offline)
+        ET.fromstring(offline.split("\n", 1)[1])
+
     def test_loop_export_namespaces_defs_ids_longest_first(self) -> None:
         source = ASSETS / "example-loop.html"
         svg = self.mod.export_svg_document(source.read_text(encoding="utf-8"), source)
@@ -139,6 +441,28 @@ class ExportSvgStandaloneTests(unittest.TestCase):
         self.assertIsNone(re.search(r'\bid="dots"', svg))
         self.assertIsNone(re.search(r"url\(#arrow\)", svg))
         self.assertIsNone(re.search(r"url\(#dots\)", svg))
+
+    def test_quoted_local_paint_urls_follow_namespaced_defs(self) -> None:
+        references = (
+            'url(#paint)', 'url("#paint")', "url('#paint')",
+            'url(  "#paint"  )', 'url(&quot;#paint&quot;)', 'url(&apos;#paint&apos;)',
+        )
+        for reference in references:
+            with self.subTest(reference=reference):
+                markup = '<svg><defs><linearGradient id="paint"/></defs>'
+                markup += '<rect style="fill: ' + reference.replace('"', '&quot;') + '"/>'
+                markup += '<style>.node { fill: ' + reference + '; }</style></svg>'
+                exported = self.mod.namespace_defs_ids(markup, "quoted")
+                self.assertIn('id="quoted-paint"', exported)
+                expected = reference.replace('#paint', '#quoted-paint').replace('  ', '')
+                self.assertIn(expected, exported)
+                self.assertIn(expected.replace('"', '&quot;'), exported)
+                self.assertEqual(exported.count('#quoted-paint'), 2)
+        untouched = '<svg><defs><linearGradient id="paint"/></defs>'
+        untouched += '<rect fill="url(#paint-other)" stroke="url(other.svg#paint)"/></svg>'
+        result = self.mod.namespace_defs_ids(untouched, "quoted")
+        self.assertIn('url(#paint-other)', result)
+        self.assertIn('url(other.svg#paint)', result)
 
     def test_light_and_dark_architecture_do_not_collide_when_inlined(self) -> None:
         light_src = ASSETS / "example-architecture.html"
@@ -204,6 +528,156 @@ class ExportSvgStandaloneTests(unittest.TestCase):
         import xml.etree.ElementTree as ET
         ET.fromstring(svg)
 
+    def test_rgba_retains_alpha_with_css_or_inherited_opacity(self) -> None:
+        for prop in ("fill", "stroke"):
+            paint = f'{prop}="rgba(255,0,0,0.5)"'
+            snippets = (
+                f'<style>.paint {{ {prop}-opacity:0.5 }}</style><rect class="paint" {paint} {prop}-opacity="0.8"/>',
+                f'<g {prop}-opacity="0.5"><rect {paint}/></g>',
+                f'<rect {paint} {prop}-opacity="0.8" style="{prop}-opacity:0.5"/>',
+            )
+            for snippet in snippets:
+                with self.subTest(prop=prop, snippet=snippet):
+                    result = self.mod.export_svg_document(f'<svg viewBox="0 0 10 10">{snippet}</svg>', Path("cascade.html"))
+                    shape = ET.fromstring(result).find("{http://www.w3.org/2000/svg}rect")
+                    if shape is None:
+                        shape = ET.fromstring(result).find(".//{http://www.w3.org/2000/svg}rect")
+                    self.assertEqual(shape.get(prop), "rgba(255,0,0,0.5)")
+
+    def test_rgba_parent_preserves_independent_child_paints(self) -> None:
+        for prop in ("fill", "stroke"):
+            html = f'<svg viewBox="0 0 10 10"><g {prop}="rgba(255,0,0,0.5)" {prop}-opacity="0.5"><rect {prop}="#0000ff"/></g></svg>'
+            result = ET.fromstring(self.mod.export_svg_document(html, Path("parent.html")))
+            group = result.find("{http://www.w3.org/2000/svg}g")
+            self.assertEqual(group.get(prop), "rgba(255,0,0,0.5)")
+            self.assertEqual(group.get(f"{prop}-opacity"), "0.5")
+            self.assertEqual(group[0].get(prop), "#0000ff")
+
+    def test_rgba_keeps_opacity_when_own_inline_paint_overrides_color(self) -> None:
+        for prop in ("fill", "stroke"):
+            for declaration in (f"{prop}:#0000ff", f"{prop.upper()}:#0000ff", f"/* inline */ {prop}:#0000ff"):
+                with self.subTest(paint=prop, declaration=declaration):
+                    html = (f'<svg viewBox="0 0 10 10"><rect {prop}="rgba(255,0,0,0.5)" '
+                            f'{prop}-opacity="0.5" style="{declaration}"/></svg>')
+                    root = ET.fromstring(self.mod.export_svg_document(html, Path("inline.html")))
+                    rect = root.find("{http://www.w3.org/2000/svg}rect")
+                    self.assertEqual(rect.get(f"{prop}-opacity"), "0.5")
+                    self.assertEqual(rect.get(prop), "rgba(255,0,0,0.5)")
+                    self.assertEqual(rect.get("style"), declaration)
+
+    def test_rgba_css_guard_reads_entities_and_escaped_property_names(self) -> None:
+        for prop in ("fill", "stroke"):
+            declarations = (f"{prop}-opacity&#58;0.5", f"{prop}\\2d opacity:0.5", f"{prop}&#92;2d opacity&#58;0.5")
+            for declaration in declarations:
+                html = f'<svg viewBox="0 0 10 10"><rect {prop}="rgba(255,0,0,0.5)" style="{declaration}"/></svg>'
+                result = ET.fromstring(self.mod.export_svg_document(html, Path("encoded.html")))
+                self.assertEqual(result.find("{http://www.w3.org/2000/svg}rect").get(prop), "rgba(255,0,0,0.5)")
+            html = f'<svg viewBox="0 0 10 10"><style>rect {{ {prop}\\2d opacity:0.5 }}</style><rect {prop}="rgba(255,0,0,0.5)"/></svg>'
+            result = ET.fromstring(self.mod.export_svg_document(html, Path("escaped.html")))
+            self.assertEqual(result.find("{http://www.w3.org/2000/svg}rect").get(prop), "rgba(255,0,0,0.5)")
+    def test_quoted_urls_preserve_delimiters_and_exact_fragment_case(self) -> None:
+        markup = '<svg><defs><linearGradient id="paint)"/></defs><style>.paint { fill:url("#paint)"); }</style></svg>'
+        result = self.mod.namespace_defs_ids(markup, "quoted")
+        self.assertIn('url("#quoted-paint)")', result)
+        markup = '<svg><defs><linearGradient id="A"/><linearGradient id="a"/></defs>'
+        markup += '<style>.paint { fill:URL("#a"); stroke:url("#A"); }</style><use HREF="#a"/></svg>'
+        result = self.mod.namespace_defs_ids(markup, "quoted")
+        self.assertIn('url("#quoted-a")', result)
+        self.assertIn('url("#quoted-A")', result)
+        self.assertIn('HREF="#quoted-a"', result)
+
+    def test_root_selector_retarget_preserves_literals_and_escapes(self) -> None:
+        selector = r"""#original .paint[data-label="#original"], [data-label='#original'], .\#original, #original-child, #original\:child, #originalé"""
+        expected = r"""#export-root .paint[data-label="#original"], [data-label='#original'], .\#original, #original-child, #original\:child, #originalé"""
+        self.assertEqual(self.mod.retarget_root_selector(selector, "original", "export-root"), expected)
+        escaped_quote = r' .paint[data-label="escaped\"#original"] #original'
+        self.assertEqual(self.mod.retarget_root_selector(escaped_quote, "original", "export-root"),
+                         r' .paint[data-label="escaped\"#original"] #export-root')
+        html = '<style>.paint[data-label="#original"] { fill:#00ff00 } #original .paint { stroke:#0000ff }</style>'
+        html += '<svg id="original" viewBox="0 0 40 40"><rect class="paint" data-label="#original" width="40" height="40"/></svg>'
+        svg = self.mod.export_svg_document(html, Path("literal.html"))
+        self.assertIn('#literal-root .paint[data-label="#original"]', svg)
+        self.assertIn('#literal-root .paint { stroke:#0000ff }', svg)
+
+    def test_named_html_entities_retain_readable_text(self) -> None:
+        html = '<svg viewBox="0 0 40 40"><title>R&nbsp;D &copy;</title><desc>&LT;literal&GT;</desc>'
+        html += '<text data-label="&quot;A&nbsp;B&quot;">R&nbsp;D &amp;nbsp; &copy; &#160;</text></svg>'
+        result = self.mod.export_svg_document(html, Path("entities.html"))
+        root = ET.fromstring(result)
+        text = root.find("{http://www.w3.org/2000/svg}text")
+        self.assertEqual(text.text, "R\u00a0D &nbsp; © \u00a0")
+        self.assertEqual(text.get("data-label"), '"A\u00a0B"')
+        self.assertEqual(root.find("{http://www.w3.org/2000/svg}desc").text, "<literal>")
+        opaque = '<!-- &nbsp; --><![CDATA[&nbsp;]]><style>.label {content:"&nbsp;"}</style>'
+        self.assertEqual(self.mod.normalize_html_entities(opaque), opaque)
+        self.assertEqual(self.mod.normalize_html_entities('&notARealEntity;'), '&notARealEntity;')
+
+    def test_defs_reference_rewrite_leaves_visible_text_alone(self) -> None:
+        markup = ('<svg><defs><linearGradient id="paint"/></defs>'
+                  '<style>.a { fill:url("#paint") } .b { stroke:url(#paint) }</style>'
+                  '<rect fill="url(#paint)"/><use href="#paint"/>'
+                  '<text>Use url("#paint"), url(#paint) or href="#paint"</text>'
+                  '<title>id="paint"</title><!-- url(#paint) --></svg>')
+        result = self.mod.namespace_defs_ids(markup, "diagram")
+        self.assertIn('<linearGradient id="diagram-paint"/>', result)
+        self.assertIn('.a { fill:url("#diagram-paint") } .b { stroke:url(#diagram-paint) }', result)
+        self.assertIn('<rect fill="url(#diagram-paint)"/><use href="#diagram-paint"/>', result)
+        self.assertIn('<text>Use url("#paint"), url(#paint) or href="#paint"</text>', result)
+        self.assertIn('<title>id="paint"</title>', result)
+        # Comments are not visible text; a commented-out block stays consistent.
+        self.assertIn('<!-- url(#diagram-paint) -->', result)
+
+    def test_legacy_entities_without_semicolon_follow_html_contexts(self) -> None:
+        html = '<svg viewBox="0 0 40 40"><title>Copyright &copy 2026</title>'
+        html += '<text data-label="&copy 2026">A&nbsp B &amp C &lt D</text></svg>'
+        root = ET.fromstring(self.mod.export_svg_document(html, Path("legacy.html")))
+        self.assertEqual(root.find("{http://www.w3.org/2000/svg}title").text, "Copyright \u00a9 2026")
+        text = root.find("{http://www.w3.org/2000/svg}text")
+        self.assertEqual(text.text, "A\u00a0 B & C < D")
+        self.assertEqual(text.get("data-label"), "\u00a9 2026")
+        # In attribute values HTML leaves a legacy name followed by an
+        # alphanumeric or "=" undecoded; text content decodes the prefix.
+        self.assertEqual(self.mod.normalize_html_entities('<a data-q="x&copy=1&notit">'),
+                         '<a data-q="x&copy=1&notit">')
+        self.assertEqual(self.mod.normalize_html_entities("<b>&notit</b>"), "<b>\u00acit</b>")
+
+    def test_escaped_root_id_keeps_retargeted_styles(self) -> None:
+        html = '<style>#a\\&b .paint { fill:#ff0000 }</style>'
+        html += '<svg id="a&amp;b" viewBox="0 0 40 40"><rect class="paint" width="40" height="40"/></svg>'
+        svg = self.mod.export_svg_document(html, Path("escaped.html"))
+        self.assertIn("#escaped-root .paint { fill:#ff0000 }", svg)
+        # A legacy name HTML leaves literal in an attribute stays literal here too.
+        for source_id, css_id in (("x&copy2026", "x\\&copy2026"), ("n&#38;m", "n\\&m"),
+                                  ("a&#128;b", "a\u20acb"), ("c&#x80;d", "c\u20acd"), ("e&#38f", "e\\&f")):
+            html = f'<style>#{css_id} .paint {{ fill:#ff0000 }}</style>'
+            html += f'<svg id="{source_id}" viewBox="0 0 40 40"><rect class="paint" width="40" height="40"/></svg>'
+            svg = self.mod.export_svg_document(html, Path("literal-id.html"))
+            self.assertIn("#literal-id-root .paint { fill:#ff0000 }", svg)
+
+    def test_raw_text_opening_attributes_normalize_entities(self) -> None:
+        for tag in ("style", "script"):
+            raw = f'<{tag} title="Copyright &copy; > literal">raw &copy; content</{tag}>'
+            expected = f'<{tag} title="Copyright © > literal">raw &copy; content</{tag}>'
+            self.assertEqual(self.mod.normalize_html_entities(raw), expected)
+        html = '<svg viewBox="0 0 10 10"><style title="Copyright &copy; > literal">.label {fill:red}</style><rect class="label" width="10" height="10"/></svg>'
+        result = ET.fromstring(self.mod.export_svg_document(html, Path("style-attribute.html")))
+        style = result.find("{http://www.w3.org/2000/svg}style")
+        self.assertEqual(style.get("title"), "Copyright © > literal")
+        self.assertEqual(style.text, ".label {fill:red}")
+
+    def test_new_defs_preserve_leading_accessible_title(self) -> None:
+        for asset in ("example-journey.html", "example-polar.html"):
+            source = ASSETS / asset
+            root = ET.fromstring(self.mod.export_svg_document(source.read_text(encoding="utf-8"), source))
+            self.assertEqual(root[0].tag, "{http://www.w3.org/2000/svg}title")
+            self.assertEqual(root[1].tag, "{http://www.w3.org/2000/svg}desc")
+        html = '<svg viewBox="0 0 40 40"><!-- before title --><title><![CDATA[Literal </title> text]]></title>'
+        html += '<desc>Keep description</desc><rect width="40" height="40"/></svg>'
+        root = ET.fromstring(self.mod.export_svg_document(html, Path("title.html")))
+        self.assertEqual(root[0].text, "Literal </title> text")
+        self.assertEqual(root[1].text, "Keep description")
+        self.assertEqual(root[2].tag, "{http://www.w3.org/2000/svg}defs")
+
     def test_cli_writes_default_path(self) -> None:
         source = ASSETS / "example-loop.html"
         with tempfile.TemporaryDirectory() as tmp:
@@ -231,6 +705,88 @@ class ExportSvgStandaloneTests(unittest.TestCase):
         self.assertIn('fill="#2d3142" fill-opacity="0.10"', svg)
         self.assertIn('stroke="none"', svg)
         self.assertIn('id="rgba-demo-dots"', svg)
+
+    def test_rgba_combines_existing_presentation_opacity(self) -> None:
+        for prop in ("fill", "stroke"):
+            for quote in ('"', "'"):
+                for alpha, original, expected in (("0.5", "0.5", "0.25"), ("0.5", "50%", "0.25"), ("2", "0.5", "0.5")):
+                    with self.subTest(prop=prop, quote=quote, alpha=alpha, opacity=original):
+                        source = '<svg viewBox="0 0 40 40"><rect width="40" height="40" '
+                        source += f'{prop}={quote}rgba(255,0,0,{alpha}){quote} {prop}-opacity="{original}"/></svg>'
+                        result = self.mod.export_svg_document(source, Path("opacity.html"))
+                        shape = ET.fromstring(result).find('{http://www.w3.org/2000/svg}rect')
+                        self.assertEqual(shape.get(prop), '#ff0000')
+                        self.assertEqual(shape.get(f'{prop}-opacity'), expected)
+        source = '<svg viewBox="0 0 10 10"><text>fill="rgba(255,0,0,0.5)"</text>'
+        source += '<!-- fill="rgba(255,0,0,0.5)" --><![CDATA[stroke="rgba(255,0,0,0.5)"]]>'
+        source += '<rect data-fill="rgba(255,0,0,0.5)" fill="#ff0000"/></svg>'
+        result = self.mod.export_svg_document(source, Path("inert.html"))
+        self.assertIn('<text>fill="rgba(255,0,0,0.5)"</text>', result)
+        self.assertIn('<!-- fill="rgba(255,0,0,0.5)" -->', result)
+        self.assertIn('<![CDATA[stroke="rgba(255,0,0,0.5)"]]>', result)
+        self.assertIn('data-fill="rgba(255,0,0,0.5)"', result)
+    def test_compound_original_root_does_not_gain_an_ancestor(self) -> None:
+        for selector in ('.diagram#original .paint',
+                         'svg.diagram#original .paint',
+                         '[data-mode="active"]#original.diagram .paint'):
+            with self.subTest(selector=selector):
+                source = '<style>' + selector + ' {fill:#ff0000}</style>'
+                source += '<svg id="original" class="diagram" data-mode="active" viewBox="0 0 40 40">'
+                source += '<rect class="paint" width="40" height="40"/></svg>'
+                result = self.mod.export_svg_document(source, Path('compound.html'))
+                expected = selector.replace('#original', '#compound-root')
+                self.assertIn(expected + ' { fill:#ff0000 }', embedded_css(result))
+                self.assertNotIn('#compound-root ' + expected, embedded_css(result))
+
+    def test_hex_root_escape_retains_descendant_separator(self) -> None:
+        source = r'<style>.paint {fill:#00ff00} #\31  .paint {fill:#ff0000}</style>'
+        source += '<svg id="1" viewBox="0 0 40 40"><rect class="paint" width="40" height="40"/></svg>'
+        result = self.mod.export_svg_document(source, Path('single-hex.html'))
+        self.assertIn('#single-hex-root .paint { fill:#ff0000 }', embedded_css(result))
+        self.assertNotIn('#single-hex-root.paint', embedded_css(result))
+
+    def test_root_retarget_compares_whole_decoded_css_id_tokens(self) -> None:
+        cases = (
+            (r'#panel.v1 .paint', 'panel.v1', r'#panel.v1 .paint'),
+            (r'#panel\.v1 .paint', 'panel.v1', '#export-root .paint'),
+            (r'#panel\2e v1 .paint', 'panel.v1', '#export-root .paint'),
+            (r'#panel\00002Ev1 .paint', 'panel.v1', '#export-root .paint'),
+            (r'#panel\:v1 .paint', 'panel:v1', '#export-root .paint'),
+            (r'#panel\.v1-child .paint', 'panel.v1', r'#panel\.v1-child .paint'),
+            ('#123 .paint', '123', '#123 .paint'),
+            (r'#\31 23 .paint', '123', '#export-root .paint'),
+            (r'#\-123 .paint', '-123', '#export-root .paint'),
+            ('#-123 .paint', '-123', '#-123 .paint'),
+            ('#面板 .paint', '面板', '#export-root .paint'),
+        )
+        for selector, original, expected in cases:
+            with self.subTest(selector=selector):
+                self.assertEqual(self.mod.retarget_root_selector(selector, original, 'export-root'), expected)
+        self.assertEqual(self.mod.scope_selector('.paint[data-label="#export-root"]', 'export-root'),
+                         '#export-root .paint[data-label="#export-root"]')
+        self.assertEqual(self.mod.scope_selector('.paint:is(#export-root)', 'export-root'),
+                         '#export-root .paint:is(#export-root)')
+
+    def test_original_svg_root_selectors_follow_replaced_id(self) -> None:
+        for quote in ('"', "'"):
+            with self.subTest(quote=quote):
+                html = '<style>#original .paint {fill: #ff0000;} '
+                html += '#original-child {stroke: #00ff00;}</style>'
+                html += '<svg id=' + quote + 'original' + quote + ' viewBox="0 0 40 40">'
+                html += '<rect id="original-child" class="paint" width="40" height="40"/></svg>'
+                result = self.mod.export_svg_document(html, Path("renamed.html"))
+                css = embedded_css(result)
+                self.assertIn('#renamed-root .paint { fill: #ff0000; }', css)
+                self.assertIn('#original-child { stroke: #00ff00; }', css)
+                self.assertIn('id="original-child"', result)
+                self.assertNotIn('#original .paint', css)
+        # An unrelated attribute that contains the word id is not the root id.
+        source = '<style>#original .paint {fill: #f00;}</style>'
+        source += '<svg data-id="original" viewBox="0 0 10 10"><rect class="paint"/></svg>'
+        result = self.mod.export_svg_document(source, Path("data-id.html"))
+        self.assertIn('#original .paint', embedded_css(result))
+        self.assertIn('data-id="original"', result)
+        self.assertEqual(ET.fromstring(result).get('id'), 'data-id-root')
 
     def test_root_tokens_bind_to_svg_root(self) -> None:
         # Without the :root re-scope the tokens land on `#root :root`, which
@@ -365,7 +921,13 @@ class ExportSvgStandaloneTests(unittest.TestCase):
                 html = source.read_text(encoding="utf-8")
                 slug = source.stem
                 svg = self.mod.export_svg_document(html, source)
-                ET.fromstring(svg)
+                root = ET.fromstring(svg)
+                for element in root.iter():
+                    for paint in ("fill", "stroke"):
+                        self.assertNotRegex(
+                            element.get(paint, ""), r"(?i)^\s*rgba\(",
+                            f"{source.name}: {paint} presentation paint must export without rgba",
+                        )
                 css = embedded_css(svg)
                 page_css = re.sub(
                     r"/\*.*?\*/", "", "\n".join(PAGE_STYLE_RE.findall(html)), flags=re.DOTALL
@@ -391,6 +953,43 @@ class ExportSvgStandaloneTests(unittest.TestCase):
                         rf"#{re.escape(slug)}-root[^{{}},]*\.{re.escape(cls)}(?![\w-])",
                         f"class {cls!r} is styled on the page but has no scoped rule",
                     )
+
+    def test_nested_icon_svg_does_not_end_the_extraction(self) -> None:
+        html = ('<p>intro</p><svg viewBox="0 0 100 50"><g><svg x="2" y="2" width="8" height="8" viewBox="0 0 8 8">'
+                '<path d="M0 0h8v8z"/></svg><svg x="12" y="2" width="8" height="8"/></g>'
+                '<rect id="after" width="10" height="10"/></svg><svg viewBox="0 0 1 1"><rect id="second"/></svg>')
+        extracted = self.mod.extract_first_svg(html)
+        self.assertTrue(extracted.startswith('<svg viewBox="0 0 100 50">'))
+        self.assertTrue(extracted.endswith('<rect id="after" width="10" height="10"/></svg>'))
+        self.assertNotIn('id="second"', extracted)
+        root = ET.fromstring(self.mod.export_svg_document(html, Path("nested.html")))
+        self.assertTrue(any(element.get("id") == "after" for element in root.iter()))
+
+    def test_comments_with_double_hyphens_export_as_xml(self) -> None:
+        html = ('<svg viewBox="0 0 10 10"><!-- focal -- and worse --><!-- trailing dash--->'
+                '<!-- fine --><style><![CDATA[.a { --x: 1; }]]></style><rect class="a"/></svg>')
+        svg = self.mod.export_svg_document(html, Path("comments.html"))
+        ET.fromstring(svg)
+        self.assertIn("<!-- fine -->", svg)
+        self.assertIn("<!-- focal - - and worse -->", svg)
+        self.assertIn("<!-- trailing dash- -->", svg)
+        self.assertIn("<![CDATA[.a { --x: 1; }]]>", svg)
+        for comment in re.findall(r"<!--(.*?)-->", svg, flags=re.DOTALL):
+            self.assertNotIn("--", comment)
+            self.assertFalse(comment.endswith("-"), comment)
+
+    def test_svg_extraction_reads_quoted_attributes_and_whole_tag_names(self) -> None:
+        html = ('<svg-icon name="x"></svg-icon><svg viewBox="0 0 9 9" aria-label="in/out />">'
+                '<svg viewBox="0 0 8 8"><path id="icon"/></svg><rect id="after"/></svg>')
+        extracted = self.mod.extract_first_svg(html)
+        self.assertTrue(extracted.startswith('<svg viewBox="0 0 9 9"'), extracted)
+        self.assertTrue(extracted.endswith('<rect id="after"/></svg>'), extracted)
+
+    def test_comments_browsers_close_early_are_refused(self) -> None:
+        for comment in ("<!-- a --!>", "<!-->", "<!--->"):
+            html = '<svg viewBox="0 0 9 9">' + comment + '<rect id="live"/><!-- x --></svg>'
+            with self.subTest(comment=comment), self.assertRaises(ValueError):
+                self.mod.export_svg_document(html, Path("comment.html"))
 
     def test_known_unexportable_assets_are_refused_loudly(self) -> None:
         for name in sorted(KNOWN_UNEXPORTABLE):

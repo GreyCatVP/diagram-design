@@ -50,7 +50,7 @@ ASSET_DIR = ROOT / "skills/diagram-design/assets"
 CELL_RE = re.compile(r"<rect\b(?P<attrs>[^>]*)/?>", re.IGNORECASE)
 TEXT_RE = re.compile(r"<text\b(?P<attrs>[^>]*)>(?P<body>.*?)</text>", re.IGNORECASE | re.DOTALL)
 CIRCLE_RE = re.compile(r"<circle\b(?P<attrs>[^>]*)/?>", re.IGNORECASE)
-ATTR_RE = re.compile(r'(?P<name>[\w:-]+)="(?P<value>[^"]*)"')
+ATTR_RE = re.compile(r'''(?P<name>[\w:-]+)\s*=\s*(?P<quote>["'])(?P<value>.*?)(?P=quote)''', re.DOTALL)
 ROTATE_RE = re.compile(r"rotate\(\s*(?P<deg>-?[\d.]+)")
 TAG_RE = re.compile(r"<[^>]+>")
 # A cell states its size one of two ways, and the two must not be confused: a
@@ -155,7 +155,7 @@ def parse_cells(source: str, findings: list[str] | None = None) -> list[Box]:
     """
     seen: list[Box] = []
     for m in CELL_RE.finditer(source):
-        attrs = {a.group("name"): a.group("value") for a in ATTR_RE.finditer(m.group("attrs"))}
+        attrs = {a.group("name"): html.unescape(a.group("value")) for a in ATTR_RE.finditer(m.group("attrs"))}
         has_share_metadata = "data-share" in attrs
         if attrs.get("rx") != "2" and not has_share_metadata:
             continue
@@ -294,6 +294,14 @@ def parse_claim(text: str) -> tuple[float | None, float | None]:
 
 def check(path: Path) -> list[str]:
     source = path.read_text(encoding="utf-8")
+    # Keep diagnostic line numbers in comment placeholders; plain() removes
+    # the whole placeholder so archived newlines never become label glyphs.
+    source = re.sub(
+        r"<!--.*?(?:-->|$)",
+        lambda match: "<!--" + "\n" * match.group(0).count("\n") + "-->",
+        source,
+        flags=re.DOTALL,
+    )
     findings: list[str] = []
     parse_findings: list[str] = []
     cells = parse_cells(source, parse_findings)
@@ -308,7 +316,26 @@ def check(path: Path) -> list[str]:
     labels: dict[int, list[str]] = {index: [] for index in range(len(cells))}
 
     for m in TEXT_RE.finditer(source):
-        attrs = {a.group("name"): a.group("value") for a in ATTR_RE.finditer(m.group("attrs"))}
+        attrs = {a.group("name"): html.unescape(a.group("value")) for a in ATTR_RE.finditer(m.group("attrs"))}
+        geometry = {key: attrs[key] for key in ("x", "y") if key in attrs}
+        geometry["font-size"] = attrs.get("font-size", "12")
+        parsed = {}
+        for key, raw in geometry.items():
+            try:
+                parsed[key] = float(raw)
+            except ValueError:
+                parsed[key] = None
+        # Judge every field that parses before skipping one that does not, so
+        # an unsupported length on one field cannot hide an invalid number on
+        # another.
+        font_size = parsed["font-size"]
+        if (any(value is not None and not math.isfinite(value) for value in parsed.values())
+                or (font_size is not None and font_size <= 0)):
+            findings.append(f"{path.name}:{line_of(source, m.start())}: expected finite label geometry and a positive font-size")
+            continue
+        if None in parsed.values():
+            # Preserve the existing conservative skip for unsupported SVG length formats.
+            continue
         box = label_box(attrs, m.group("body"))
         if box is None:
             continue
@@ -350,7 +377,7 @@ def check(path: Path) -> list[str]:
     # one-letter text can fit while the surrounding disc still crosses a cell
     # boundary, so circles need their own containment check.
     for m in CIRCLE_RE.finditer(source):
-        attrs = {a.group("name"): a.group("value") for a in ATTR_RE.finditer(m.group("attrs"))}
+        attrs = {a.group("name"): html.unescape(a.group("value")) for a in ATTR_RE.finditer(m.group("attrs"))}
         try:
             cx = float(attrs["cx"])
             cy = float(attrs["cy"])
