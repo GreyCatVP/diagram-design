@@ -95,7 +95,8 @@ DEFS_ID_TAGS = (
 
 STYLE_BLOCK_RE = re.compile(r"<style\b[^>]*>(.*?)</style>", re.IGNORECASE | re.DOTALL)
 SVG_BLOCK_RE = re.compile(r"<svg\b[^>]*>.*?</svg>", re.IGNORECASE | re.DOTALL)
-RULE_RE = re.compile(r"([^{}]+)\{([^{}]*)\}", re.DOTALL)
+CSS_RULE_ATOM = r'''(?:\\[\s\S]|"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|[^{}"'\\])'''
+RULE_RE = re.compile(rf"({CSS_RULE_ATOM}+)\{{({CSS_RULE_ATOM}*)\}}", re.DOTALL)
 RGBA_ATTR_RE = re.compile(
     r'(fill|stroke)="rgba\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d*\.?\d+)\s*\)"'
 )
@@ -560,6 +561,23 @@ def namespace_defs_ids(svg: str, prefix: str) -> str:
     def rewrite(region: str) -> str:
         for old in sorted(ids, key=len, reverse=True):
             new = f"{prefix}-{old}"
+            if region.lower().startswith("<style"):
+                decoded_old = decode_xml_references(old)
+                escaped_new = "".join(
+                    char if char.isalnum() or char in "_-" or ord(char) >= 128
+                    else f"\\{ord(char):x} " if ord(char) < 32 or ord(char) == 127
+                    else "\\" + char
+                    for char in f"{prefix}-{decoded_old}"
+                )
+                style = STYLE_BLOCK_RE.fullmatch(region)
+                if style is not None:
+                    css = decode_xml_references(style.group(1))
+                    rewritten = RULE_RE.sub(
+                        lambda rule: retarget_root_selector(rule.group(1), decoded_old, escaped_new)
+                        + "{" + rule.group(2) + "}",
+                        css,
+                    )
+                    region = region[:style.start(1)] + escape_css_for_xml(rewritten) + region[style.end(1):]
             region = re.sub(
                 rf'(\bid\s*=\s*[\'"]){re.escape(old)}([\'"])',
                 rf"\1{new}\2",

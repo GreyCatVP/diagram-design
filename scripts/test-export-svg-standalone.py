@@ -93,6 +93,17 @@ class ExportSvgStandaloneTests(unittest.TestCase):
                 self.assertIn('href="#diagram-shape"', result)
                 self.assertIn('xlink:href="#diagram-shape"', result)
 
+    def test_reusable_shapes_keep_css_id_styles_after_public_export(self) -> None:
+        html = '<style>#abc { fill:#abc; } #holder > path { stroke:red; }</style>'
+        html += '<svg viewBox="0 0 10 10"><defs><g id="holder"><path id="abc" d="M0 0H10V10H0Z"/></g></defs>'
+        html += '<use href="#holder"/></svg>'
+        root = ET.fromstring(self.mod.export_svg_document(html, Path("diagram.html")))
+        css = "".join(element.text or "" for element in root.iter() if element.tag.endswith("}style"))
+        self.assertIn("#diagram-abc { fill:#abc; }", css)
+        self.assertIn("#diagram-holder > path { stroke:red; }", css)
+        self.assertEqual(next(element for element in root.iter() if element.tag.endswith("}path")).get("id"), "diagram-abc")
+        self.assertEqual(next(element for element in root.iter() if element.tag.endswith("}use")).get("href"), "#diagram-holder")
+
     def test_helper_and_docs_exist(self) -> None:
         self.assertTrue(HELPER.is_file())
         self.assertTrue(EXPORT_MD.is_file())
