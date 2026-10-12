@@ -16,16 +16,20 @@ checker holds the drawing to those declarations:
    a row in the wrong vertical order fails closed.
 2. VISIBILITY — exactly one `data-role="visibility"` line, spanning the plot,
    sitting between the frontstage row bottom and the backstage row top (±2px),
-   with a stroke that clears 3:1 against paper.
-3. STAGE GRID — every cell's x matches its stage header; column widths equal;
-   gutters equal.
+   with every evidence / customer / frontstage cell above it and every
+   backstage / support cell below it, and a stroke that clears 3:1 against
+   paper once rgba alpha, `stroke-opacity`, and `opacity` are combined.
+3. STAGE GRID — every cell sits inside its stage header's column (left and
+   right edge); column widths equal; gutters equal.
 4. CENSUS — every stage has a customer, frontstage, and backstage cell. Empty
    is allowed only with an explicit `—` / `Not applicable` `data-name`.
-5. FOCAL — at most one `data-focal="true"` cell.
+5. FOCAL — at most one `data-focal="true"` cell, and no other row mark
+   painted with the accent.
 6. BUDGET — at most 6 stages; no extra `data-layer` values.
 7. PRINT — each cell's visible text contains its `data-name`.
 8. NO CSS MOTION OF MARKS — `transform` / geometry properties in attributes,
-   inline style, or `<style>`.
+   inline style, or `<style>`, on cells, stage headers, rule lines, and text,
+   or on any group that contains them.
 
 Usage:
     python3 scripts/verify-service-blueprint.py --all
@@ -67,9 +71,17 @@ RGBA_RE = re.compile(
 )
 HEX_RE = re.compile(r"^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$")
 PAPER_RE = re.compile(r"--color-paper\s*:\s*(#[0-9a-fA-F]{6})")
+ACCENT_RE = re.compile(r"--color-accent\s*:\s*(#[0-9a-fA-F]{6})")
+TEXT_OPEN_RE = re.compile(r"<text\b(?P<attrs>[^>]*)>", re.IGNORECASE)
+STYLE_PAINT_RE = re.compile(
+    r"(?:^|;)\s*(?P<prop>opacity|stroke-opacity|stroke|stroke-width|display|visibility)\s*:",
+    re.IGNORECASE,
+)
 
 CANONICAL_LAYERS = ("evidence", "customer", "frontstage", "backstage", "support")
 REQUIRED_LAYERS = ("customer", "frontstage", "backstage")
+VISIBLE_LAYERS = frozenset({"evidence", "customer", "frontstage"})
+HIDDEN_LAYERS = frozenset({"backstage", "support"})
 EMPTY_NAMES = frozenset({"—", "-", "not applicable", "n/a"})
 MAX_STAGES = 6
 GEOMETRY_TOLERANCE = 2.0
@@ -191,26 +203,61 @@ def parse_hex(color: str) -> str | None:
     return value.lower()
 
 
-def visible_stroke(attrs: dict[str, str], paper: str) -> str | None:
-    stroke = attrs.get("stroke")
-    if stroke is None:
+def paint_base(paint: str | None) -> tuple[str, float] | None:
+    """(#rrggbb, alpha) for a hex or rgba paint, else None."""
+    if paint is None:
         return None
-    rgba = RGBA_RE.fullmatch(stroke.strip())
+    rgba = RGBA_RE.fullmatch(paint.strip())
     if rgba:
         hex_color = "#%02x%02x%02x" % (
             int(rgba.group(1)),
             int(rgba.group(2)),
             int(rgba.group(3)),
         )
-        alpha = float(rgba.group(4))
-        return composite(hex_color, alpha, paper)
-    parsed = parse_hex(stroke)
+        return hex_color, float(rgba.group(4))
+    parsed = parse_hex(paint)
     if parsed is None:
         return None
-    opacity = parse_number(attrs.get("stroke-opacity") or attrs.get("opacity"))
-    if opacity is None:
-        opacity = 1.0
-    return composite(parsed, opacity, paper)
+    return parsed, 1.0
+
+
+def visible_stroke(attrs: dict[str, str], paper: str) -> tuple[str | None, str | None]:
+    """(painted color, None) or (None, why the paint cannot be measured).
+
+    The rgba alpha, `stroke-opacity`, and `opacity` all multiply into what the
+    browser paints, so each one is combined before contrast is measured.
+    Paint set through inline style is not read, so it is rejected.
+    """
+    style = attrs.get("style")
+    if style is not None:
+        found = STYLE_PAINT_RE.search(style)
+        if found is not None:
+            return None, (
+                f"inline style sets {found.group('prop').lower()!r}; put the paint in "
+                "presentation attributes so contrast can be measured"
+            )
+    if attrs.get("display", "").strip().lower() == "none" or attrs.get(
+        "visibility", ""
+    ).strip().lower() in {"hidden", "collapse"}:
+        return None, "the line is hidden by display/visibility"
+    width = attrs.get("stroke-width")
+    if width is not None:
+        parsed_width = parse_number(width)
+        if parsed_width is None or parsed_width <= 0:
+            return None, f"stroke-width={width!r} does not draw a visible line"
+    base = paint_base(attrs.get("stroke"))
+    if base is None:
+        return None, "stroke is not a parseable hex or rgba color"
+    color, alpha = base
+    for name in ("stroke-opacity", "opacity"):
+        raw = attrs.get(name)
+        if raw is None:
+            continue
+        value = parse_number(raw)
+        if value is None or not 0 <= value <= 1:
+            return None, f"{name}={raw!r} is not a number between 0 and 1"
+        alpha *= value
+    return composite(color, alpha, paper), None
 
 
 class Cell:
@@ -252,8 +299,34 @@ class Header:
         self.w = w
 
 
+class RowMark:
+    """Any rect inside a data-layer row: a cell or its underlay."""
+
+    __slots__ = ("x", "y", "paints", "name", "focal")
+
+    def __init__(
+        self, x: float | None, y: float | None, paints: list[str], name: str | None, focal: bool
+    ) -> None:
+        self.x = x
+        self.y = y
+        self.paints = paints
+        self.name = name
+        self.focal = focal
+
+
+def rect_paints(attrs: dict[str, str]) -> list[str]:
+    paints = [attrs[key] for key in ("fill", "stroke") if key in attrs]
+    style = attrs.get("style")
+    if style:
+        for declaration in style.split(";"):
+            prop, _, value = declaration.partition(":")
+            if prop.strip().lower() in {"fill", "stroke"}:
+                paints.append(value.strip())
+    return paints
+
+
 def parse_marks(
-    source: str, errors: list[str]
+    source: str, errors: list[str], row_marks: list[RowMark] | None = None
 ) -> tuple[list[Header], list[Cell], list[dict[str, str]]]:
     source = COMMENT_RE.sub("", source)
     headers: list[Header] = []
@@ -262,6 +335,16 @@ def parse_marks(
 
     for match in RECT_RE.finditer(source):
         attrs = attrs_of(match.group("attrs"))
+        if row_marks is not None and layer_at(source, match.start()) is not None:
+            row_marks.append(
+                RowMark(
+                    parse_number(attrs.get("x")),
+                    parse_number(attrs.get("y")),
+                    rect_paints(attrs),
+                    attrs.get("data-name"),
+                    attrs.get("data-focal", "").lower() == "true",
+                )
+            )
         stage = attrs.get("data-stage")
         name = attrs.get("data-name")
         x = parse_number(attrs.get("x"))
@@ -314,13 +397,25 @@ def check_transforms(source: str, errors: list[str]) -> None:
 
     for match in RECT_RE.finditer(source):
         attrs = attrs_of(match.group("attrs"))
-        if "data-name" not in attrs and attrs.get("data-role") != "visibility":
+        if "data-stage" not in attrs and "data-name" not in attrs:
             continue
         how = transform_carrier(attrs) or enclosing(match.start())
         if how is not None:
+            kind = "cell" if "data-name" in attrs else "stage header"
             errors.append(
-                f"service-blueprint cell carries {how}; bake the movement into its "
+                f"service-blueprint {kind} carries {how}; bake the movement into its "
                 "coordinates so the verifier checks what the browser draws"
+            )
+
+    # The printed and header checks read text by its x/y, so a transform on a
+    # label (or on a group holding it) draws it somewhere the checks never look.
+    for match in TEXT_OPEN_RE.finditer(source):
+        attrs = attrs_of(match.group("attrs"))
+        how = transform_carrier(attrs) or enclosing(match.start())
+        if how is not None:
+            errors.append(
+                f"service-blueprint text carries {how}; bake the movement into its "
+                "x/y so the verifier checks what the browser draws"
             )
 
     for match in LINE_RE.finditer(source):
@@ -377,6 +472,17 @@ def check_layers(cells: list[Cell], errors: list[str]) -> dict[str, list[Cell]]:
             "layer order: rows must run evidence (optional), customer, frontstage, "
             f"backstage, support (optional) top to bottom; found {actual}"
         )
+    else:
+        # Every cell, not just each row's topmost one: a single cell that drops
+        # into the next row's band breaks the order the reader sees.
+        for upper, lower in zip(present, present[1:]):
+            lower_top = min(cell.y for cell in by_layer[lower])
+            for cell in by_layer[upper]:
+                if cell.bottom > lower_top + GEOMETRY_TOLERANCE:
+                    errors.append(
+                        f"layer order: {upper} cell {cell.name!r} ends at "
+                        f"y={cell.bottom:g}, below the {lower} row top at y={lower_top:g}"
+                    )
     return by_layer
 
 
@@ -428,14 +534,28 @@ def check_visibility(
                 f"frontstage ends at {front_bottom:g}, backstage starts at {back_top:g}"
             )
 
+    # Every cell on its own side of the line, not just the row extremes the
+    # check above reads: one customer cell below the line reads as hidden work.
+    for cell in cells:
+        if cell.layer in VISIBLE_LAYERS and cell.bottom > y + GEOMETRY_TOLERANCE:
+            errors.append(
+                f"visibility: {cell.layer} cell {cell.name!r} reaches y={cell.bottom:g}, "
+                f"below the line of visibility at y={y:g}"
+            )
+        elif cell.layer in HIDDEN_LAYERS and cell.y < y - GEOMETRY_TOLERANCE:
+            errors.append(
+                f"visibility: {cell.layer} cell {cell.name!r} starts at y={cell.y:g}, "
+                f"above the line of visibility at y={y:g}"
+            )
+
     paper_match = PAPER_RE.search(source)
     if paper_match is None:
         errors.append("visibility: contrast cannot be checked without --color-paper")
         return
     paper = paper_match.group(1).lower()
-    painted = visible_stroke(attrs, paper)
+    painted, why = visible_stroke(attrs, paper)
     if painted is None:
-        errors.append("visibility: stroke is not a parseable hex or rgba color")
+        errors.append(f"visibility: {why}")
         return
     ratio = contrast(painted, paper)
     if ratio < WCAG_NON_TEXT:
@@ -484,6 +604,11 @@ def check_grid(headers: list[Header], cells: list[Cell], errors: list[str]) -> N
                 f"stage grid: cell {cell.name!r} x={cell.x:g} does not match its "
                 f"stage header column at x={header.x:g}"
             )
+        if cell.x + cell.w > header.x + header.w + GEOMETRY_TOLERANCE:
+            errors.append(
+                f"stage grid: cell {cell.name!r} right edge x={cell.x + cell.w:g} runs "
+                f"past its stage column, which ends at x={header.x + header.w:g}"
+            )
 
 
 def check_census(headers: list[Header], cells: list[Cell], errors: list[str]) -> None:
@@ -511,11 +636,46 @@ def check_census(headers: list[Header], cells: list[Cell], errors: list[str]) ->
                 )
 
 
-def check_focal(cells: list[Cell], errors: list[str]) -> None:
+def check_focal(
+    source: str, cells: list[Cell], row_marks: list[RowMark], errors: list[str]
+) -> None:
     focals = [cell for cell in cells if cell.focal]
     if len(focals) > 1:
         errors.append(
             f"focal: at most one cell may set data-focal; found {len(focals)}"
+        )
+
+    # The accent is what the reader sees, not the attribute: any row mark
+    # painted with it must be the declared focal cell (or its underlay).
+    accents: set[str] = set()
+    accent_match = ACCENT_RE.search(source)
+    if accent_match is not None:
+        accents.add(accent_match.group(1).lower())
+    for mark in row_marks:
+        if mark.focal:
+            for paint in mark.paints:
+                base = paint_base(paint)
+                if base is not None and base[0] != "#ffffff":
+                    accents.add(base[0])
+    if not accents:
+        return
+    focal_spots = {(cell.x, cell.y) for cell in focals}
+    for mark in row_marks:
+        if mark.focal:
+            continue
+        painted = [
+            paint
+            for paint in mark.paints
+            if (base := paint_base(paint)) is not None and base[0] in accents
+        ]
+        if not painted:
+            continue
+        if mark.name is None and (mark.x, mark.y) in focal_spots:
+            continue
+        label = repr(mark.name) if mark.name is not None else f"at x={mark.x}, y={mark.y}"
+        errors.append(
+            f"focal: cell {label} is painted with the accent ({painted[0]}) but is "
+            "not the data-focal cell; one accent cell per blueprint"
         )
 
 
@@ -556,7 +716,8 @@ def verify_file(path: Path) -> list[str]:
     errors: list[str] = []
     source = path.read_text(encoding="utf-8")
     check_transforms(source, errors)
-    headers, cells, visibility = parse_marks(source, errors)
+    row_marks: list[RowMark] = []
+    headers, cells, visibility = parse_marks(source, errors, row_marks)
     if not cells:
         errors.append(
             "no cells declare data-stage and data-name; the blueprint data contract "
@@ -567,7 +728,7 @@ def verify_file(path: Path) -> list[str]:
     check_visibility(source, cells, headers, visibility, errors)
     check_grid(headers, cells, errors)
     check_census(headers, cells, errors)
-    check_focal(cells, errors)
+    check_focal(source, cells, row_marks, errors)
     check_printed(source, cells, errors)
     return errors
 
