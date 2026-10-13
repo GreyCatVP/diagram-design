@@ -861,6 +861,26 @@ def namespace_defs_ids(svg: str, prefix: str) -> str:
 
     def rewrite_tag(tag: re.Match[str], commented: bool = False) -> str:
         mapping = replacements if commented else live_replacements
+        # SMIL values describe the animated attribute, not the animation tag's
+        # own paint. Only supported paint/reference targets carry CSS URLs.
+        animation_values = {"set": {"to"}, "animate": {"from", "to", "values", "by"}}
+        target = next((decode_xml_references(attr.group(4)[1:-1])
+                       for attr in TAG_ATTR_RE.finditer(tag.group(2))
+                       if attr.group(2) == "attributeName" and attr.group(4) is not None
+                       and attr.group(4)[0] in "\"'"), "")
+        animated_attributes = (animation_values.get(tag.group(1), set())
+                               if target in CSS_URL_ATTRIBUTES else set())
+
+        def rewrite_css_attribute(raw: str) -> str:
+            # XML normalizes original literal whitespace before expanding
+            # character references. References to controls must survive the
+            # next parse; an amp-escaped reference must stay literal text.
+            value = decode_xml_references(re.sub(r"\r\n?|[\n\t]", " ", raw))
+            rewritten = rewrite_css_urls(value, commented)
+            if rewritten == value:
+                return raw
+            return (escape_css_for_xml(rewritten).replace('"', "&quot;").replace("'", "&apos;")
+                    .replace("\t", "&#9;").replace("\n", "&#10;").replace("\r", "&#13;"))
 
         def attribute(match: re.Match[str]) -> str:
             space, name, equals, quoted = match.groups()
@@ -875,8 +895,8 @@ def namespace_defs_ids(svg: str, prefix: str) -> str:
                 raw = replacements[value]
             elif name.lower() in {"href", "xlink:href"} and value.startswith("#") and value[1:] in mapping:
                 raw = "#" + mapping[value[1:]]
-            elif name.lower() == "style":
-                raw = escape_css_for_xml(rewrite_css_urls(value, commented)).replace('"', "&quot;").replace("'", "&apos;")
+            elif name.lower() == "style" or name in animated_attributes:
+                raw = rewrite_css_attribute(raw)
             elif name.lower() in CSS_URL_ATTRIBUTES:
                 raw = url_ref.sub(lambda reference: rewrite_url(reference, commented), raw)
             return space + name + equals + quoted[0] + raw + quoted[-1]

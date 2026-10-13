@@ -66,6 +66,90 @@ class ExportSvgStandaloneTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.mod = load_helper()
 
+    def test_smil_paint_values_follow_namespaced_definitions(self) -> None:
+        html = ('<svg viewBox="0 0 10 10"><defs><linearGradient id="paint"/>'
+                '<linearGradient id="other"/></defs><rect width="10" height="10">'
+                '<set attributeName="fill" to="url(#paint)" begin="0s"/>'
+                '<animate attributeName="str&#111;ke" from="url(#paint)" '
+                'to="url(#other)" values="url(#paint); url(#other)" by="url(#paint)"/>'
+                '</rect></svg>')
+        root = ET.fromstring(self.mod.export_svg_document(html, Path("smil.html")))
+        animation = next(element for element in root.iter() if element.tag.endswith("}set"))
+        self.assertEqual(animation.get("to"), "url(#smil-paint)")
+        animation = next(element for element in root.iter() if element.tag.endswith("}animate"))
+        for name, expected in {"from": "url(#smil-paint)", "to": "url(#smil-other)",
+                               "values": "url(#smil-paint); url(#smil-other)",
+                               "by": "url(#smil-paint)"}.items():
+            self.assertEqual(animation.get(name), expected, name)
+
+    def test_smil_reference_values_preserve_css_escapes_and_literals(self) -> None:
+        for target in ("fill", "stroke", "filter", "clip-path", "mask", "marker-end"):
+            with self.subTest(target=target):
+                html = ('<svg viewBox="0 0 10 10"><defs><linearGradient id="paint"/></defs>'
+                        '<animate attributeName="' + target + '" '
+                        'from="URL(&quot;#pa\\69 nt&quot;)" to="url(#missing)" '
+                        'values="url(#paint);url(#pa\\69 nt);none" '
+                        'by="url(#paint)" data-label="url(#paint)"/></svg>')
+                root = ET.fromstring(self.mod.export_svg_document(html, Path("smil.html")))
+                actual = next(node for node in root.iter() if node.tag.endswith("}animate"))
+                self.assertEqual(actual.get("from"), 'url("#smil-pa\\69 nt")')
+                self.assertEqual(actual.get("to"), "url(#missing)")
+                self.assertEqual(actual.get("values"), "url(#smil-paint);url(#smil-pa\\69 nt);none")
+                self.assertEqual(actual.get("by"), "url(#smil-paint)")
+                self.assertEqual(actual.get("data-label"), "url(#paint)")
+
+    def test_only_applicable_animation_attributes_carry_paint_urls(self) -> None:
+        for markup in ('<g attributeName="fill" to="url(#paint)"/>',
+                       '<animateTransform attributeName="fill" to="url(#paint)"/>',
+                       '<set attributeName="fill" from="url(#paint)" '
+                       'values="url(#paint)" by="url(#paint)"/>',
+                       '<animate attributename="fill" to="url(#paint)"/>'):
+            with self.subTest(markup=markup):
+                html = ('<svg viewBox="0 0 10 10"><defs><linearGradient id="paint"/>'
+                        '</defs>' + markup + '</svg>')
+                svg = self.mod.export_svg_document(html, Path("smil.html"))
+                self.assertIn(markup, svg)
+
+    def test_unchanged_inline_css_keeps_original_attribute_spelling(self) -> None:
+        style = "font-family:'Foo\\&#10;Bar'; --literal:&amp;#10;;fill:url(#external)"
+        html = ('<svg viewBox="0 0 10 10"><defs><linearGradient id="paint"/>'
+                '</defs><text style="' + style + '">Label</text></svg>')
+        svg = self.mod.export_svg_document(html, Path("space.html"))
+        self.assertIn('style="' + style + '"', svg)
+
+    def test_animation_looking_metadata_remains_literal(self) -> None:
+        for element in ("set", "animate", "animateTransform", "g"):
+            for target in ("data-label", "Fill", "style"):
+                with self.subTest(element=element, target=target):
+                    html = ('<svg viewBox="0 0 10 10"><defs><linearGradient id="paint"/>'
+                            '</defs><' + element + ' attributeName="' + target + '" '
+                            'to="url(#paint)" from="url(#paint)" '
+                            'values="url(#paint);url(#paint)" by="url(#paint)"/></svg>')
+                    root = ET.fromstring(self.mod.export_svg_document(html, Path("smil.html")))
+                    actual = next(node for node in root.iter() if node.get("attributeName"))
+                    for name in ("to", "from", "by"):
+                        self.assertEqual(actual.get(name), "url(#paint)")
+                    self.assertEqual(actual.get("values"), "url(#paint);url(#paint)")
+
+    def test_inline_css_attribute_whitespace_keeps_xml_semantics(self) -> None:
+        whitespace = ("&#9;", "&#10;", "&#13;", "&#x9;", "&#xA;", "&#xD;",
+                      "\t", "\n", "\r", "\r\n", "&amp;#10;")
+        for spelling in whitespace:
+            for rewrite in (False, True):
+                with self.subTest(spelling=repr(spelling), rewrite=rewrite):
+                    style = "font-family:'Foo\\" + spelling + "Bar'; --quoted:'a" + spelling + "b'"
+                    if rewrite:
+                        style += ";fill:url(#paint)"
+                    html = ('<svg viewBox="0 0 10 10"><defs><linearGradient id="paint"/>'
+                            '</defs><text style="' + style + '">Label</text></svg>')
+                    original = next(node for node in ET.fromstring(html).iter() if node.tag == "text")
+                    exported = ET.fromstring(self.mod.export_svg_document(html, Path("space.html")))
+                    actual = next(node for node in exported.iter() if node.tag.endswith("}text"))
+                    expected = original.get("style")
+                    if rewrite:
+                        expected = expected.replace("url(#paint)", "url(#space-paint)")
+                    self.assertEqual(actual.get("style"), expected)
+
     def test_selector_lists_preserve_quoted_and_escaped_literals(self) -> None:
         selectors = [
             'rect[data-label="Revenue, net"]',
