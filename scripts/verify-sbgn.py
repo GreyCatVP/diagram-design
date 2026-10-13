@@ -6,7 +6,9 @@ containment, glyph kinds, and the Bruno ceiling. Containment reads x, y, width
 and height, so a transform or positional CSS on a glyph, its bounds or an
 ancestor group inside the map is a finding. Every connector drawn in the map
 must be a declared arc, except legend samples inside <g data-role="legend">.
-Arcs may not cross without the documented hop, overlap, or end on another arc. Files without data-diagram="sbgn" are
+Arcs are flattened to their drawn stroke (curves and elliptical arcs sampled)
+and may not cross, touch, overlap, or end on another arc, except at a shared
+glyph port or under the documented hop over exactly one other route. Files without data-diagram="sbgn" are
 skipped. This verifies authored declarations, not whether they describe an
 external SBML model.
 
@@ -527,22 +529,113 @@ def overlaps(extent: tuple[float, float, float, float], box: Box) -> bool:
 
 PATH_TOKEN_RE = re.compile(r"[A-Za-z]|" + NUMBER)
 PATH_ARITY = {"M": 2, "L": 2, "H": 1, "V": 1, "Q": 4, "T": 2, "C": 6, "S": 4, "A": 7, "Z": 0}
+CURVE_STEPS = 32
+TOUCH = 1e-6  # distance under which two strokes count as meeting
 
 Point = tuple[float, float]
 
 
-def arc_polyline(node: Node) -> tuple[list[tuple[Point, Point]], Point, Point]:
-    """Stroked segments of an arc, plus its first and last points.
+@dataclass
+class Route:
+    """A drawn arc flattened to its stroke.
 
-    Curves are approximated by the polyline through their control points,
-    which is exact at the elbow corners the reference draws. An elliptical
-    arc command (the crossing hop) leaves a gap: nothing is stroked under it
-    at the crossing point.
+    segments holds (start, end, piece) with piece indexing pieces; each piece
+    is one path command, kept so a hop (an elliptical arc command) and its
+    chord can be found again.
     """
+    node: Node
+    name: str
+    segments: list[tuple[Point, Point, int]]
+    pieces: list[tuple[str, Point, Point]]
+    head: Point
+    tail: Point
+
+
+def _quadratic(p0: Point, p1: Point, p2: Point) -> list[Point]:
+    out = []
+    for step in range(1, CURVE_STEPS + 1):
+        t = step / CURVE_STEPS
+        a, b, c = (1 - t) ** 2, 2 * t * (1 - t), t * t
+        out.append((a * p0[0] + b * p1[0] + c * p2[0], a * p0[1] + b * p1[1] + c * p2[1]))
+    return out
+
+
+def _cubic(p0: Point, p1: Point, p2: Point, p3: Point) -> list[Point]:
+    out = []
+    for step in range(1, CURVE_STEPS + 1):
+        t = step / CURVE_STEPS
+        a, b, c, d = (1 - t) ** 3, 3 * t * (1 - t) ** 2, 3 * t * t * (1 - t), t ** 3
+        out.append((a * p0[0] + b * p1[0] + c * p2[0] + d * p3[0],
+                    a * p0[1] + b * p1[1] + c * p2[1] + d * p3[1]))
+    return out
+
+
+def _elliptical_arc(p0: Point, rx: float, ry: float, rotation: float, large: float, sweep: float,
+                    p1: Point) -> list[Point]:
+    """Sample an SVG arc command (SVG 1.1 F.6.5 endpoint to center form)."""
+    if large not in (0.0, 1.0) or sweep not in (0.0, 1.0):
+        raise ValueError("arc flags must be 0 or 1")
+    if _same(p0, p1):
+        return []
+    rx, ry = abs(rx), abs(ry)
+    if rx <= EPS or ry <= EPS:
+        return [p1]
+    phi = math.radians(rotation % 360)
+    cos_phi, sin_phi = math.cos(phi), math.sin(phi)
+    dx, dy = (p0[0] - p1[0]) / 2, (p0[1] - p1[1]) / 2
+    x1p = cos_phi * dx + sin_phi * dy
+    y1p = -sin_phi * dx + cos_phi * dy
+    scale = (x1p * x1p) / (rx * rx) + (y1p * y1p) / (ry * ry)
+    if scale > 1:  # F.6.6: radii too small, scale them up
+        rx, ry = rx * math.sqrt(scale), ry * math.sqrt(scale)
+    numerator = rx * rx * ry * ry - rx * rx * y1p * y1p - ry * ry * x1p * x1p
+    denominator = rx * rx * y1p * y1p + ry * ry * x1p * x1p
+    factor = math.sqrt(max(0.0, numerator / denominator)) if denominator else 0.0
+    if large == sweep:
+        factor = -factor
+    cxp, cyp = factor * rx * y1p / ry, -factor * ry * x1p / rx
+    cx = cos_phi * cxp - sin_phi * cyp + (p0[0] + p1[0]) / 2
+    cy = sin_phi * cxp + cos_phi * cyp + (p0[1] + p1[1]) / 2
+
+    def angle(ux: float, uy: float, vx: float, vy: float) -> float:
+        return math.atan2(ux * vy - uy * vx, ux * vx + uy * vy)
+
+    theta = angle(1, 0, (x1p - cxp) / rx, (y1p - cyp) / ry)
+    delta = angle((x1p - cxp) / rx, (y1p - cyp) / ry, (-x1p - cxp) / rx, (-y1p - cyp) / ry)
+    if not sweep and delta > 0:
+        delta -= 2 * math.pi
+    elif sweep and delta < 0:
+        delta += 2 * math.pi
+    steps = max(CURVE_STEPS, math.ceil(abs(delta) / (math.pi / CURVE_STEPS)))
+    out = []
+    for step in range(1, steps + 1):
+        t = theta + delta * step / steps
+        x, y = rx * math.cos(t), ry * math.sin(t)
+        out.append((cos_phi * x - sin_phi * y + cx, sin_phi * x + cos_phi * y + cy))
+    out[-1] = p1
+    return out
+
+
+def flatten_route(node: Node, name: str) -> Route:
+    """Flatten an arc element to the stroke a browser draws."""
+    segments: list[tuple[Point, Point, int]] = []
+    pieces: list[tuple[str, Point, Point]] = []
+
+    def add(kind: str, start: Point, points: list[Point]) -> None:
+        if not points:
+            return
+        pieces.append((kind, start, points[-1]))
+        previous = start
+        for point in points:
+            if not _same(previous, point):
+                segments.append((previous, point, len(pieces) - 1))
+            previous = point
+
     if node.tag == "line":
         a = (number(node.attrs.get("x1", "0")), number(node.attrs.get("y1", "0")))
         b = (number(node.attrs.get("x2", "0")), number(node.attrs.get("y2", "0")))
-        return [(a, b)], a, b
+        add("line", a, [b])
+        return Route(node, name, segments, pieces, a, b)
     if node.tag in {"polyline", "polygon"}:
         values = [number(raw) for raw in re.split(r"[\s,]+", node.attrs.get("points", "").strip()) if raw]
         if len(values) < 4 or len(values) % 2:
@@ -550,16 +643,19 @@ def arc_polyline(node: Node) -> tuple[list[tuple[Point, Point]], Point, Point]:
         points = list(zip(values[::2], values[1::2]))
         if node.tag == "polygon":
             points.append(points[0])
-        return list(zip(points, points[1:])), points[0], points[-1]
+        add("line", points[0], points[1:])
+        return Route(node, name, segments, pieces, points[0], points[-1])
     if node.tag != "path":
         raise ValueError(f"<{node.tag}> cannot carry an arc")
-    tokens = PATH_TOKEN_RE.findall(node.attrs.get("d", ""))
-    if "".join(tokens).replace(" ", "") != re.sub(r"[\s,]+", "", node.attrs.get("d", "")):
+    raw = node.attrs.get("d", "")
+    tokens = PATH_TOKEN_RE.findall(raw)
+    if "".join(tokens) != re.sub(r"[\s,]+", "", raw):
         raise ValueError("unsupported characters")
-    segments: list[tuple[Point, Point]] = []
     current: Point | None = None
     start: Point | None = None
     first: Point | None = None
+    control: Point | None = None  # last control point, for S and T reflection
+    previous_command = ""
     command = ""
     index = 0
     while index < len(tokens):
@@ -571,93 +667,162 @@ def arc_polyline(node: Node) -> tuple[list[tuple[Point, Point]], Point, Point]:
             if command.upper() == "Z":
                 if current is None or start is None:
                     raise ValueError("Z before M")
-                segments.append((current, start))
-                current = start
+                add("line", current, [start])
+                current, control, previous_command = start, None, "Z"
                 continue
         if not command or command.upper() == "Z":
             raise ValueError("coordinates without a command")
-        arity = PATH_ARITY[command.upper()]
+        upper = command.upper()
+        arity = PATH_ARITY[upper]
         args = tokens[index:index + arity]
         if len(args) != arity or any(token.isalpha() for token in args):
             raise ValueError(f"command {command} needs {arity} numbers")
         values = [number(token) for token in args]
         index += arity
-        relative = command.islower()
-        if current is None and command.upper() != "M":
+        if current is None and upper != "M":
             raise ValueError("path must start with M")
-        base = current if (relative and current is not None) else (0.0, 0.0)
-        upper = command.upper()
-        if upper == "H":
-            target = (values[0] + (current[0] if relative else 0.0), current[1])
-            points = [target]
-        elif upper == "V":
-            target = (current[0], values[0] + (current[1] if relative else 0.0))
-            points = [target]
-        elif upper == "A":
-            target = (values[5] + base[0], values[6] + base[1])
-            points = []
-        else:
-            points = [(values[i] + base[0], values[i + 1] + base[1]) for i in range(0, arity, 2)]
-            target = points[-1]
+        ox, oy = current if (command.islower() and current is not None) else (0.0, 0.0)
+
+        def at(i: int) -> Point:
+            return values[i] + ox, values[i + 1] + oy
+
         if upper == "M":
-            current = start = target
-            if first is None:
-                first = target
-            command = "l" if relative else "L"
+            current = start = at(0)
+            first = first or current
+            command = "l" if command.islower() else "L"
+            control, previous_command = None, "M"
             continue
-        previous = current
-        for point in points:
-            segments.append((previous, point))
-            previous = point
-        current = target
+        if upper == "L":
+            target = at(0)
+            add("line", current, [target])
+            control = None
+        elif upper == "H":
+            target = (values[0] + ox, current[1])
+            add("line", current, [target])
+            control = None
+        elif upper == "V":
+            target = (current[0], values[0] + oy)
+            add("line", current, [target])
+            control = None
+        elif upper in {"Q", "T"}:
+            if upper == "Q":
+                handle, target = at(0), at(2)
+            else:
+                handle = ((2 * current[0] - control[0], 2 * current[1] - control[1])
+                          if control is not None and previous_command in {"Q", "T"} else current)
+                target = at(0)
+            add("curve", current, _quadratic(current, handle, target))
+            control = handle
+        elif upper in {"C", "S"}:
+            if upper == "C":
+                handle1, handle2, target = at(0), at(2), at(4)
+            else:
+                handle1 = ((2 * current[0] - control[0], 2 * current[1] - control[1])
+                           if control is not None and previous_command in {"C", "S"} else current)
+                handle2, target = at(0), at(2)
+            add("curve", current, _cubic(current, handle1, handle2, target))
+            control = handle2
+        else:
+            target = at(5)
+            add("hop", current, _elliptical_arc(current, values[0], values[1], values[2],
+                                                values[3], values[4], target))
+            control = None
+        current, previous_command = target, upper
     if first is None or current is None:
         raise ValueError("empty path")
-    return segments, first, current
+    return Route(node, name, segments, pieces, first, current)
 
 
-def _orientation(a: Point, b: Point, c: Point) -> float:
-    value = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
-    return 0.0 if abs(value) <= EPS else value
-
-
-def _within(a: Point, b: Point, c: Point) -> bool:
-    """c lies on segment ab, collinearity assumed."""
-    return (min(a[0], b[0]) - EPS <= c[0] <= max(a[0], b[0]) + EPS
-            and min(a[1], b[1]) - EPS <= c[1] <= max(a[1], b[1]) + EPS)
+def _cross(ax: float, ay: float, bx: float, by: float) -> float:
+    return ax * by - ay * bx
 
 
 def _same(a: Point, b: Point) -> bool:
-    return abs(a[0] - b[0]) <= EPS and abs(a[1] - b[1]) <= EPS
+    return abs(a[0] - b[0]) <= TOUCH and abs(a[1] - b[1]) <= TOUCH
 
 
-def crossing_point(s: tuple[Point, Point], t: tuple[Point, Point]) -> Point | None:
-    """Point where two segments properly cross (interiors only), else None."""
-    (a, b), (c, d) = s, t
-    o1, o2 = _orientation(a, b, c), _orientation(a, b, d)
-    o3, o4 = _orientation(c, d, a), _orientation(c, d, b)
-    if o1 * o2 < 0 and o3 * o4 < 0:
-        denominator = (a[0] - b[0]) * (c[1] - d[1]) - (a[1] - b[1]) * (c[0] - d[0])
-        cross_ab = a[0] * b[1] - a[1] * b[0]
-        cross_cd = c[0] * d[1] - c[1] * d[0]
-        return ((cross_ab * (c[0] - d[0]) - (a[0] - b[0]) * cross_cd) / denominator,
-                (cross_ab * (c[1] - d[1]) - (a[1] - b[1]) * cross_cd) / denominator)
-    return None
+def segment_contact(s: tuple[Point, Point], t: tuple[Point, Point]) -> list[Point]:
+    """Points where two segments meet, endpoints and joints included.
+
+    A collinear overlap returns both ends of the shared run, so a caller can
+    tell an overlap (two distinct points) from a single contact.
+    """
+    (p, p2), (q, q2) = s, t
+    r = (p2[0] - p[0], p2[1] - p[1])
+    d = (q2[0] - q[0], q2[1] - q[1])
+    r_len, d_len = math.hypot(*r), math.hypot(*d)
+    if r_len <= TOUCH or d_len <= TOUCH:
+        return []
+    qp = (q[0] - p[0], q[1] - p[1])
+    denominator = _cross(r[0], r[1], d[0], d[1])
+    slack_r, slack_d = TOUCH / r_len, TOUCH / d_len
+    if abs(denominator) > 1e-12 * r_len * d_len:
+        t_value = _cross(qp[0], qp[1], d[0], d[1]) / denominator
+        u_value = _cross(qp[0], qp[1], r[0], r[1]) / denominator
+        if -slack_r <= t_value <= 1 + slack_r and -slack_d <= u_value <= 1 + slack_d:
+            t_value = min(1.0, max(0.0, t_value))
+            return [(p[0] + t_value * r[0], p[1] + t_value * r[1])]
+        return []
+    if abs(_cross(qp[0], qp[1], r[0], r[1])) / r_len > TOUCH:
+        return []  # parallel, apart
+    rr = r[0] * r[0] + r[1] * r[1]
+    t0 = (qp[0] * r[0] + qp[1] * r[1]) / rr
+    t1 = t0 + (d[0] * r[0] + d[1] * r[1]) / rr
+    low, high = max(0.0, min(t0, t1)), min(1.0, max(t0, t1))
+    if high < low - slack_r:
+        return []
+    low, high = min(low, high), max(low, high)
+    points = [(p[0] + low * r[0], p[1] + low * r[1])]
+    if (high - low) * r_len > TOUCH:
+        points.append((p[0] + high * r[0], p[1] + high * r[1]))
+    return points
 
 
-def overlap_length(s: tuple[Point, Point], t: tuple[Point, Point]) -> float:
-    (a, b), (c, d) = s, t
-    if _orientation(a, b, c) or _orientation(a, b, d):
-        return 0.0
-    axis = 0 if abs(b[0] - a[0]) >= abs(b[1] - a[1]) else 1
-    low = max(min(a[axis], b[axis]), min(c[axis], d[axis]))
-    high = min(max(a[axis], b[axis]), max(c[axis], d[axis]))
-    return max(0.0, high - low)
+def on_bounds_edge(point: Point, box: Box) -> bool:
+    x, y = point
+    inside_x = box.x - TOUCH <= x <= box.right + TOUCH
+    inside_y = box.y - TOUCH <= y <= box.bottom + TOUCH
+    return ((inside_x and (abs(y - box.y) <= TOUCH or abs(y - box.bottom) <= TOUCH))
+            or (inside_y and (abs(x - box.x) <= TOUCH or abs(x - box.right) <= TOUCH)))
 
 
-def strictly_inside(point: Point, segment: tuple[Point, Point]) -> bool:
-    a, b = segment
-    return (not _orientation(a, b, point) and _within(a, b, point)
-            and not _same(point, a) and not _same(point, b))
+def route_contacts(a: Route, b: Route) -> list[tuple[Point, int, int, bool]]:
+    """Every contact between two routes: (point, piece in a, piece in b, overlap)."""
+    found = []
+    for s0, s1, piece_a in a.segments:
+        for t0, t1, piece_b in b.segments:
+            points = segment_contact((s0, s1), (t0, t1))
+            for point in points:
+                found.append((point, piece_a, piece_b, len(points) > 1))
+    return found
+
+
+def valid_hops(routes: list[Route]) -> set[tuple[int, int, int]]:
+    """(route, piece, other route) for each documented hop.
+
+    A hop is an elliptical arc command on route R1 whose chord (the gap it
+    leaves) is crossed by exactly one other route R2, and whose drawn arc no
+    route other than R2 touches. Contacts between that arc and R2 are the
+    bridge itself.
+    """
+    allowed = set()
+    for index, route in enumerate(routes):
+        for piece, (kind, start, end) in enumerate(route.pieces):
+            if kind != "hop":
+                continue
+            under, touching = set(), set()
+            arc = [(s0, s1) for s0, s1, owner in route.segments if owner == piece]
+            for other_index, other in enumerate(routes):
+                if other_index == index:
+                    continue
+                for t0, t1, _owner in other.segments:
+                    if segment_contact((start, end), (t0, t1)):
+                        under.add(other_index)
+                    if any(segment_contact(s, (t0, t1)) for s in arc):
+                        touching.add(other_index)
+            if len(under) == 1 and touching <= under:
+                allowed.add((index, piece, next(iter(under))))
+    return allowed
 
 
 def looks_like_sbgn(source: str) -> bool:
@@ -884,41 +1049,56 @@ def check_source(path: Path, source: str) -> list[str]:
             if not (pair & species and pair & process_ids):
                 fail(node, "reversible must join a species and a process")
 
-    # Arcs must not cross, stack, or end on one another: a crossing with no
-    # gap reads as a junction. The hop in type-architecture.md leaves a gap.
-    drawn = []
+    # Arcs must not cross, stack, touch, or end on one another: any contact
+    # without a gap reads as a junction. Two exemptions only: two arcs ending
+    # at the same port on a glyph's bounds, and the documented hop over
+    # exactly one other route (type-architecture.md).
+    routes: list[Route] = []
     for node in scanner.nodes:
         if root not in node.ancestors() or node.attrs.get("data-kind") not in ARC_KINDS:
             continue
         name = f'{node.attrs.get("data-from", "?")} to {node.attrs.get("data-to", "?")}'
         try:
-            segments, head, tail = arc_polyline(node)
+            routes.append(flatten_route(node, name))
         except ValueError as error:
             fail(node, f"arc {name}: path data could not be read ({error})")
-            continue
-        drawn.append((node, name, segments, (head, tail)))
-    for index, (node, name, segments, ends) in enumerate(drawn):
-        for other, other_name, other_segments, other_ends in drawn[index + 1:]:
-            reported = set()
-            for s in segments:
-                for t in other_segments:
-                    point = crossing_point(s, t)
-                    if point is not None and ("cross", point) not in reported:
-                        reported.add(("cross", point))
-                        fail(other, f"arcs {name} and {other_name} cross at ({point[0]:g}, {point[1]:g}) "
-                                    "without a gap; reroute one or bridge it with the hop from "
-                                    "type-architecture.md")
-                    elif overlap_length(s, t) > EPS and "overlap" not in reported:
-                        reported.add("overlap")
-                        fail(other, f"arcs {name} and {other_name} overlap; offset one by 12px or more")
-            for end in ends:
-                if any(strictly_inside(end, t) for t in other_segments):
-                    fail(node, f"arc {name} ends on arc {other_name} at ({end[0]:g}, {end[1]:g}); "
+    hops = valid_hops(routes)
+    ports = [g for g in glyphs.values() if g.kind != "compartment"]
+    for index, route in enumerate(routes):
+        for other_index in range(index + 1, len(routes)):
+            other = routes[other_index]
+            reported: set[tuple[str, float, float]] = set()
+            overlapped = False
+            for point, piece, other_piece, overlap in route_contacts(route, other):
+                if overlap:
+                    if not overlapped:
+                        overlapped = True
+                        fail(other.node, f"arcs {route.name} and {other.name} overlap; "
+                                         "offset one by 12px or more")
+                    continue
+                if (index, piece, other_index) in hops or (other_index, other_piece, index) in hops:
+                    continue
+                ends_here = [r for r in (route, other) if _same(point, r.head) or _same(point, r.tail)]
+                if len(ends_here) == 2 and any(on_bounds_edge(point, glyph) for glyph in ports):
+                    continue
+                x, y = round(point[0], 2), round(point[1], 2)
+                if len(ends_here) == 1:
+                    ender = ends_here[0]
+                    rest = other if ender is route else route
+                    key = ("end", x, y)
+                    message = (f"arc {ender.name} ends on arc {rest.name} at ({x:g}, {y:g}); "
                                "it reads as a junction")
-            for end in other_ends:
-                if any(strictly_inside(end, s) for s in segments):
-                    fail(other, f"arc {other_name} ends on arc {name} at ({end[0]:g}, {end[1]:g}); "
-                                "it reads as a junction")
+                elif len(ends_here) == 2:
+                    key = ("end", x, y)
+                    message = (f"arcs {route.name} and {other.name} end at ({x:g}, {y:g}) "
+                               "away from a glyph port; it reads as a junction")
+                else:
+                    key = ("cross", x, y)
+                    message = (f"arcs {route.name} and {other.name} cross at ({x:g}, {y:g}) without a gap; "
+                               "reroute one or bridge it with the hop from type-architecture.md")
+                if key not in reported:
+                    reported.add(key)
+                    fail(other.node, message)
 
     return findings
 

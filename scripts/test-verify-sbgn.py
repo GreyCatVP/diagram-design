@@ -266,6 +266,49 @@ class ContractTests(unittest.TestCase):
     def test_unreadable_arc_path_is_rejected(self):
         self.rejects(GOOD.replace('d="M 112,60 H 160"', 'd="M 112,60 X 160"', 1), "path data")
 
+    def arcs(self, *paths):
+        """GOOD plus modulation arcs (a species to process p) with these d values."""
+        drawn = "".join(f'<path data-kind="modulation" data-from="a" data-to="p" d="{d}"/>' for d in paths)
+        return GOOD.replace("</svg>", drawn + "</svg>")
+
+    def test_crossing_on_a_quadratic_curve_is_rejected(self):
+        # The drawn curve passes (138, 102); lines through its control points do not.
+        self.rejects(self.arcs("M 120,100 H 132 Q 140,100 140,108 V 120", "M 134,102 H 139"),
+                     "cross at (138, 102)")
+
+    def test_crossing_on_a_cubic_curve_is_rejected(self):
+        self.rejects(self.arcs("M 120,100 C 140,100 140,100 140,120", "M 130,104 H 150"), "cross at")
+        self.rejects(self.arcs("M 120,100 C 140,100 140,100 140,120", "M 130,104 h 20"), "cross at")
+
+    def test_crossing_at_an_internal_vertex_is_rejected(self):
+        # Neither segment pair crosses strictly: the vertical meets the joint.
+        self.rejects(self.arcs("M 120,100 H 140 H 172", "M 140,90 V 112"), "cross at (140, 100)")
+
+    def test_touch_at_internal_vertices_is_rejected(self):
+        self.rejects(self.arcs("M 120,100 H 140 V 120", "M 132,92 L 140,100 L 148,92"), "cross at (140, 100)")
+
+    def test_route_over_a_hop_top_is_rejected(self):
+        hop = "M 120,100 H 132 a 8,8 0 0,1 16,0 H 172"
+        self.clean(self.arcs(hop, "M 140,90 V 112"))
+        # A third route touching the hop's arc voids the exemption.
+        self.rejects(self.arcs(hop, "M 140,90 V 112", "M 130,93 H 137"), "cross at")
+        # A hop that bridges two routes at once is not the documented hop.
+        self.rejects(self.arcs(hop, "M 138,90 V 112", "M 142,90 V 112"), "cross at")
+        # A route crossing the hop's top without passing under it gets no exemption.
+        self.rejects(self.arcs(hop, "M 130,93 H 137"), "cross at")
+
+    def test_routes_meeting_at_a_shared_glyph_port_are_clean(self):
+        self.clean(self.arcs("M 176,120 V 76", "M 200,100 L 176,76"))
+        # The same meeting point away from any glyph reads as a junction.
+        self.rejects(self.arcs("M 176,140 V 110", "M 200,130 L 176,110"), "away from a glyph port")
+
+    def test_near_miss_parallel_routes_are_clean(self):
+        self.clean(self.arcs("M 120,100 H 172", "M 120,102 H 172"))
+
+    def test_unsupported_path_command_fails_closed(self):
+        self.rejects(self.arcs("M 120,100 B 140,100"), "path data")
+        self.rejects(self.arcs("M 120,100 a 8,8 0 2,1 16,0"), "path data")
+
     def test_source_sink_is_species(self):
         source = GOOD.replace(
             "</svg>",
