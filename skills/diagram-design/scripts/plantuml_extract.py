@@ -113,6 +113,13 @@ CLASS_HEADS = {
     "<": "plain",
     ">": "plain",
 }
+# Command words that may also be a participant or class name. A line that
+# starts with one of them and continues with an arrow is a message or link.
+KEYWORD_ENDPOINTS = {
+    "participant", "actor", "boundary", "control", "entity", "database",
+    "collections", "queue", "note", "activate", "deactivate", "destroy",
+    "class", "interface", "enum", "package", "namespace", "together",
+}
 LIFELINE_KINDS = {
     "participant": "lifeline",
     "actor": "actor",
@@ -1200,6 +1207,34 @@ def _parse_sequence(diagram: Diagram, lines: list[tuple[int, str]]) -> None:
                 resolved_ids.append(node_id)
         return resolved_ids
 
+    def add_message(split: tuple[str, re.Match[str], str], line_number: int) -> None:
+        left, arrow, right = split
+        right, message = _partition_unquoted(right, ":")
+        right, actions = _activation_shortcut(right)
+        if left in {"[", "?"} or right in {"]", "?"}:
+            _fail(f"unsupported sequence construct: boundary message at line {line_number}")
+        # Both ends must be one whole name (or an inline `as` declaration).
+        # Shortcuts follow the second participant only, so `A ++ -> B`
+        # fails here too. Participants are created in source order.
+        edge_error = f"malformed edge at line {line_number}"
+        source = lifeline(left, edge_error, allow_as=True)
+        target = lifeline(right, edge_error, allow_as=True)
+        style, arrowhead, reverse, bidirectional = _sequence_arrow(arrow)
+        if reverse:
+            source, target = target, source
+        diagram.add_edge(
+            source,
+            target,
+            clean_label(message),
+            style,
+            arrowhead,
+            bidirectional=bidirectional,
+        )
+        # `source` and `target` are already the sender and receiver after
+        # a reverse arrow swapped them, so shortcuts follow the message.
+        for action in actions:
+            diagram.add_activation(source if action == "deactivate" else target, action)
+
     def lifeline(token: str, error: str, *, allow_as: bool = False) -> str:
         """Get or create the participant a reference names, by its code."""
         parsed = _endpoint_code(token, allow_as=allow_as)
@@ -1228,6 +1263,11 @@ def _parse_sequence(diagram: Diagram, lines: list[tuple[int, str]]) -> None:
         title = re.match(r"^title\s+(.+)$", text, re.I)
         if title:
             diagram.title = clean_label(title.group(1))
+            continue
+        early = _scan_arrow(text, "sequence")
+        if early and early[0].casefold() in KEYWORD_ENDPOINTS:
+            # `note -> X : hi` is a message from a participant named `note`.
+            add_message(early, line_number)
             continue
         participant = _parse_participant(text, line_number)
         if participant:
@@ -1342,32 +1382,7 @@ def _parse_sequence(diagram: Diagram, lines: list[tuple[int, str]]) -> None:
             _fail(f"malformed statement at line {line_number}")
         split = _scan_arrow(text, "sequence")
         if split:
-            left, arrow, right = split
-            right, message = _partition_unquoted(right, ":")
-            right, actions = _activation_shortcut(right)
-            if left in {"[", "?"} or right in {"]", "?"}:
-                _fail(f"unsupported sequence construct: boundary message at line {line_number}")
-            # Both ends must be one whole name (or an inline `as` declaration).
-            # Shortcuts follow the second participant only, so `A ++ -> B`
-            # fails here too. Participants are created in source order.
-            edge_error = f"malformed edge at line {line_number}"
-            source = lifeline(left, edge_error, allow_as=True)
-            target = lifeline(right, edge_error, allow_as=True)
-            style, arrowhead, reverse, bidirectional = _sequence_arrow(arrow)
-            if reverse:
-                source, target = target, source
-            diagram.add_edge(
-                source,
-                target,
-                clean_label(message),
-                style,
-                arrowhead,
-                bidirectional=bidirectional,
-            )
-            # `source` and `target` are already the sender and receiver after
-            # a reverse arrow swapped them, so shortcuts follow the message.
-            for action in actions:
-                diagram.add_activation(source if action == "deactivate" else target, action)
+            add_message(split, line_number)
             continue
         if SEQ_ARROW_RE.search(text):
             _fail(f"malformed edge at line {line_number}")
@@ -1387,6 +1402,36 @@ def _parse_class(diagram: Diagram, lines: list[tuple[int, str]]) -> None:
 
     def scope() -> list[str]:
         return [block for block, _line in blocks if block is not None]
+
+    def add_link(split: tuple[str, re.Match[str], str], line_number: int) -> None:
+        left, arrow, right = split
+        right, label = _partition_unquoted(right, ":")
+        left_name, left_card = _split_cardinality(left, before_arrow=True)
+        right_name, right_card = _split_cardinality(right, before_arrow=False)
+        edge_error = f"malformed edge at line {line_number}"
+        source = class_ref(left_name, edge_error)
+        target = class_ref(right_name, edge_error)
+        arrowhead, style, reverse, bidirectional, undirected, hidden = _class_relationship(
+            arrow, line_number
+        )
+        if reverse:
+            source, target = target, source
+            left_card, right_card = right_card, left_card
+        if hidden:
+            # `-[hidden]-` is a layout hint with no drawn link.
+            diagram.discarded["skin"] += 1
+            return
+        diagram.add_edge(
+            source,
+            target,
+            clean_label(label),
+            style,
+            arrowhead,
+            bidirectional=bidirectional,
+            undirected=undirected,
+            source_cardinality=clean_label(left_card),
+            target_cardinality=clean_label(right_card),
+        )
 
     def class_ref(token: str, error: str) -> str:
         """Get or create the class a reference names, by its code."""
@@ -1426,6 +1471,11 @@ def _parse_class(diagram: Diagram, lines: list[tuple[int, str]]) -> None:
                 blocks.pop()
                 continue
             _fail(f"malformed statement at line {line_number}")
+        early = _scan_arrow(text, "class")
+        if early and _split_cardinality(early[0], before_arrow=True)[0].casefold() in KEYWORD_ENDPOINTS:
+            # `class --> enum` links classes named after command words.
+            add_link(early, line_number)
+            continue
         package = re.match(r"^(package|namespace|together)\b\s*(.*)$", text, re.I)
         if package:
             rest = package.group(2).strip()
@@ -1488,34 +1538,7 @@ def _parse_class(diagram: Diagram, lines: list[tuple[int, str]]) -> None:
             continue
         split = _scan_arrow(text, "class")
         if split:
-            left, arrow, right = split
-            right, label = _partition_unquoted(right, ":")
-            left_name, left_card = _split_cardinality(left, before_arrow=True)
-            right_name, right_card = _split_cardinality(right, before_arrow=False)
-            edge_error = f"malformed edge at line {line_number}"
-            source = class_ref(left_name, edge_error)
-            target = class_ref(right_name, edge_error)
-            arrowhead, style, reverse, bidirectional, undirected, hidden = _class_relationship(
-                arrow, line_number
-            )
-            if reverse:
-                source, target = target, source
-                left_card, right_card = right_card, left_card
-            if hidden:
-                # `-[hidden]-` is a layout hint with no drawn link.
-                diagram.discarded["skin"] += 1
-                continue
-            diagram.add_edge(
-                source,
-                target,
-                clean_label(label),
-                style,
-                arrowhead,
-                bidirectional=bidirectional,
-                undirected=undirected,
-                source_cardinality=clean_label(left_card),
-                target_cardinality=clean_label(right_card),
-            )
+            add_link(split, line_number)
             continue
         if CLASS_REL_RE.search(text) or "--" in text or ".." in text:
             _fail(f"malformed edge at line {line_number}")

@@ -803,6 +803,25 @@ def check_region_boundaries(tmp: Path) -> None:
     ok("blocks need their own @end marker, nesting fails, and BOM/CRLF/names/padding are accepted")
 
 
+def check_keyword_named_endpoints(tmp: Path) -> None:
+    """A participant or class named after a command word still sends and links."""
+    diagram = extract_json(
+        write_puml(
+            tmp,
+            "keyword-endpoints.puml",
+            "participant note\nparticipant activate\nparticipant participant\n"
+            "note -> activate : one\nactivate -> participant : two\nparticipant --> note : three",
+        )
+    )
+    pairs = [(edge["source"], edge["target"], edge["label"]) for edge in diagram["edges"]]
+    if pairs != [("note", "activate", "one"), ("activate", "participant", "two"), ("participant", "note", "three")]:
+        fail(f"a message from a command-named participant was misread: {pairs}")
+    diagram = extract_json(write_puml(tmp, "keyword-classes.puml", "class class\nclass enum\nclass --> enum"))
+    if [(edge["source"], edge["target"]) for edge in diagram["edges"]] != [("class", "enum")]:
+        fail(f"a link from a command-named class was misread: {diagram['edges']}")
+    ok("participants and classes named after command words keep their messages and links")
+
+
 def check_multi_diagram() -> None:
     payload = json.loads(run_extract([str(MULTI), "--diagram", "1", "--json"]))
     if payload["diagrams_total"] != 2:
@@ -1167,6 +1186,7 @@ def main() -> int:
         check_quoted_note_targets(tmp)
         check_endpoint_codes(tmp)
         check_region_boundaries(tmp)
+        check_keyword_named_endpoints(tmp)
         check_adversarial(tmp)
         check_errors_and_limits(tmp)
         check_legacy_stdout_encoding(tmp)
