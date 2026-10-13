@@ -398,6 +398,29 @@ class ExportSvgStandaloneTests(unittest.TestCase):
         self.assertIn(r"#diagram-A\&\#38\;B stop { stop-color:blue; }", css)
         self.assertEqual([element.get("fill") for element in root.iter() if element.tag.endswith("}rect")],
                          ["url(#diagram-A&B)", "url(#diagram-A&#38;B)"])
+    def test_unquoted_data_url_semicolons_preserve_conditional_paint(self) -> None:
+        image = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg=="
+        for url in ("data:image/png;base64,AAAA", "data:image/png;base64," + image):
+            for quote in ("", '"'):
+                with self.subTest(url=url, quote=quote):
+                    condition = f"@supports (background: url({quote}{url}{quote}))"
+                    html = '<style>' + condition + ' { .paint {fill:red;} }</style>'
+                    html += '<svg viewBox="0 0 10 10"><rect class="paint"/></svg>'
+                    css = embedded_css(self.mod.export_svg_document(html, Path("function.html")))
+                    self.assertIn(condition + " {", css)
+                    self.assertIn("#function-root .paint { fill:red; }", css)
+                    self.assertNotIn("#function-root base64", css)
+
+    def test_function_semicolon_keeps_nested_layer_order_and_animation(self) -> None:
+        condition = "@supports (background: url(data:image/png;base64,AAAA))"
+        html = '<style>@keyframes pulse {to{opacity:1}} ' + condition
+        html += ' { @layer second, first; @layer first { .paint {fill:red;animation:pulse 1s;} } }</style>'
+        html += '<svg viewBox="0 0 10 10"><rect class="paint"/></svg>'
+        css = embedded_css(self.mod.export_svg_document(html, Path("nested-function.html")))
+        self.assertIn(condition + " {", css)
+        self.assertIn("@layer second, first;", css)
+        self.assertIn("animation:nested-function-root-pulse 1s", css)
+
     def test_font_face_and_supports_do_not_block_export(self) -> None:
         html = '<style>@font-face {font-family: Custom; src:url("custom.woff2");}'
         html += '@supports (display: grid) {.paint {fill:#ff0000;}}</style>'

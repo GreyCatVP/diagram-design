@@ -684,6 +684,7 @@ def _css_rule_tree(css: str) -> list[_CssRule]:
     starts = [0]
     quote = ""
     escaped = False
+    parentheses = 0
     for index, char in enumerate(css):
         if escaped:
             escaped = False
@@ -697,6 +698,10 @@ def _css_rule_tree(css: str) -> list[_CssRule]:
             continue
         if char in "\"'":
             quote = char
+        elif char == "(":
+            parentheses += 1
+        elif char == ")":
+            parentheses = max(0, parentheses - 1)
         elif char == "{":
             if len(stack) >= 1024:
                 raise ValueError("diagram CSS nesting exceeds the supported limit of 1024 blocks")
@@ -710,7 +715,7 @@ def _css_rule_tree(css: str) -> list[_CssRule]:
                 stack.pop().end = index
                 starts.pop()
             starts[-1] = index + 1
-        elif char == ";":
+        elif char == ";" and parentheses == 0:
             selector = css[starts[-1]:index].strip()
             if re.match(r"@layer\b", selector, re.IGNORECASE):
                 rule = _CssRule(css, starts[-1], index)
