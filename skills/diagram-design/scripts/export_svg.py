@@ -810,6 +810,27 @@ def _diagram_css_leaf(rule: _CssRule, root_id: str, names: dict[str, str], origi
         selector = retarget_root_selector(selector, original_root_id, root_id)
     # A second space after a hex escape can be a descendant combinator.
     selector = " ".join(selector.split())
+    # Nested CSS blocks are carried as text, so their declarations cannot be
+    # namespaced by the flat declaration rewriter. Refuse rather than break
+    # a binding to the keyframes that this export renames.
+    if names:
+        pending_nested = list(rule.children)
+        while pending_nested:
+            nested = pending_nested.pop()
+            pending_nested.extend(nested.children)
+            # Scan direct declarations once; the last prefix segment is the
+            # next child selector, not a declaration. Descendants are queued.
+            segments: list[str] = []
+            cursor = nested.start
+            for child in nested.children:
+                segments.extend(_css_segments(nested.css[cursor:child.start - 1], ";")[:-1])
+                cursor = child.end + 1
+            segments.extend(_css_segments(nested.css[cursor:nested.end], ";"))
+            for segment in segments:
+                parts = _css_segments(segment, ":")
+                key = CSS_COMMENT_RE.sub("", parts[0]).strip().lower().removeprefix("-webkit-")
+                if len(parts) > 1 and key in ("animation", "animation-name"):
+                    raise ValueError("unsupported nested CSS animation declaration in SVG export")
     body = _animation_declarations(body, names)
     inherited = body_inherited_css(selector, body, root_id)
     if inherited:

@@ -646,6 +646,30 @@ class ExportSvgStandaloneTests(unittest.TestCase):
         self.assertEqual(self.mod._animation_declarations('animation-name:linear', {'linear':'prefixed-linear'}), 'animation-name:prefixed-linear')
         self.assertEqual(self.mod._animation_declarations('animation:none 1s linear', {'none':'prefixed-none'}), 'animation:none 1s linear')
 
+    def test_nested_animation_bindings_fail_clearly_before_export(self) -> None:
+        for nested in ('& {animation:pulse 1s;}', '@media print {animation-name:pulse;}', '& { & { -webkit-animation:pulse 1s; } }'):
+            with self.subTest(nested=nested):
+                html = '<style>@keyframes pulse {to {opacity:1}} .paint {fill:red;' + nested + '}</style>'
+                html += '<svg viewBox="0 0 40 40"><rect class="paint"/></svg>'
+                with self.assertRaisesRegex(ValueError, 'unsupported nested CSS animation declaration'):
+                    self.mod.export_svg_document(html, Path("nested.html"))
+        html = '<style>@keyframes pulse {to {opacity:1}} .paint {animation:pulse 1s; & {fill:red;content:"animation:pulse; { }";transform:translate(1px, 2px); animation:hover {fill:blue;} }}</style>'
+        html += '<svg viewBox="0 0 40 40"><rect class="paint"/></svg>'
+        result = self.mod.export_svg_document(html, Path("nested.html"))
+        self.assertIn('animation:nested-root-pulse 1s', embedded_css(result))
+        self.assertIn('content:"animation:pulse; { }"', embedded_css(result))
+        self.assertIn('transform:translate(1px, 2px)', embedded_css(result))
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / 'nested.html'
+            output = Path(directory) / 'nested.svg'
+            source.write_text(html.replace('fill:red;content:', 'animation:pulse 1s;content:'), encoding='utf-8')
+            errors = io.StringIO()
+            with contextlib.redirect_stderr(errors):
+                self.assertEqual(self.mod.main([str(source), str(output)]), 2)
+            self.assertFalse(output.exists())
+            self.assertIn('unsupported nested CSS animation declaration', errors.getvalue())
+            self.assertNotIn('Traceback', errors.getvalue())
+
     def test_keyframes_and_bindings_are_scoped_together(self) -> None:
         html = '<style>@keyframes pulse {from {fill:#ff0000} to {fill:#ff0000}}'
         html += '@-webkit-keyframes other {to {opacity:1}}'
