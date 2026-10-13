@@ -822,6 +822,28 @@ def gallery_navigation_failures(context):
                 search.press("Escape")
                 expect(nav).to_be_hidden()
                 expect(toggle).to_be_focused()
+
+                phase = "first-click-inside-preview"
+                # Collapsing must not move the preview between press and release,
+                # or the first click on a control inside the example is lost.
+                # A tall window keeps the playback controls on screen without scrolling.
+                page.set_viewport_size({"width": viewport["width"], "height": 1400})
+                toggle.click()
+                search.fill("fan-in")
+                expect(visible).to_have_count(1)
+                visible.first.click()
+                expect(preview).to_have_attribute("src", "example-queue-animated.html")
+                play = page.frame_locator("#preview").locator('[data-motion-action="play"]')
+                expect(play).to_have_attribute("aria-pressed", "false")
+                expect(play).to_be_in_viewport()
+                expect(nav).to_be_visible()
+                box = play.bounding_box()
+                page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+                page.mouse.down()
+                page.wait_for_timeout(120)
+                page.mouse.up()
+                expect(play).to_have_attribute("aria-pressed", "true")
+                expect(nav).to_be_hidden()
                 assert not runtime_errors, "; ".join(runtime_errors)
             except Exception as error:
                 failures.append(f"{label}-{phase}: {str(error).splitlines()[0]}")

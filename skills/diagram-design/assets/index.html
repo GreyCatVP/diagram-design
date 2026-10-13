@@ -572,17 +572,31 @@
         document.getElementById("empty-results").hidden = visible.length > 0;
       }
       search.addEventListener("input", filterDiagrams);
-      document.querySelector("main").addEventListener("pointerdown", () => setNavigation(false));
+      // Collapse on click, not pointerdown: hiding the catalog moves the preview
+      // up, so collapsing mid-press would pull a control out from under the pointer
+      // and its click would never fire.
+      document.querySelector("main").addEventListener("click", () => setNavigation(false));
       iframe.addEventListener("load", () => {
         try {
           // Iframe events do not bubble to the gallery. Bind after each example load.
-          iframe.contentDocument.addEventListener("pointerdown", () => setNavigation(false));
+          iframe.contentDocument.addEventListener("click", () => setNavigation(false));
         } catch {
           // Local file previews may have an opaque origin; focus is handled below.
         }
       });
+      // Opaque local previews expose only the focus change on press. Wait for a
+      // normal click to finish inside the example before moving it.
+      const PREVIEW_CLICK_GRACE_MS = 400;
+      let blurCollapse = 0;
       window.addEventListener("blur", () => {
-        if (document.activeElement === iframe) setNavigation(false);
+        if (document.activeElement !== iframe) return;
+        let accessible = false;
+        try { accessible = iframe.contentDocument !== null; } catch { accessible = false; }
+        if (accessible) return;
+        clearTimeout(blurCollapse);
+        blurCollapse = setTimeout(() => {
+          if (document.activeElement === iframe) setNavigation(false);
+        }, PREVIEW_CLICK_GRACE_MS);
       });
 
       function update() {
