@@ -405,3 +405,5 @@ If the target aspect ratio doesn't match the `viewBox` aspect ratio, say so and 
 - Adds export buttons or `<script>` tags. Static diagrams remain script-free; an already motion-enabled source may retain the scoped controller from [`animation.md`](animation.md), but export never injects another controller.
 - Auto-emits `.svg` or `.png` alongside HTML generation. Manual on every call.
 - Embeds an HTML wrapper (cards, headers) into the SVG via `foreignObject`. Too fragile across renderers.
+
+The exporter keeps optional defs in comments namespaced so they can be uncommented later. Only referenceable defs element types have their IDs renamed; live titles and other elements retain their IDs and accessibility references.
