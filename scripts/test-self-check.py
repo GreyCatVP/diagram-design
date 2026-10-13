@@ -269,6 +269,9 @@ def main() -> int:
          "past the viewBox bottom edge"),
         ("polygon past the right edge", '<polygon points="990,10 1010,20 990,30"/>',
          "past the viewBox right edge"),
+        ("square-cornered rect past the right edge",
+         '<rect x="1100" y="20" width="10" height="10" rx="0" ry="0"/>',
+         "past the viewBox right edge"),
     ):
         check_fail(label, static.replace("</svg>", markup + "</svg>", 1), needle)
     for label, markup in (
