@@ -46,13 +46,14 @@ CSS_COMBINATOR = re.compile(r"\s+|[>+~]")
 
 # Quoted CSS data is not a declaration: `--note: "a;transform:b"` moves nothing (#431).
 # A quote opens a string only where the browser tokenizes one, so a comment, an
-# unquoted url() and an escaped character are consumed first and kept as written. A
-# string that never closes on its line is kept as well, so the checker still fails
-# closed on it. Every other character of a string becomes a space and its newlines
+# unquoted url() (escapes included, so `url(a\)"b)` is one token) and an escaped
+# character are consumed first and kept as written. A string that never closes on
+# its line is kept as well - a line feed, carriage return or form feed ends it - so
+# the checker still fails closed on it. Every other character of a string becomes a space and its newlines
 # stay, so each offset and line number still points into the CSS as written.
 CSS_STRING_RE = re.compile(
-    r"""/\*.*?(?:\*/|\Z)|url\(\s*[^"'\s)][^)]*\)|\\[\s\S]"""
-    r"""|(?P<string>"(?:\\[\s\S]|[^"\\\n])*"|'(?:\\[\s\S]|[^'\\\n])*')""",
+    r"""/\*.*?(?:\*/|\Z)|url\(\s*(?!["'])(?:\\[\s\S]|[^)\\])*\)|\\[\s\S]"""
+    r"""|(?P<string>"(?:\\[\s\S]|[^"\\\n\r\f])*"|'(?:\\[\s\S]|[^'\\\n\r\f])*')""",
     re.DOTALL | re.IGNORECASE,
 )
 

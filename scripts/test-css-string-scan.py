@@ -37,6 +37,11 @@ CASES = (
     ("an escaped quote", False, 'rect { --a: \\"; transform: translate(9px); --b: "x" }'),
     # A quote in an unquoted url() does not open a string either.
     ("a quote in an unquoted url()", False, 'rect { background: url(a"b); transform: translate(9px); --x: "c" }'),
+    # An escaped `)` does not end the url(), so the quote after it is still inside it.
+    ("a quote after an escaped paren in url()", False,
+     'rect { background: url(a\\)"b); transform: translate(9px); --x: "c" }'),
+    # A form feed ends a string just as a line feed does.
+    ("a form feed inside a string", False, 'rect { --a: "\f;transform:translate(9px);--b:" }'),
     # A string ends at its line: the next rule is live.
     ("an unterminated string", False, 'body { --a: "x;\n} rect { transform: translate(9px) } body { --b: "y" }'),
 )
