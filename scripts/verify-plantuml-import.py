@@ -606,6 +606,28 @@ def check_whole_arrows(tmp: Path) -> None:
     ok("arrows parse whole (long, styled, directed, decorated) and malformed ones fail by line")
 
 
+def check_command_word_messages(tmp: Path) -> None:
+    """A message or link whose endpoint is a styling command word is content."""
+    diagram = extract_json(
+        write_puml(
+            tmp,
+            "show-messages.puml",
+            "participant B\nhide footbox\nshow -> B : one\nShow --> B : two\nshow->B : three\n"
+            "B <- show : four\nshow -[#red]> B : five\nheader -> B : six",
+        )
+    )
+    labels = [edge["label"] for edge in diagram["edges"]]
+    if labels != ["one", "two", "three", "four", "five", "six"] or diagram["discarded"]["skin"] != 1:
+        fail(f"a message starting with a styling word was dropped: {labels} {diagram['discarded']}")
+    diagram = extract_json(
+        write_puml(tmp, "show-links.puml", "class B\nhide empty members\nshow --> B\nhide <|-- B\nshow B fields")
+    )
+    links = [(edge["source"], edge["target"]) for edge in diagram["edges"]]
+    if links != [("show", "B"), ("B", "hide")] or diagram["discarded"]["skin"] != 2:
+        fail(f"a class link starting with a styling word was dropped: {links} {diagram['discarded']}")
+    ok("messages and links named after styling commands survive; the commands are still discarded")
+
+
 def check_multi_diagram() -> None:
     payload = json.loads(run_extract([str(MULTI), "--diagram", "1", "--json"]))
     if payload["diagrams_total"] != 2:
@@ -961,6 +983,7 @@ def main() -> int:
         check_note_placement(tmp)
         check_activation_shortcuts(tmp)
         check_whole_arrows(tmp)
+        check_command_word_messages(tmp)
         check_adversarial(tmp)
         check_errors_and_limits(tmp)
         check_legacy_stdout_encoding(tmp)
