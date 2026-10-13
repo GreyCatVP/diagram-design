@@ -861,6 +861,7 @@ def check_sequence_highlight_nesting_regression(tmp: Path) -> None:
     cases = [
         ("named-color-highlight", "rect lightblue\nA->>B: highlighted\nend", [], ["highlighted"]),
         ("hex-color-highlight", "rect #ffccaa\nA->>B: highlighted\nend", [], ["highlighted"]),
+        ("variable-color-highlight", "rect var(--x)\nA->>B: highlighted\nend", [], ["highlighted"]),
         ("highlight-inside-alt", "alt success\nrect rgb(200, 200, 200)\nrect rgba(0, 0, 255, .1)\nA->>B: highlighted\nend\nend\nelse failure\nA->>B: rejected\nend", [("alt", "success", 0, ["failure"])], ["highlighted", "rejected"]),
         ("alt-inside-highlight", "rect rgb(200, 200, 200)\nalt success\nloop retries\nA->>B: attempt\nend\nelse failure\nA->>B: rejected\nend\nend", [("alt", "success", 0, ["failure"]), ("loop", "retries", 1, [])], ["attempt", "rejected"]),
         ("ordinary-fragment-control", "alt success\nloop retries\nA->>B: attempt\nend\nelse failure\nA->>B: rejected\nend", [("alt", "success", 0, ["failure"]), ("loop", "retries", 1, [])], ["attempt", "rejected"]),
