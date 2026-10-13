@@ -857,6 +857,34 @@ def check_adversarial(tmp: Path) -> None:
     ok("adversarial labels stay inert; nesting, chains, fan-out, discards work")
 
 
+def check_sequence_highlight_nesting_regression(tmp: Path) -> None:
+    cases = [
+        ("highlight-inside-alt", "alt success\nrect rgb(200, 200, 200)\nrect rgba(0, 0, 255, .1)\nA->>B: highlighted\nend\nend\nelse failure\nA->>B: rejected\nend", [("alt", "success", 0, ["failure"])], ["highlighted", "rejected"]),
+        ("alt-inside-highlight", "rect rgb(200, 200, 200)\nalt success\nloop retries\nA->>B: attempt\nend\nelse failure\nA->>B: rejected\nend\nend", [("alt", "success", 0, ["failure"]), ("loop", "retries", 1, [])], ["attempt", "rejected"]),
+        ("ordinary-fragment-control", "alt success\nloop retries\nA->>B: attempt\nend\nelse failure\nA->>B: rejected\nend", [("alt", "success", 0, ["failure"]), ("loop", "retries", 1, [])], ["attempt", "rejected"]),
+    ]
+    for name, body, expected_fragments, expected_messages in cases:
+        scene = tmp / ("sequence-highlight-nesting-" + name + ".mmd")
+        scene.write_text("sequenceDiagram\nparticipant A\nparticipant B\n" + body + "\n", encoding="utf-8")
+        diagram = json.loads(run_extract([str(scene), "--json"]))["diagrams"][0]
+        actual = [(fragment["kind"], fragment["label"], fragment["depth"], fragment["regions"]) for fragment in diagram["fragments"]]
+        if actual != expected_fragments:
+            fail(f"{name}: semantic fragment nesting changed: {actual!r}")
+        if [edge["label"] for edge in diagram["edges"]] != expected_messages:
+            fail(f"{name}: messages changed while ignoring highlighting")
+        if [(node["id"], node["label"]) for node in diagram["nodes"]] != [("A", "A"), ("B", "B")]:
+            fail(f"{name}: highlighting introduced or renamed participants")
+    # Preserve an already accepted message source whose ID happens to be rect.
+    participant = tmp / "sequence-highlight-rect-participant.mmd"
+    participant.write_text("sequenceDiagram\nparticipant rect\nparticipant B\nrect ->>B: preserved\n", encoding="utf-8")
+    diagram = json.loads(run_extract([str(participant), "--json"]))["diagrams"][0]
+    if [(edge["source"], edge["target"], edge["label"]) for edge in diagram["edges"]] != [("rect", "B", "preserved")]:
+        fail("rect participant message was mistaken for visual highlighting")
+    if diagram["fragments"]:
+        fail("rect participant message introduced a semantic fragment")
+    ok("sequence highlight blocks preserve semantic fragment regions and depth")
+
+
 def check_sequence_grammar_forms(tmp: Path) -> None:
     """Quoted participants, create directives, and full arrow vocabulary.
 
@@ -1306,6 +1334,7 @@ def main() -> int:
         check_utf8_bom(tmp)
         check_legacy_stdout_encoding(tmp)
         check_sequence_grammar_forms(tmp)
+        check_sequence_highlight_nesting_regression(tmp)
         check_adversarial(tmp)
         check_errors_and_limits(tmp)
         check_docs_and_wiring()
