@@ -66,6 +66,27 @@ class ExportSvgStandaloneTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.mod = load_helper()
 
+    def test_selector_lists_preserve_quoted_and_escaped_literals(self) -> None:
+        selectors = [
+            'rect[data-label="Revenue, net"]',
+            'rect[data-label="Revenue  net"]',
+            "rect[data-label='Revenue,  net']",
+            r'rect[data-label="a\"b,  c"]',
+            r'.revenue\,net',
+            r'.revenue\2c net',
+            ':is(rect, circle):not([data-label="a,b"])',
+            ':where(rect, :is(circle, path))',
+        ]
+        for selector in selectors:
+            with self.subTest(selector=selector):
+                html = '<style>' + selector + ', .other {fill:red}</style>'
+                html += '<svg viewBox="0 0 40 40"><rect class="other"/></svg>'
+                css = embedded_css(self.mod.export_svg_document(html, Path("literal.html")))
+                self.assertIn('#literal-root ' + selector + ', #literal-root .other { fill:red }', css)
+        # Hex escape terminator plus descendant whitespace must remain distinct.
+        css = self.mod.diagram_css_from_html('<style>.\\31  rect {fill:red}</style>', 'literal-root')
+        self.assertIn('#literal-root .\\31  rect', css)
+
     def test_rgba_parent_normalizes_with_unrelated_page_paint(self) -> None:
         for prop in ("fill", "stroke"):
             for selector in (".paint", "rect.paint", "#unrelated", ".unused .paint"):
@@ -835,6 +856,23 @@ class ExportSvgStandaloneTests(unittest.TestCase):
         self.assertIn('fill="#2d3142" fill-opacity="0.10"', svg)
         self.assertIn('stroke="none"', svg)
         self.assertIn('id="rgba-demo-dots"', svg)
+
+    def test_escaped_selector_keeps_parent_alpha_from_overriding_child_paint(self) -> None:
+        for selector in (r'.revenue\,net\31 foo', r'.revenue\2c net\31 foo'):
+            with self.subTest(selector=selector):
+                html = '<style>' + selector + ' {fill:blue}</style>'
+                html += '<svg viewBox="0 0 10 10"><g fill="rgba(255,0,0,0.5)">'
+                html += '<rect class="revenue,net1foo" width="10" height="10"/></g></svg>'
+                result = self.mod.export_svg_document(html, Path("escaped-paint.html"))
+                group = ET.fromstring(result).find('.//{http://www.w3.org/2000/svg}g')
+                self.assertEqual(group.get('fill'), 'rgba(255,0,0,0.5)')
+                self.assertIsNone(group.get('fill-opacity'))
+        html = '<style>.other {fill:blue}</style>'
+        html += '<svg viewBox="0 0 10 10"><g fill="rgba(255,0,0,0.5)">'
+        html += '<rect class="paint" width="10" height="10"/></g></svg>'
+        group = ET.fromstring(self.mod.export_svg_document(html, Path("ordinary-paint.html"))).find('.//{http://www.w3.org/2000/svg}g')
+        self.assertEqual(group.get('fill'), '#ff0000')
+        self.assertEqual(group.get('fill-opacity'), '0.5')
 
     def test_rgba_combines_existing_presentation_opacity(self) -> None:
         for prop in ("fill", "stroke"):

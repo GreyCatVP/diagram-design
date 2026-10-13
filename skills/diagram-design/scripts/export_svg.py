@@ -424,8 +424,39 @@ def set_root_id(svg: str, root_id: str) -> str:
     return f"<{name}{attrs}{end}>" + svg[opening.end():]
 
 
+def selector_list_parts(selector: str) -> list[str]:
+    """Split only selector-list commas, preserving quoted and escaped literals."""
+    parts: list[str] = []
+    start = 0
+    depth = 0
+    quote = ""
+    pos = 0
+    while pos < len(selector):
+        char = selector[pos]
+        if char == "\\":
+            escape = css_escape(selector, pos)
+            if escape:
+                pos = escape[1]
+                continue
+        if quote:
+            if char == quote:
+                quote = ""
+        elif char in "\"'":
+            quote = char
+        elif char in "([":
+            depth += 1
+        elif char in ")]":
+            depth -= 1
+        elif char == "," and depth == 0:
+            parts.append(selector[start:pos])
+            start = pos + 1
+        pos += 1
+    parts.append(selector[start:])
+    return parts
+
+
 def is_chrome_selector(selector: str) -> bool:
-    parts = [part.strip() for part in selector.split(",") if part.strip()]
+    parts = [part.strip() for part in selector_list_parts(selector) if part.strip()]
     if not parts:
         return True
     return all(
@@ -513,7 +544,7 @@ def root_bound_compound(selector: str, root_id: str) -> bool:
 
 def scope_selector(selector: str, root_id: str) -> str:
     scoped: list[str] = []
-    for part in selector.split(","):
+    for part in selector_list_parts(selector):
         part = part.strip()
         if not part:
             continue
@@ -541,7 +572,7 @@ def scope_selector(selector: str, root_id: str) -> str:
 
 def body_inherited_css(selector: str, body: str, root_id: str) -> str:
     """Bind `color` / `font-family` from a dropped `body` rule to the SVG root."""
-    parts = [part.strip().lower() for part in selector.split(",")]
+    parts = [part.strip().lower() for part in selector_list_parts(selector)]
     if "body" not in parts:
         return ""
     declarations = [
@@ -610,9 +641,9 @@ def diagram_css_from_html(html: str, root_id: str, original_root_id: str = "") -
             selector = match.group(1).strip()
             if original_root_id:
                 selector = retarget_root_selector(selector, original_root_id, root_id)
-            # Retarget before collapsing whitespace: a hex escape consumes one
-            # terminator, so a second space may be the descendant combinator.
-            selector = " ".join(selector.split())
+            # Preserve quoted whitespace and CSS escape terminators: a second
+            # space after a hex escape can be a descendant combinator.
+            selector = selector.strip()
             body = match.group(2).strip()
             if not selector or not body:
                 continue
@@ -841,7 +872,11 @@ def _decoded_css_property_text(style: str) -> str:
 
 def _css_paint_may_target_descendants(selector: str, children: list[ET.Element]) -> bool:
     """Exclude provably unrelated simple selectors; preserve unknown CSS cascades."""
-    for branch in selector.split(","):
+    for branch in selector_list_parts(selector):
+        # A hex escape's whitespace terminator belongs to its identifier.
+        # Keep escaped branches conservative before splitting combinators.
+        if "\\" in branch:
+            return True
         terminal = re.split(r"[\s>+~]+", branch.strip())[-1]
         # Unsupported selectors remain conservative, including escaped names,
         # attribute selectors and pseudo-classes that can affect descendant paint.
