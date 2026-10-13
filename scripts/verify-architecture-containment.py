@@ -2,10 +2,16 @@
 """Verify the Architecture containment HTML contract using only the stdlib.
 
 Checks unique IDs, resolving parents, no cycles, geometric containment,
-admin-band vs traffic-box shapes, PaaS placement, endpoint targets, declared
-peerings, sibling axes, and the 4px grid. Files without
-data-grammar="architecture-containment" are skipped. This verifies authored
-declarations, not whether they describe an external system.
+innermost-scope parents (only the outermost scope may omit data-parent),
+<rect> bounds, admin-band vs traffic-box shapes with stroke-dasharray resolved
+as rendered, PaaS placement, endpoint targets, declared peerings, sibling axes
+(nested children perpendicular to their parent's), and the 4px grid. Geometry
+is read from raw x/y/width/height, so a transform, moving inline CSS, nested
+<svg> viewport, matching <style> rule, or geometry animation on a checked
+element or its ancestors is a finding. External stylesheets and script are not
+evaluated. Files without data-grammar="architecture-containment" are skipped.
+This verifies authored declarations, not whether they describe an external
+system.
 
 Usage: python3 scripts/verify-architecture-containment.py [--all | FILE ...]
 No arguments and --all check every shipped architecture-containment example.
@@ -160,7 +166,159 @@ def identity_ok(raw: str) -> bool:
     return bool(raw) and ID_RE.fullmatch(raw) is not None
 
 
-def parse_box(node: Node, identity: str, kind: str, parent_id: str | None, target: str | None = None) -> Box:
+def split_top(text: str, separators: str) -> list[str]:
+    """Split on separators outside quotes, brackets and parentheses."""
+    parts, depth, quote, start = [], 0, "", 0
+    for index, char in enumerate(text):
+        if quote:
+            if char == quote:
+                quote = ""
+        elif char in "\"'":
+            quote = char
+        elif char in "([":
+            depth += 1
+        elif char in ")]":
+            depth = max(0, depth - 1)
+        elif depth == 0 and char in separators:
+            parts.append(text[start:index])
+            start = index + 1
+    parts.append(text[start:])
+    return parts
+
+
+def declarations(text: str) -> dict[str, str]:
+    """Parse a CSS declaration block; later declarations win, as in CSS."""
+    result = {}
+    for part in split_top(re.sub(r"/\*.*?\*/", "", text, flags=re.S), ";"):
+        name, colon, value = part.partition(":")
+        name = name.strip().lower()
+        if colon and name and not name.startswith("--"):
+            result[name] = re.sub(r"!\s*important\s*$", "", value.strip(), flags=re.I).strip()
+    return result
+
+
+GROUP_AT_RULES = {"media", "supports", "layer", "container", "scope", "document"}
+
+
+def css_rules(text: str) -> list[tuple[str, dict[str, str]]]:
+    """Return (selector list, declarations) for every style rule, recursing into
+    conditional group at-rules and skipping @keyframes, @font-face and the like."""
+    text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+    rules: list[tuple[str, dict[str, str]]] = []
+    index, start, quote = 0, 0, ""
+    while index < len(text):
+        char = text[index]
+        if quote:
+            if char == quote:
+                quote = ""
+        elif char in "\"'":
+            quote = char
+        elif char == ";":
+            start = index + 1
+        elif char == "{":
+            depth, close, inner_quote = 1, index + 1, ""
+            while close < len(text) and depth:
+                inner = text[close]
+                if inner_quote:
+                    if inner == inner_quote:
+                        inner_quote = ""
+                elif inner in "\"'":
+                    inner_quote = inner
+                elif inner == "{":
+                    depth += 1
+                elif inner == "}":
+                    depth -= 1
+                close += 1
+            prelude, body = text[start:index].strip(), text[index + 1:close - 1]
+            if prelude.startswith("@"):
+                name = prelude[1:].split(None, 1)[0].lower() if len(prelude) > 1 else ""
+                if name in GROUP_AT_RULES:
+                    rules.extend(css_rules(body))
+            elif prelude:
+                rules.append((prelude, declarations(body)))
+            index = start = close
+            continue
+        index += 1
+    return rules
+
+
+# Properties that can move or reshape rendered geometry away from the raw
+# x/y/width/height attributes this checker reads.
+MOVING_PROPERTIES = {"transform", "translate", "rotate", "scale", "offset", "zoom",
+                     "x", "y", "width", "height", "rx", "ry", "animation", "animation-name"}
+# CSS box positioning does not move SVG graphics today, but it has no place on a
+# checked element either, so inline uses are rejected rather than trusted.
+BOX_PROPERTIES = {"position", "left", "top", "right", "bottom", "inset", "margin"}
+NEUTRAL_VALUES = {"none", "initial", "unset"}
+TRANSFORM_FAMILY = {"transform", "translate", "rotate", "scale", "offset-path"}
+MOVING_ANIMATION_ATTRS = {"x", "y", "width", "height", "rx", "ry", "transform", "style", "class", "stroke-dasharray"}
+MOVES = "moves checked bounds away from their declared x/y/width/height"
+
+
+def moving_property(name: str, value: str, inline: bool) -> bool:
+    if name in TRANSFORM_FAMILY and value.strip().lower() in NEUTRAL_VALUES:
+        return False
+    if name in MOVING_PROPERTIES or name.startswith("offset-"):
+        return True
+    return inline and (name in BOX_PROPERTIES or name.startswith(("margin-", "inset-")))
+
+
+def last_compound(selector: str) -> str:
+    return split_top(selector.strip(), " >+~\t\n")[-1].strip()
+
+
+def may_match(compound: str, node: Node) -> bool:
+    """Conservative: True unless the subject compound clearly cannot match node."""
+    if "::" in compound or re.search(r":(?:before|after|first-line|first-letter|marker)\b", compound, re.I):
+        return False
+    if "(" in compound:
+        return True
+    tag = re.match(r"[A-Za-z][\w-]*|\*", compound)
+    if tag and tag.group(0) != "*" and tag.group(0).lower() != node.tag:
+        return False
+    classes = set(node.attrs.get("class", "").split())
+    if any(name not in classes for name in re.findall(r"\.([\w-]+)", compound)):
+        return False
+    if any(name != node.attrs.get("id") for name in re.findall(r"#([\w-]+)", compound)):
+        return False
+    return all(name.lower() in node.attrs for name in re.findall(r"\[\s*([\w:-]+)", compound))
+
+
+def dash_value(raw: str) -> bool | None:
+    """True dashed, False solid, None when unspecified, inherited or invalid."""
+    value = raw.strip().lower()
+    if value in ("", "inherit"):
+        return None
+    if value in ("none", "initial", "unset", "revert"):
+        return False
+    lengths = []
+    for token in re.split(r"[\s,]+", value):
+        match = re.fullmatch(f"({NUMBER})(px|%|em|rem|ex|ch|pt|pc|mm|cm|in|vw|vh)?", token)
+        if not match or float(match.group(1)) < 0:
+            return None
+        lengths.append(float(match.group(1)))
+    return any(length > 0 for length in lengths)
+
+
+def is_dashed(node: Node, root: Node) -> bool:
+    """Resolve stroke-dasharray as rendered: inline style beats the attribute,
+    and the property inherits from ancestors up to the diagram SVG."""
+    current: Node | None = node
+    while current is not None:
+        for raw in (declarations(current.attrs.get("style", "")).get("stroke-dasharray"),
+                    current.attrs.get("stroke-dasharray")):
+            if raw is not None:
+                resolved = dash_value(raw)
+                if resolved is not None:
+                    return resolved
+        if current is root:
+            break
+        current = current.parent
+    return False
+
+
+def parse_box(node: Node, identity: str, kind: str, parent_id: str | None, target: str | None = None,
+              root: Node | None = None) -> Box:
     attrs = node.attrs
     x = number(attrs.get("x", ""))
     y = number(attrs.get("y", ""))
@@ -168,7 +326,7 @@ def parse_box(node: Node, identity: str, kind: str, parent_id: str | None, targe
     h = number(attrs.get("height", ""))
     rx_raw = attrs.get("rx")
     rx = number(rx_raw) if rx_raw not in (None, "") else None
-    dashed = bool(attrs.get("stroke-dasharray", "").strip())
+    dashed = is_dashed(node, root if root is not None else node)
     if w <= 0 or h <= 0:
         raise ValueError("bounds width and height must be positive")
     return Box(node, identity, x, y, w, h, rx, dashed, kind, parent_id, target)
@@ -206,6 +364,7 @@ def check_source(path: Path, source: str) -> list[str]:
     scopes: dict[str, Box] = {}
     nodes: dict[str, Box] = {}
     ids: dict[str, Node] = {}
+    checked: list[Node] = []
 
     def register(identity: str, carrier: Node) -> bool:
         if not identity_ok(identity):
@@ -237,8 +396,12 @@ def check_source(path: Path, source: str) -> list[str]:
                 fail(node, "data-scope-kind must be admin or traffic")
             if not register(identity, node):
                 continue
+            checked.append(node)
+            if node.tag != "rect":
+                fail(node, f"scope bounds must be a <rect>, not <{node.tag}>")
+                continue
             try:
-                box = parse_box(node, identity, kind, parent_id)
+                box = parse_box(node, identity, kind, parent_id, root=root)
             except ValueError as error:
                 fail(node, str(error))
                 continue
@@ -271,12 +434,17 @@ def check_source(path: Path, source: str) -> list[str]:
                 fail(node, "data-parent must name the enclosing scope")
             if not register(identity, node):
                 continue
+            checked.append(node)
             bounds = [child for child in node.children if child.attrs.get("data-role") == "bounds"]
             if len(bounds) != 1:
                 fail(node, "node must expose exactly one data-role=\"bounds\" rect")
                 continue
+            checked.append(bounds[0])
+            if bounds[0].tag != "rect":
+                fail(bounds[0], f"node bounds must be a <rect>, not <{bounds[0].tag}>")
+                continue
             try:
-                box = parse_box(bounds[0], identity, kind, parent_id, target)
+                box = parse_box(bounds[0], identity, kind, parent_id, target, root=root)
             except ValueError as error:
                 fail(bounds[0], str(error))
                 continue
@@ -306,7 +474,23 @@ def check_source(path: Path, source: str) -> list[str]:
         fail(root, "node budget is 8")
 
     known_scopes = set(scopes)
+
+    def innermost_parent(box: Box, label: str) -> None:
+        """Only an unenclosed (outermost) box may omit data-parent, and a declared
+        parent that encloses the box must be the innermost scope that does."""
+        enclosing = [scope for scope in scopes.values() if scope is not box and within_box(box, scope)]
+        if not enclosing:
+            return
+        smallest = min(scope.w * scope.h for scope in enclosing)
+        innermost = sorted(scope.identity for scope in enclosing if scope.w * scope.h <= smallest + EPS)
+        if box.parent_id is None:
+            fail(box.node, f'data-parent is required: {label} "{box.identity}" sits inside scope "{innermost[0]}"')
+        elif box.parent_id in scopes and within_box(box, scopes[box.parent_id]) and box.parent_id not in innermost:
+            fail(box.node, f'data-parent "{box.parent_id}" is not the innermost enclosing scope of '
+                           f'{label} "{box.identity}"; use "{innermost[0]}"')
+
     for box in scopes.values():
+        innermost_parent(box, "scope")
         if box.parent_id is None:
             continue
         if not identity_ok(box.parent_id) or box.parent_id not in known_scopes:
@@ -344,6 +528,7 @@ def check_source(path: Path, source: str) -> list[str]:
         parent = scopes[box.parent_id]
         if not within_box(box, parent):
             fail(box.node, f'node "{box.identity}" is not geometrically inside parent "{box.parent_id}"')
+        innermost_parent(box, "node")
         if box.kind == "managed":
             if parent.kind != "admin":
                 fail(box.node, "managed node must parent to an admin band")
@@ -365,14 +550,28 @@ def check_source(path: Path, source: str) -> list[str]:
         if box.kind != "traffic":
             continue
         siblings.setdefault(box.parent_id, []).append(box)
+
+    def row_axis(parent_id: str, seen: frozenset[str] = frozenset()) -> bool:
+        """True when children of parent_id form a row. The first traffic level
+        follows its parent's aspect; nested children take the perpendicular axis."""
+        parent = scopes[parent_id]
+        grandparent = parent.parent_id
+        if parent.kind == "traffic" and grandparent in scopes and grandparent not in seen:
+            return not row_axis(grandparent, seen | {parent_id})
+        return parent.w + EPS >= parent.h
+
     for parent_id, group in siblings.items():
         if len(group) < 2 or parent_id not in scopes:
             continue
-        parent = scopes[parent_id]
-        row = parent.w + EPS >= parent.h
+        row = row_axis(parent_id)
         origins = {round(item.y, 6) for item in group} if row else {round(item.x, 6) for item in group}
         if len(origins) > 1:
-            fail(group[0].node, "sibling traffic scopes must share one axis")
+            if scopes[parent_id].kind == "traffic":
+                axis = "a row sharing one y" if row else "a column sharing one x"
+                fail(group[0].node, f'nested sibling traffic scopes in "{parent_id}" must take the axis '
+                                    f'perpendicular to their parent\'s: {axis}')
+            else:
+                fail(group[0].node, "sibling traffic scopes must share one axis")
         for index, left in enumerate(group):
             for right in group[index + 1:]:
                 if overlaps(left, right):
@@ -393,7 +592,62 @@ def check_source(path: Path, source: str) -> list[str]:
         elif source == target:
             fail(node, "peering must join two distinct traffic scopes")
 
+    check_moved_geometry(scanner, root, checked, fail)
     return findings
+
+
+def check_moved_geometry(scanner: Scanner, root: Node, checked: list[Node], fail) -> None:
+    """Containment is read from raw x/y/width/height, so nothing may move a
+    checked element or any ancestor inside the diagram SVG: no transform
+    attribute, no moving inline CSS, no nested viewport, no matching
+    stylesheet rule, and no geometry animation."""
+    affected: list[Node] = []
+    seen: set[int] = set()
+    for node in checked:
+        for item in (node, *node.ancestors()):
+            if item is root:
+                break
+            if id(item) not in seen:
+                seen.add(id(item))
+                affected.append(item)
+    for node in affected:
+        if "transform" in node.attrs:
+            fail(node, f'transform attribute on <{node.tag}> {MOVES}')
+        for name, value in declarations(node.attrs.get("style", "")).items():
+            if moving_property(name, value, inline=True):
+                fail(node, f'inline style "{name}" on <{node.tag}> {MOVES}')
+        if node.tag == "svg":
+            fail(node, f"nested <svg> viewport {MOVES}")
+
+    for style in (node for node in scanner.nodes if node.tag == "style"):
+        text = "".join(part for part in style.content if isinstance(part, str))
+        for selector_list, decls in css_rules(text):
+            moving = sorted(name for name, value in decls.items()
+                            if name == "stroke-dasharray" or moving_property(name, value, inline=False))
+            if not moving:
+                continue
+            for selector in split_top(selector_list, ","):
+                compound = last_compound(selector)
+                if compound and any(may_match(compound, node) for node in affected):
+                    effect = ("overrides the checked stroke-dasharray" if moving == ["stroke-dasharray"]
+                              else MOVES)
+                    fail(style, f'<style> rule "{selector.strip()}" sets {", ".join(moving)} on a checked '
+                                f'element and {effect}')
+                    break
+
+    by_id = {node.attrs["id"]: node for node in scanner.nodes if node.attrs.get("id")}
+    for node in scanner.nodes:
+        if node.tag not in {"animate", "animatetransform", "animatemotion", "set"}:
+            continue
+        if root not in node.ancestors():
+            continue
+        href = node.attrs.get("href") or node.attrs.get("xlink:href") or ""
+        target = by_id.get(href[1:]) if href.startswith("#") else node.parent
+        if target is None or id(target) not in seen:
+            continue
+        attribute = node.attrs.get("attributename", "").strip().lower()
+        if node.tag in {"animatetransform", "animatemotion"} or attribute in MOVING_ANIMATION_ATTRS:
+            fail(node, f"<{node.tag}> on a checked element {MOVES}")
 
 
 def main() -> int:

@@ -201,6 +201,127 @@ class ContractTests(unittest.TestCase):
             extra_nodes = extra_nodes.replace("</svg>", node(identity, "compute", 56, 144, "hub") + "</svg>")
         self.rejects(extra_nodes, "node budget")
 
+    # Item 1: transforms and positional CSS move rendered geometry away from
+    # the raw x/y/width/height the checker reads, so they are rejected.
+    def test_transform_attribute_on_node_group(self):
+        self.rejects(GOOD.replace('<g data-node-id="sql"', '<g transform="translate(0,264)" data-node-id="sql"', 1),
+                     "moves checked bounds")
+
+    def test_inline_style_transform_on_node_group(self):
+        self.rejects(GOOD.replace('<g data-node-id="sql"', '<g style="transform:translate(0px,264px)" data-node-id="sql"', 1),
+                     "moves checked bounds")
+
+    def test_ancestor_group_transform(self):
+        source = GOOD.replace('<g data-node-id="sql"', '<g transform="translate(0,264)"><g data-node-id="sql"', 1)
+        source = source.replace("<text>sql</text></g>", "<text>sql</text></g></g>", 1)
+        self.rejects(source, "moves checked bounds")
+
+    def test_transform_attribute_on_scope_bounds(self):
+        self.rejects(GOOD.replace('<rect data-role="bounds" data-scope-id="hub"',
+                                  '<rect transform="translate(400,0)" data-role="bounds" data-scope-id="hub"', 1),
+                     "moves checked bounds")
+
+    def test_positional_inline_css_on_bounds(self):
+        for style in ("translate: 0 100px", "x: 0px", "rotate: 90deg", "position:absolute;top:10px", "margin-left: 4px"):
+            with self.subTest(style=style):
+                self.rejects(GOOD.replace('<rect data-role="bounds" x="56" y="144"',
+                                          f'<rect style="{style}" data-role="bounds" x="56" y="144"', 1),
+                             "moves checked bounds")
+
+    def test_nested_svg_viewport_ancestor(self):
+        source = GOOD.replace('<g data-node-id="sql"', '<svg x="0" y="264"><g data-node-id="sql"', 1)
+        source = source.replace("<text>sql</text></g>", "<text>sql</text></g></svg>", 1)
+        self.rejects(source, "moves checked bounds")
+
+    def test_stylesheet_rule_transforming_checked_element(self):
+        for rule in ('[data-node-id="sql"] { transform: translate(0, 264px); }',
+                     "svg g { translate: 0 264px }",
+                     "rect { x: 0 }"):
+            with self.subTest(rule=rule):
+                self.rejects(GOOD.replace("body {margin:0}", "body {margin:0} " + rule, 1), "moves checked bounds")
+
+    def test_geometry_animation(self):
+        self.rejects(GOOD.replace("<text>sql</text></g>",
+                                  '<text>sql</text><animateTransform attributeName="transform" type="translate" to="0 264"/></g>', 1),
+                     "moves checked bounds")
+
+    def test_harmless_page_css_is_clean(self):
+        source = GOOD.replace("body {margin:0}", "body {margin:0} .card li { position: relative; left: 0; transform: none }", 1)
+        self.clean(source)
+
+    # Item 2: a scope or node enclosed by another scope must declare its
+    # parent, and that parent must be the innermost enclosing scope.
+    def test_missing_parent_on_enclosed_scope(self):
+        self.rejects(GOOD.replace(' data-parent="subscription"', "", 1), "data-parent is required")
+
+    def test_parent_must_be_innermost_enclosing_scope(self):
+        self.rejects(GOOD.replace('data-scope-id="hub" data-scope-kind="traffic" data-parent="rg"',
+                                  'data-scope-id="hub" data-scope-kind="traffic" data-parent="subscription"', 1),
+                     "innermost enclosing scope")
+        self.rejects(GOOD.replace('data-node-id="sql" data-kind="managed" data-parent="rg"',
+                                  'data-node-id="sql" data-kind="managed" data-parent="subscription"', 1),
+                     "innermost enclosing scope")
+
+    def test_shipped_missing_parent_cannot_hide_misaligned_sibling(self):
+        path = ROOT / "skills/diagram-design/assets/example-architecture-containment.html"
+        source = path.read_text(encoding="utf-8")
+        mutated = source.replace('data-scope-id="vnet-hub" data-scope-kind="traffic" data-parent="rg"',
+                                 'data-scope-id="vnet-hub" data-scope-kind="traffic"', 1)
+        self.assertNotEqual(mutated, source)
+        findings = "\n".join(checker.check_source(path, mutated))
+        self.assertIn("data-parent is required", findings)
+        mutated = source.replace(' data-parent="subscription"', "", 1)
+        self.assertNotEqual(mutated, source)
+        self.assertIn("data-parent is required", "\n".join(checker.check_source(path, mutated)))
+
+    # Item 3: stroke-dasharray is parsed, not merely tested for presence.
+    def test_dasharray_none_is_solid(self):
+        for value in ("none", "0", "0,0", " 0 0 "):
+            with self.subTest(value=value):
+                self.rejects(GOOD.replace('stroke-dasharray="4,4"', f'stroke-dasharray="{value}"', 1),
+                             "admin band must use a dashed stroke")
+                traffic = GOOD.replace(
+                    'data-scope-id="hub" data-scope-kind="traffic" data-parent="rg" x="32" y="88" width="160" height="144" rx="8" fill="none" stroke="#000"',
+                    f'data-scope-id="hub" data-scope-kind="traffic" data-parent="rg" x="32" y="88" width="160" height="144" rx="8" fill="none" stroke="#000" stroke-dasharray="{value}"',
+                    1,
+                )
+                self.assertNotEqual(traffic, GOOD)
+                self.clean(traffic)
+
+    def test_dasharray_resolves_style_and_inheritance(self):
+        self.rejects(GOOD.replace(' stroke-dasharray="4,4"', ' stroke-dasharray="4,4" style="stroke-dasharray: none"', 1),
+                     "admin band must use a dashed stroke")
+        inherited = GOOD.replace('<rect data-role="bounds" data-scope-id="hub"',
+                                 '<g stroke-dasharray="4 4"><rect data-role="bounds" data-scope-id="hub"', 1)
+        inherited = inherited.replace(
+            '<rect data-role="bounds" data-scope-id="spoke"', '</g><rect data-role="bounds" data-scope-id="spoke"', 1)
+        self.rejects(inherited, "traffic box must use a solid stroke")
+        self.rejects(GOOD.replace("body {margin:0}", "body {margin:0} rect { stroke-dasharray: none }", 1),
+                     "overrides the checked stroke-dasharray")
+
+    # Item 4: bounds are rects, not any element that happens to carry x/y/width/height.
+    def test_scope_bounds_must_be_rect(self):
+        self.rejects(GOOD.replace('<rect data-role="bounds" data-scope-id="hub"', '<image data-role="bounds" data-scope-id="hub"', 1),
+                     "bounds must be a <rect>")
+
+    def test_node_bounds_must_be_rect(self):
+        self.rejects(GOOD.replace('<rect data-role="bounds" x="56" y="144"', '<image data-role="bounds" x="56" y="144"', 1),
+                     "bounds must be a <rect>")
+
+    # Item 5: nested sibling traffic scopes take the axis perpendicular to
+    # their parent's own axis (type-architecture.md, Sibling axis).
+    @staticmethod
+    def nested(first, second):
+        return GOOD.replace("</svg>", scope("n1", "traffic", *first, parent="hub")
+                            + scope("n2", "traffic", *second, parent="hub") + "</svg>", 1)
+
+    def test_nested_siblings_take_perpendicular_axis(self):
+        # hub and spoke form a row in rg, so hub's own children stack in a column.
+        self.clean(self.nested((112, 100, 72, 56), (112, 164, 72, 56)))
+
+    def test_nested_siblings_on_parent_axis_rejected(self):
+        self.rejects(self.nested((112, 100, 32, 120), (152, 100, 32, 120)), "perpendicular")
+
     def test_all_shipped_variants(self):
         for suffix in ("", "-dark", "-full"):
             path = ROOT / f"skills/diagram-design/assets/example-architecture-containment{suffix}.html"
