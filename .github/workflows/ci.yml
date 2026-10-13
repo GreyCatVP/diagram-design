@@ -435,6 +435,16 @@ jobs:
         id: architecture_delta_tests
         run: python scripts/test-verify-architecture-delta.py
 
+      - name: Verify architecture containment scopes
+        if: always()
+        id: architecture_containment
+        run: python scripts/verify-architecture-containment.py --all
+
+      - name: Verify architecture containment checker
+        if: always()
+        id: architecture_containment_tests
+        run: python scripts/test-verify-architecture-containment.py
+
       - name: Verify exploded examples match their builder
         if: always()
         id: exploded_build
@@ -598,6 +608,8 @@ jobs:
           echo "| Beeswarm Checker | ${{ steps.beeswarm_tests.outcome == 'success' && '✅ Passed' || (steps.beeswarm_tests.outcome == 'skipped' && '⏭️ Skipped' || '❌ Failed') }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Architecture Delta Snapshots & Ledger | ${{ steps.architecture_delta.outcome == 'success' && '✅ Passed' || (steps.architecture_delta.outcome == 'skipped' && '⏭️ Skipped' || '❌ Failed') }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Architecture Delta Checker | ${{ steps.architecture_delta_tests.outcome == 'success' && '✅ Passed' || (steps.architecture_delta_tests.outcome == 'skipped' && '⏭️ Skipped' || '❌ Failed') }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Architecture Containment Scopes | ${{ steps.architecture_containment.outcome == 'success' && '✅ Passed' || (steps.architecture_containment.outcome == 'skipped' && '⏭️ Skipped' || '❌ Failed') }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Architecture Containment Checker | ${{ steps.architecture_containment_tests.outcome == 'success' && '✅ Passed' || (steps.architecture_containment_tests.outcome == 'skipped' && '⏭️ Skipped' || '❌ Failed') }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Exploded Examples Match Builder | ${{ steps.exploded_build.outcome == 'success' && '✅ Passed' || (steps.exploded_build.outcome == 'skipped' && '⏭️ Skipped' || '❌ Failed') }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Exploded Axonometric Geometry | ${{ steps.exploded.outcome == 'success' && '✅ Passed' || (steps.exploded.outcome == 'skipped' && '⏭️ Skipped' || '❌ Failed') }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Exploded Axonometric Checker | ${{ steps.exploded_tests.outcome == 'success' && '✅ Passed' || (steps.exploded_tests.outcome == 'skipped' && '⏭️ Skipped' || '❌ Failed') }} |" >> $GITHUB_STEP_SUMMARY
