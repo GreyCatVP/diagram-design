@@ -837,6 +837,57 @@ def check_fences_follow_markdown(tmp: Path) -> None:
     ok("only top-level plantuml fences are imported, matching the Mermaid importer")
 
 
+def check_command_named_kind(tmp: Path) -> None:
+    """An arrow line is an edge whatever its endpoints are named, for kind detection too."""
+    diagram = extract_json(
+        write_puml(tmp, "kind-command-seq.puml", "participant class\nparticipant B\nclass -> B : hi")
+    )
+    if diagram["kind"] != "sequence" or [(e["source"], e["target"]) for e in diagram["edges"]] != [("class", "B")]:
+        fail(f"a participant named `class` changed the kind: {diagram['kind']}")
+    diagram = extract_json(
+        write_puml(tmp, "kind-command-class.puml", "class participant\nclass B\nparticipant --> B")
+    )
+    if diagram["kind"] != "class" or [(e["source"], e["target"]) for e in diagram["edges"]] != [("participant", "B")]:
+        fail(f"a class named `participant` changed the kind: {diagram['kind']}")
+    ok("arrow lines are edges before declarations, in kind detection and parsing")
+
+
+def check_detection_matches_parsers(tmp: Path) -> None:
+    """Differential: kind detection and the selected parser classify every line alike.
+
+    Runs over every fixture and every input the other checks wrote. A line the
+    parser treats as an edge must be an edge for detection, and a line detection
+    counts as a declaration of the chosen kind must be a declaration to the parser.
+    """
+    extractor = load_extractor_module()
+    sources = sorted(tmp.rglob("*.puml")) + sorted(tmp.rglob("*.md"))
+    sources += [SEQUENCE, CLASS_FIXTURE, ADVERSARIAL, MULTI]
+    compared = 0
+    for path in sources:
+        try:
+            blocks = extractor.load_blocks(path)
+        except extractor.ExtractError:
+            continue
+        for block in blocks:
+            try:
+                diagram = extractor.parse_block(block)
+            except extractor.ExtractError:
+                continue
+            detected = diagram.detected_roles
+            parsed = diagram.parsed_roles
+            for line in sorted(set(detected) | set(parsed)):
+                seen, used = detected.get(line), parsed.get(line)
+                if (seen == "edge") != (used == "edge") or (seen == "declaration" and used != "declaration"):
+                    fail(
+                        f"{path.name} block {block.index} line {line}: detection read "
+                        f"{seen!r} but the {diagram.kind} parser read {used!r}"
+                    )
+            compared += 1
+    if compared < 40:
+        fail(f"differential check compared only {compared} diagrams")
+    ok(f"kind detection and the parsers agree on every line of {compared} diagrams")
+
+
 def check_multi_diagram() -> None:
     payload = json.loads(run_extract([str(MULTI), "--diagram", "1", "--json"]))
     if payload["diagrams_total"] != 2:
@@ -1203,9 +1254,11 @@ def main() -> int:
         check_region_boundaries(tmp)
         check_keyword_named_endpoints(tmp)
         check_fences_follow_markdown(tmp)
+        check_command_named_kind(tmp)
         check_adversarial(tmp)
         check_errors_and_limits(tmp)
         check_legacy_stdout_encoding(tmp)
+        check_detection_matches_parsers(tmp)
         check_docs_and_wiring()
         check_mobile_example()
     print("\nAll PlantUML import gates passed.")

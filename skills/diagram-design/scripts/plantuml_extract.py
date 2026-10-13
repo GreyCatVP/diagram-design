@@ -113,13 +113,6 @@ CLASS_HEADS = {
     "<": "plain",
     ">": "plain",
 }
-# Command words that may also be a participant or class name. A line that
-# starts with one of them and continues with an arrow is a message or link.
-KEYWORD_ENDPOINTS = {
-    "participant", "actor", "boundary", "control", "entity", "database",
-    "collections", "queue", "note", "activate", "deactivate", "destroy",
-    "class", "interface", "enum", "package", "namespace", "together",
-}
 LIFELINE_KINDS = {
     "participant": "lifeline",
     "actor": "actor",
@@ -256,6 +249,11 @@ class Diagram:
         default_factory=lambda: {"skin": 0, "includes": 0}
     )
     _nodes_by_id: dict[str, Node] = field(default_factory=dict, init=False, repr=False)
+    # Per statement line: "edge", "declaration", or "statement", as kind
+    # detection read it and as the parser used it. Not part of the IR; the
+    # verifier compares the two so they cannot drift apart.
+    detected_roles: dict[int, str] = field(default_factory=dict, init=False, repr=False)
+    parsed_roles: dict[int, str] = field(default_factory=dict, init=False, repr=False)
     _aliases: dict[str, str] = field(default_factory=dict, init=False, repr=False)
     _bare_names: dict[str, list[str]] = field(default_factory=dict, init=False, repr=False)
 
@@ -658,14 +656,14 @@ def _unsupported_body_kind(text: str) -> str | None:
     return None
 
 
-def _statement_lines(lines: list[tuple[int, str]]) -> list[str]:
+def _statement_lines(lines: list[tuple[int, str]]) -> list[tuple[int, str]]:
     """Return statement text, skipping note, legend, styling, and class bodies.
 
     Body lines are content for the parser, so they must not decide the kind:
     a note that mentions ``class Foo`` or a member named ``participant`` is
     still text inside a block.
     """
-    statements: list[str] = []
+    statements: list[tuple[int, str]] = []
     skin = _SkinBlocks()
     scratch = Diagram(0, "", 0)
     in_note = False
@@ -684,7 +682,9 @@ def _statement_lines(lines: list[tuple[int, str]]) -> list[str]:
             continue
         if skin.consume(scratch, text, _line_number):
             continue
-        statements.append(text)
+        statements.append((_line_number, text))
+        if _edge_split(text, "sequence") or _edge_split(text, "class"):
+            continue  # an edge never opens a note or class body
         if re.match(r"^note\b", text, re.I) and not _note_has_inline_body(text):
             in_note = True
         elif CLASS_DECL_RE.match(text) and text.endswith("{"):
@@ -706,39 +706,73 @@ def _note_has_inline_body(text: str) -> bool:
     return False
 
 
-def _detect_kind(lines: list[tuple[int, str]]) -> str:
+def _edge_split(text: str, kind: str) -> tuple[str, re.Match[str], str] | None:
+    """The one edge classifier, shared by kind detection and both parsers.
+
+    A line is an edge when it has an arrow and the text before the arrow is
+    one reference (a name, a quoted name, an inline `as` declaration for a
+    sequence, plus a cardinality for a class). This runs before any
+    declaration check, so `class -> B : hi` is a message from a participant
+    named `class`. Problems on the far side of the arrow are reported by the
+    edge parser as a malformed edge.
+    """
+    split = _scan_arrow(text, kind)
+    if not split:
+        return None
+    left = split[0]
+    if kind == "sequence":
+        if left in {"[", "?"}:
+            return split  # a boundary message; the parser names it
+        return split if _endpoint_code(left, allow_as=True) else None
+    left_name, _cardinality = _split_cardinality(left, before_arrow=True)
+    return split if _endpoint_code(left_name) else None
+
+
+def _detect_kind(lines: list[tuple[int, str]]) -> tuple[str, dict[int, str]]:
+    """Return the diagram kind and the role of each statement line for it."""
     has_class = False
     has_seq_decl = False
     has_class_rel = False
     has_seq_msg = False
     unsupported: str | None = None
-    for text in _statement_lines(lines):
-        if CLASS_DECL_RE.match(text):
-            has_class = True
-        if SEQ_DECL_RE.match(text):
-            has_seq_decl = True
-        # The edge parsers' own arrow scanner decides, so any arrow they accept
-        # (`-[#red]>`, `<|-up-`, `*..`) also counts here.
-        class_split = _scan_arrow(text, "class")
-        if class_split and _is_structural_link(class_split[1]):
-            has_class_rel = True
-        seq_split = _scan_arrow(text, "sequence")
-        if seq_split and _partition_unquoted(seq_split[2], ":")[1].strip():
-            has_seq_msg = True
-        hint = _unsupported_body_kind(text)
-        if hint and unsupported is None:
-            unsupported = hint
+    readings: list[tuple[int, bool, bool, bool, bool]] = []
+    for line_number, text in _statement_lines(lines):
+        seq_split = _edge_split(text, "sequence")
+        class_split = _edge_split(text, "class")
+        is_class_decl = is_seq_decl = False
+        if seq_split or class_split:
+            # Arrow first: an edge line is never a declaration.
+            if class_split and _is_structural_link(class_split[1]):
+                has_class_rel = True
+            if seq_split and _partition_unquoted(seq_split[2], ":")[1].strip():
+                has_seq_msg = True
+        else:
+            is_class_decl = bool(CLASS_DECL_RE.match(text))
+            is_seq_decl = bool(SEQ_DECL_RE.match(text))
+            has_class = has_class or is_class_decl
+            has_seq_decl = has_seq_decl or is_seq_decl
+            hint = _unsupported_body_kind(text)
+            if hint and unsupported is None:
+                unsupported = hint
+        readings.append((line_number, bool(seq_split), bool(class_split), is_seq_decl, is_class_decl))
     if has_class and has_seq_decl:
         _fail("mixed or unknown kind")
     if unsupported and not has_class and not has_seq_decl:
         _fail(_unsupported_kind_message(unsupported))
     if has_class or (has_class_rel and not has_seq_decl and not has_seq_msg):
-        return "class"
-    if has_seq_decl or has_seq_msg:
-        return "sequence"
-    if unsupported:
+        kind = "class"
+    elif has_seq_decl or has_seq_msg:
+        kind = "sequence"
+    elif unsupported:
         _fail(_unsupported_kind_message(unsupported))
-    _fail("mixed or unknown kind")
+    else:
+        _fail("mixed or unknown kind")
+    roles: dict[int, str] = {}
+    for line_number, seq_edge, class_edge, seq_decl, class_decl in readings:
+        edge = seq_edge if kind == "sequence" else class_edge
+        declaration = seq_decl if kind == "sequence" else class_decl
+        roles[line_number] = "edge" if edge else "declaration" if declaration else "statement"
+    return kind, roles
 
 
 def _statement_too_long(line_number: int) -> NoReturn:
@@ -1104,7 +1138,7 @@ def _is_skin(text: str) -> bool:
     if not match:
         return False
     # `Scale -> Client : x` or `Show <|-- Base` uses the word as a name.
-    split = _scan_arrow(text, "sequence") or _scan_arrow(text, "class")
+    split = _edge_split(text, "sequence") or _edge_split(text, "class")
     if split:
         left, _cardinality = _split_cardinality(split[0], before_arrow=True)
         if left.strip().casefold() == match.group(0).casefold():
@@ -1269,17 +1303,20 @@ def _parse_sequence(diagram: Diagram, lines: list[tuple[int, str]]) -> None:
             continue
         if skin.consume(diagram, text, line_number):
             continue
+        # Arrow first, with the classifier kind detection uses.
+        split = _edge_split(text, "sequence")
+        if split:
+            diagram.parsed_roles[line_number] = "edge"
+            add_message(split, line_number)
+            continue
+        diagram.parsed_roles[line_number] = "statement"
         title = re.match(r"^title\s+(.+)$", text, re.I)
         if title:
             diagram.title = clean_label(title.group(1))
             continue
-        early = _scan_arrow(text, "sequence")
-        if early and early[0].casefold() in KEYWORD_ENDPOINTS:
-            # `note -> X : hi` is a message from a participant named `note`.
-            add_message(early, line_number)
-            continue
         participant = _parse_participant(text, line_number)
         if participant:
+            diagram.parsed_roles[line_number] = "declaration"
             node_id, label, shape, stereotype = participant
             diagram.add_node(node_id, label, shape, stereotype=stereotype)
             continue
@@ -1389,10 +1426,6 @@ def _parse_sequence(diagram: Diagram, lines: list[tuple[int, str]]) -> None:
             continue
         if lowered.startswith("note "):
             _fail(f"malformed statement at line {line_number}")
-        split = _scan_arrow(text, "sequence")
-        if split:
-            add_message(split, line_number)
-            continue
         if SEQ_ARROW_RE.search(text):
             _fail(f"malformed edge at line {line_number}")
         _fail(f"malformed statement at line {line_number}")
@@ -1471,6 +1504,13 @@ def _parse_class(diagram: Diagram, lines: list[tuple[int, str]]) -> None:
             continue
         if skin.consume(diagram, text, line_number):
             continue
+        # Arrow first, with the classifier kind detection uses.
+        split = _edge_split(text, "class")
+        if split:
+            diagram.parsed_roles[line_number] = "edge"
+            add_link(split, line_number)
+            continue
+        diagram.parsed_roles[line_number] = "statement"
         title = re.match(r"^title\s+(.+)$", text, re.I)
         if title:
             diagram.title = clean_label(title.group(1))
@@ -1480,13 +1520,9 @@ def _parse_class(diagram: Diagram, lines: list[tuple[int, str]]) -> None:
                 blocks.pop()
                 continue
             _fail(f"malformed statement at line {line_number}")
-        early = _scan_arrow(text, "class")
-        if early and _split_cardinality(early[0], before_arrow=True)[0].casefold() in KEYWORD_ENDPOINTS:
-            # `class --> enum` links classes named after command words.
-            add_link(early, line_number)
-            continue
         package = re.match(r"^(package|namespace|together)\b\s*(.*)$", text, re.I)
         if package:
+            diagram.parsed_roles[line_number] = "declaration"
             rest = package.group(2).strip()
             opens = rest.endswith("{")
             if opens:
@@ -1511,6 +1547,7 @@ def _parse_class(diagram: Diagram, lines: list[tuple[int, str]]) -> None:
             continue
         header = _parse_classifier_header(text, line_number)
         if header:
+            diagram.parsed_roles[line_number] = "declaration"
             name, label, shape, stereotype, opens, members = header
             enclosing = scope()
             parent = enclosing[-1] if enclosing else None
@@ -1545,10 +1582,6 @@ def _parse_class(diagram: Diagram, lines: list[tuple[int, str]]) -> None:
                     cleaned,
                 )
             continue
-        split = _scan_arrow(text, "class")
-        if split:
-            add_link(split, line_number)
-            continue
         if CLASS_REL_RE.search(text) or "--" in text or ".." in text:
             _fail(f"malformed edge at line {line_number}")
         first = text.casefold().split(maxsplit=1)[0]
@@ -1574,8 +1607,9 @@ def parse_block(block: SourceBlock) -> Diagram:
         for offset, text in enumerate(_blank_comments(block.text.splitlines()))
     ]
     _refuse_includes(lines)
-    kind = _detect_kind(lines)
+    kind, roles = _detect_kind(lines)
     diagram = Diagram(block.index, kind, block.source_line, direction="LR" if kind == "sequence" else "TD")
+    diagram.detected_roles = roles
     if kind == "sequence":
         _parse_sequence(diagram, lines)
     else:
