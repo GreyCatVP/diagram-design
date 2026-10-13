@@ -1226,6 +1226,33 @@ class ExportSvgStandaloneTests(unittest.TestCase):
         self.assertNotIn('@future', rendered)
         self.assertIn('dropping unsupported CSS block', errors.getvalue())
 
+    def test_scoped_paint_fails_cleanly_before_output(self) -> None:
+        for css in ('@scope (#original) {.paint{fill:red}}', '@scope (#original) {@scope (.zone) {.paint{fill:red}}}', '@scope (#\\6f riginal) to ([data-label="brace}"]) {.paint{content:"brace}";fill:red}}'):
+            with self.subTest(css=css), tempfile.TemporaryDirectory() as folder:
+                source = Path(folder) / "scope.html"
+                output = Path(folder) / "scope.svg"
+                source.write_text('<style>' + css + '</style><svg id="original" viewBox="0 0 10 10"><rect class="paint" width="5" height="5"/></svg>', encoding="utf-8")
+                errors = io.StringIO()
+                with contextlib.redirect_stderr(errors), contextlib.redirect_stdout(io.StringIO()):
+                    status = self.mod.main([str(source), str(output), "--system-fonts"])
+                self.assertEqual(status, 2)
+                self.assertIn("unsupported CSS scope with paint rules", errors.getvalue())
+                self.assertNotIn("Traceback", errors.getvalue())
+                self.assertFalse(output.exists())
+
+    def test_layer_order_statements_survive_with_important_blocks(self) -> None:
+        css = '@layer second, first; @layer first { .paint {fill:red!important} } @layer second { .paint {fill:blue!important} }'
+        html = '<style>' + css + '</style><svg viewBox="0 0 10 10"><rect class="paint" width="5" height="5"/></svg>'
+        exported = self.mod.export_svg_document(html, Path("layers.html"), system_fonts=True)
+        self.assertIn('@layer second, first;', exported)
+        self.assertLess(exported.index('@layer second, first;'), exported.index('@layer first {'))
+        self.assertLess(exported.index('@layer first {'), exported.index('@layer second {'))
+        self.assertIn('fill:red!important', exported)
+        self.assertIn('fill:blue!important', exported)
+        nested = self.mod.diagram_css_from_html('<style>@media screen {@layer second, first; @layer first {.paint{fill:red}}}</style>', 'layers-root')
+        self.assertIn('@media screen {\n@layer second, first;', nested)
+        ET.fromstring(exported)
+
 
 if __name__ == "__main__":
     suite = unittest.defaultTestLoader.loadTestsFromTestCase(ExportSvgStandaloneTests)

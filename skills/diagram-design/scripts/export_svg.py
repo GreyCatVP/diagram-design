@@ -589,6 +589,7 @@ class _CssRule:
         self.end = opening + 1
         self.children: list[_CssRule] = []
         self.group = False
+        self.statement = False
 
 
 def _css_rule_tree(css: str) -> list[_CssRule]:
@@ -626,14 +627,20 @@ def _css_rule_tree(css: str) -> list[_CssRule]:
                 starts.pop()
             starts[-1] = index + 1
         elif char == ";":
+            selector = css[starts[-1]:index].strip()
+            if re.match(r"@layer\b", selector, re.IGNORECASE):
+                rule = _CssRule(css, starts[-1], index)
+                rule.statement = True
+                (stack[-1].children if stack else roots).append(rule)
+                nodes.append(rule)
             starts[-1] = index + 1
     if stack or quote:
         raise ValueError("diagram CSS has an unclosed rule or string")
     for rule in reversed(nodes):
         selector = rule.selector
-        if selector.startswith("@") and not re.match(r"@(?:(?:-webkit-)?keyframes|font-face)\b", selector, re.IGNORECASE):
+        if not rule.statement and selector.startswith("@") and not re.match(r"@(?:(?:-webkit-)?keyframes|font-face)\b", selector, re.IGNORECASE):
             rule.group = bool(re.match(r"@(?:media|supports|layer|container)\b", selector, re.IGNORECASE)) or any(
-                not child.selector.startswith("@") or child.group
+                not child.selector.startswith("@") or child.group or child.statement
                 or re.match(r"@(?:(?:-webkit-)?keyframes|font-face)\b", child.selector, re.IGNORECASE) is not None
                 for child in rule.children
             )
@@ -790,6 +797,8 @@ def namespace_inline_animations(svg: str, names: dict[str, str]) -> str:
 def _diagram_css_leaf(rule: _CssRule, root_id: str, names: dict[str, str], original_root_id: str, system_fonts: bool) -> str:
     kept: list[str] = []
     selector = rule.selector.strip()
+    if rule.statement:
+        return escape_css_for_xml(selector + ";")
     body = rule.css[rule.start:rule.end].strip()
     if not selector or not body:
         return ""
@@ -844,6 +853,12 @@ def _diagram_css_leaf(rule: _CssRule, root_id: str, names: dict[str, str], origi
 def _diagram_css_rules(rules: list[_CssRule], root_id: str, names: dict[str, str], original_root_id: str = "", system_fonts: bool = False) -> str:
     # Determine empty groups bottom-up, then emit without recursive string copies.
     nodes = list(_css_rule_nodes(rules))
+    ordinary: dict[_CssRule, bool] = {}
+    for rule in reversed(nodes):
+        ordinary[rule] = any(ordinary[child] for child in rule.children) if rule.group else not rule.selector.startswith("@")
+    for rule in nodes:
+        if rule.group and ordinary[rule] and re.match(r"@scope\b", rule.selector, re.IGNORECASE):
+            raise ValueError("unsupported CSS scope with paint rules in SVG export; move paint outside @scope")
     leaves = {rule: _diagram_css_leaf(rule, root_id, names, original_root_id, system_fonts)
               for rule in nodes if not rule.group}
     retained: dict[_CssRule, bool] = {}
