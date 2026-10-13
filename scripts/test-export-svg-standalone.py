@@ -87,6 +87,91 @@ class ExportSvgStandaloneTests(unittest.TestCase):
         css = self.mod.diagram_css_from_html('<style>.\\31  rect {fill:red}</style>', 'literal-root')
         self.assertIn('#literal-root .\\31  rect', css)
 
+    def test_css_escaped_local_paint_fragments_follow_namespaced_defs(self) -> None:
+        references = [r'url(#\70 aint)', r"url('#\70 aint')", r'url(&quot;#\70 aint&quot;)']
+        for reference in references:
+            with self.subTest(reference=reference):
+                source = '<svg viewBox="0 0 20 20"><defs><linearGradient id="paint"/></defs>'
+                source += '<rect fill="' + reference + '" width="20" height="20"/></svg>'
+                root = ET.fromstring(self.mod.export_svg_document(source, Path("literal.html"), system_fonts=True))
+                gradient = root.find('.//{http://www.w3.org/2000/svg}linearGradient')
+                rectangle = root.find('{http://www.w3.org/2000/svg}rect')
+                self.assertEqual(gradient.get('id'), 'literal-paint')
+                self.assertIn(r'#literal-\70 aint', rectangle.get('fill'))
+
+    def test_url_looking_metadata_and_css_strings_remain_literal(self) -> None:
+        for fragment in (r'#\70 aint', '#paint'):
+            with self.subTest(fragment=fragment):
+                literal = 'url(' + fragment + ')'
+                selector_value = literal.replace('\\', '\\\\')
+                source = '<style>rect[data-label="' + selector_value + '"]{fill:red}</style>'
+                source += '<svg viewBox="0 0 20 20"><defs><linearGradient id="paint"/></defs>'
+                source += '<rect data-label="' + literal + '" width="20" height="20"/></svg>'
+                exported = self.mod.export_svg_document(source, Path("literal.html"), system_fonts=True)
+                rectangle = ET.fromstring(exported).find('{http://www.w3.org/2000/svg}rect')
+                self.assertEqual(rectangle.get('data-label'), literal)
+                self.assertIn('[data-label="' + selector_value + '"]', embedded_css(exported))
+        for carrier in ('stylesheet', 'inline'):
+            with self.subTest(carrier=carrier):
+                declaration = r'--note:"url(#\70 aint)";fill:url(#\70 aint)'
+                source = '<svg viewBox="0 0 20 20"><defs><linearGradient id="paint"/></defs>'
+                if carrier == 'stylesheet':
+                    source += '<style>.paint {' + declaration + '}</style><rect class="paint"/>'
+                else:
+                    source += "<rect style='" + declaration + "'/>"
+                exported = self.mod.export_svg_document(source + '</svg>', Path("literal.html"), system_fonts=True)
+                if carrier == 'stylesheet':
+                    css = ''.join(node.text or '' for node in ET.fromstring(exported).iter() if node.tag.endswith('}style'))
+                else:
+                    css = ET.fromstring(exported).find('{http://www.w3.org/2000/svg}rect').get('style')
+                self.assertIn(r'--note:"url(#\70 aint)"', css)
+                self.assertIn(r'fill:url(#literal-\70 aint)', css)
+
+    def test_commented_inline_paint_keeps_its_optional_definition_binding(self) -> None:
+        source = '<svg viewBox="0 0 20 20"><defs><!-- <pattern id="paint"/> --></defs>'
+        source += '<symbol id="paint"><rect width="10" height="10"/></symbol>'
+        source += '<!-- <rect style="fill:url(#paint)"/> --><use href="#paint"/></svg>'
+        exported = self.mod.export_svg_document(source, Path("literal.html"), system_fonts=True)
+        self.assertIn('<pattern id="literal-paint"/>', exported)
+        self.assertIn('<rect style="fill:url(#literal-paint)"/>', exported)
+        self.assertEqual(ET.fromstring(exported).find('{http://www.w3.org/2000/svg}use').get('href'), '#paint')
+
+    def test_longer_css_function_names_are_not_local_url_functions(self) -> None:
+        for function in ('noturl', 'vendor-url', '-url', '_url', '💡url'):
+            for carrier in ('stylesheet', 'inline'):
+                with self.subTest(function=function, carrier=carrier):
+                    declaration = '--note:' + function + r'(#\70 aint);fill:red'
+                    source = '<svg viewBox="0 0 20 20"><defs><linearGradient id="paint"/></defs>'
+                    if carrier == 'stylesheet':
+                        source += '<style>.paint {' + declaration + '}</style><rect class="paint"/>'
+                    else:
+                        source += "<rect style='" + declaration + "'/>"
+                    root = ET.fromstring(self.mod.export_svg_document(source + '</svg>', Path("literal.html"), system_fonts=True))
+                    css = ''.join(node.text or '' for node in root.iter() if node.tag.endswith('}style')) if carrier == 'stylesheet' else root.find('{http://www.w3.org/2000/svg}rect').get('style')
+                    self.assertIn(declaration, css)
+
+    def test_escaped_function_identifiers_are_consumed_before_url_matching(self) -> None:
+        functions = [r'my\31 url', r'my\000031url', r'my\0031 url', r'my\31 URL', r'my\31' + '\turl']
+        for function in functions:
+            for carrier in ('stylesheet', 'inline'):
+                with self.subTest(function=function, carrier=carrier):
+                    declaration = '--note:' + function + r'(#\70 aint);fill:red'
+                    source = '<svg viewBox="0 0 20 20"><defs><linearGradient id="paint"/></defs>'
+                    if carrier == 'stylesheet':
+                        source += '<style>.paint {' + declaration + '}</style><rect class="paint"/>'
+                    else:
+                        source += "<rect style='" + declaration + "'/>"
+                    root = ET.fromstring(self.mod.export_svg_document(source + '</svg>', Path("literal.html"), system_fonts=True))
+                    css = ''.join(node.text or '' for node in root.iter() if node.tag.endswith('}style')) if carrier == 'stylesheet' else root.find('{http://www.w3.org/2000/svg}rect').get('style')
+                    self.assertIn(declaration.replace('\t', ' ') if carrier == 'inline' else declaration, css)
+
+    def test_second_space_after_an_identifier_escape_starts_a_real_url(self) -> None:
+        declaration = r'--note:my\31  url(#\70 aint);fill:red'
+        source = '<svg viewBox="0 0 20 20"><defs><linearGradient id="paint"/></defs>'
+        source += '<style>.paint {' + declaration + '}</style><rect class="paint"/></svg>'
+        exported = self.mod.export_svg_document(source, Path("literal.html"), system_fonts=True)
+        self.assertIn(r'--note:my\31  url(#literal-\70 aint);fill:red', exported)
+
     def test_rgba_parent_normalizes_with_unrelated_page_paint(self) -> None:
         for prop in ("fill", "stroke"):
             for selector in (".paint", "rect.paint", "#unrelated", ".unused .paint"):
