@@ -973,6 +973,21 @@ def _escape_digest(text: str) -> str:
     return re.sub(r"([\\`*{}\[\]()#+\-.!_|>])", r"\\\1", text.replace("&", "&amp;").replace("<", "&lt;"))
 
 
+def check_declaration_edge_forms(tmp: Path) -> None:
+    """A generic before an alias, and `<<...>>` inside a quoted name, survive the tokenizer."""
+    diagram = extract_json(write_puml(tmp, "decl-generic-alias.puml", "class Box<T> as B #pink <<e>>\nB --> C"))
+    first = diagram["nodes"][0]
+    if (first["id"], first["label"], first["stereotype"]) != ("B", "Box<T>", "e"):
+        fail(f"a generic before `as` broke the declaration: {first}")
+    diagram = extract_json(write_puml(tmp, "decl-quoted-angle.puml", 'participant "a <<b>> c" as X\nX -> X : x'))
+    if diagram["nodes"][0]["label"] != "a <<b>> c":
+        fail(f"`<<b>>` inside a quoted name was read as markup: {diagram['nodes'][0]['label']!r}")
+    diagram = extract_json(write_puml(tmp, "decl-quoted-script.puml", 'participant "x <<script>> y" as S\nS -> S : z'))
+    if "<script" in json.dumps(diagram).casefold():
+        fail(f"a doubled script tag crossed into JSON: {diagram['nodes'][0]['label']!r}")
+    ok("generic-then-alias declarations and `<<...>>` inside quoted names keep their text")
+
+
 def check_multi_diagram() -> None:
     payload = json.loads(run_extract([str(MULTI), "--diagram", "1", "--json"]))
     if payload["diagrams_total"] != 2:
@@ -1342,6 +1357,7 @@ def main() -> int:
         check_command_named_kind(tmp)
         check_declaration_styling(tmp)
         check_block_errors_stay_local(tmp)
+        check_declaration_edge_forms(tmp)
         check_adversarial(tmp)
         check_errors_and_limits(tmp)
         check_legacy_stdout_encoding(tmp)

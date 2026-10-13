@@ -421,8 +421,16 @@ _MARKUP_TAGS = (
     "option|plain|pre|script|select|size|small|source|span|strike|strong|style|"
     "sub|sup|svg|table|td|template|textarea|th|title|tr|tt|ul|video|wbr|xmp"
 )
+# Active-content tags are always stripped. Formatting tags are stripped only
+# when they are not doubled, so `<<b>>` inside a quoted name stays text.
+_ACTIVE_TAGS = (
+    "applet|audio|base|button|canvas|embed|form|frame|frameset|iframe|img|input|"
+    "link|math|meta|noscript|object|option|script|select|source|style|svg|"
+    "template|textarea|video|xmp"
+)
 MARKUP_TAG_RE = re.compile(
-    r"</?(?:(?i:" + _MARKUP_TAGS + r")|[abipqsuw])(?=[\s/>:=])[^<>]*>"
+    r"</?(?i:" + _ACTIVE_TAGS + r")(?=[\s/>:=])[^<>]*>"
+    r"|(?<!<)</?(?:(?i:" + _MARKUP_TAGS + r")|[abipqsuw])(?=[\s/>:=])[^<>]*>(?!>)"
     r"|<[$&][^<>]*>"
 )
 
@@ -905,7 +913,7 @@ def _parse_declaration_tail(
         generic, remainder = _split_generic(text[generic_at:], line_number)
         position = len(text) - len(remainder)
     node_id, label = display, display
-    alias_match = re.compile(r"\s+as\s+", re.I).match(text, position)
+    alias_match = re.compile(r"\s*as\s+", re.I).match(text, position)
     if alias_match:
         alias = DECLARED_NAME_AT.match(text, alias_match.end())
         if not alias or not (alias.group("quoted") or alias.group("bare")):
