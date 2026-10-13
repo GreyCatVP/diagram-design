@@ -50,7 +50,7 @@ CHILD_ENV = {**os.environ, "PYTHONIOENCODING": "utf-8"}
 # Anchors — literal excerpts of the shipped light example.
 FOCAL_CELL = (
     'data-row="payments" data-col="S4" data-value="47" data-focal="true" '
-    'x="520" y="124" width="116" height="56" fill="rgba(235,108,54,0.85)"'
+    'x="520" y="124" width="116" height="56" fill="rgba(191,69,32,0.85)"'
 )
 FIRST_NONFOCAL = (
     'data-row="auth" data-col="S1" data-value="4" '
@@ -139,12 +139,52 @@ def main() -> int:
             if code != 0:
                 failures.append(f"{label}: shipped example failed:\n  {output.strip()}")
 
+        single_quoted = re.sub(
+            r'="([^"<>]*)"',
+            lambda match: "='" + match.group(1).replace("'", "&#39;") + "'",
+            original,
+        )
+        case(failures, d, "P-single-quotes.html", single_quoted, original, True,
+             "single-quoted attributes retain the same heatmap semantics")
+        mixed_quotes = original.replace(
+            FIRST_NONFOCAL,
+            FIRST_NONFOCAL.replace('fill="', 'data-note="fill=\'red\'" fill="', 1),
+        )
+        case(failures, d, "P-mixed-quotes.html", mixed_quotes, original, True,
+             "attribute-like metadata does not override the real fill")
+        mixed_single = single_quoted.replace(
+            "fill='rgba(45,49,66,0.29)'",
+            "data-note='fill=\"red\"' fill='rgba(45,49,66,0.29)'",
+            1,
+        )
+        case(failures, d, "P-mixed-single-quotes.html", mixed_single, single_quoted, True,
+             "double-quoted text inside metadata does not override a single-quoted fill")
+
+        commented_transform = original.replace('</style>', '/* archived experiment\n transform: translateX(12px);\n */\n</style>', 1)
+        case(failures, d, "P-commented-transform.html", commented_transform, original, True,
+             "a CSS comment cannot move verified geometry")
+
+        archived_style = original.replace('</style>', '</style><!-- <style>rect { transform: translateX(12px); }</style> -->', 1)
+        case(failures, d, "P-archived-style.html", archived_style, original, True,
+             "an HTML comment cannot activate archived CSS")
+        live_transform = original.replace('</style>', 'rect {/**/transform: translateX(12px); }\n</style>', 1)
+        case(failures, d, "N-comment-prefixed-transform.html", live_transform, original, False,
+             "a CSS comment before a property cannot hide an active transform")
+        for name, css in (
+            ("legacy-html-markers", "<!-- rect { transform: translateX(12px); } -->"),
+            ("quoted-comment-opener", 'rect { --note: "/*"; transform: translateX(12px); /* note */ }'),
+            ("escaped-quote-comment-opener", r'rect { --note: "\"/*"; transform: translateX(12px); /* note */ }'),
+        ):
+            live_css = original.replace('</style>', css + '\n</style>', 1)
+            case(failures, d, f"N-{name}.html", live_css, original, False,
+                 "quoted comment markers and HTML legacy markers cannot hide active CSS")
+
         # ── Negative: mutations that must be rejected ─────────────────────────
 
         # N1: two focal cells
         second_focal = FIRST_NONFOCAL.replace(
             'fill="rgba(45,49,66,0.29)"',
-            'data-focal="true" fill="rgba(235,108,54,0.85)"',
+            'data-focal="true" fill="rgba(191,69,32,0.85)"',
         )
         case(
             failures,
@@ -388,15 +428,25 @@ def main() -> int:
     # Translucent foregrounds compose against the cell beneath them, not paper.
     with tempfile.TemporaryDirectory() as tmp:
         d = Path(tmp)
-        for template, theme in ((original, "light"),
-                                (GOOD_DARK.read_text(encoding="utf-8"), "dark")):
-            for alpha, expected_pass in (("0.8", True), ("0.2", False)):
+        # The light focal cell (accent #bf4520 at 0.85) leaves solid #111111 at
+        # 4.64:1, so only a nearly opaque translucent ink still clears 4.5:1 there.
+        for template, theme, passing_alpha in ((original, "light", "0.98"),
+                                               (GOOD_DARK.read_text(encoding="utf-8"), "dark", "0.8")):
+            for alpha, expected_pass in ((passing_alpha, True), ("0.2", False)):
                 changed = template.replace('x="578" y="149" fill="#111111"',
                                            f'x="578" y="149" fill="rgba(17,17,17,{alpha})"', 1)
                 code, output = run(write(d, f"alpha-{theme}-{alpha}.html", changed))
                 if (code == 0) != expected_pass or (not expected_pass and "below WCAG AA" not in output):
                     failures.append(f"alpha foreground {theme}/{alpha} unexpected result: {output.strip()}")
         print("OK: translucent AA foregrounds pass; weak-alpha text still fails in both themes")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        encoded = re.sub(r'(\b(?:x|y|width|height|data-value|data-share)="[^"<>]*)[0-9]',
+                         lambda match: match.group(0)[:-1] + f"&#{ord(match.group(0)[-1])};",
+                         GOOD.read_text(encoding="utf-8"))
+        code, output = run(write(Path(tmp), "encoded-attributes.html", encoded))
+        if code != 0:
+            failures.append(f"XML-encoded numeric attributes rejected: {output.strip()}")
 
     if failures:
         for f in failures:

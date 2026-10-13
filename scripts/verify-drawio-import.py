@@ -68,13 +68,15 @@ def run_extract(args: list[str]) -> str:
     return proc.stdout
 
 
-def expect_extract_error(args: list[str], message: str) -> None:
+def expect_extract_error(args: list[str], message: str, *, quiet_stdout: bool = False) -> None:
     proc = invoke(args)
     if proc.returncode != 2 or message not in proc.stderr:
         fail(
             f"expected exit 2 containing {message!r} for {args}; got "
             f"{proc.returncode}: {proc.stderr.strip()!r}"
         )
+    if quiet_stdout and proc.stdout:
+        fail(f"expected no stdout for failed write {args}; got {proc.stdout.strip()!r}")
 
 
 def check_legacy_stdout_encoding(tmp: Path) -> None:
@@ -166,6 +168,31 @@ def png_chunk(ctype: bytes, data: bytes) -> bytes:
         + data
         + struct.pack(">I", zlib.crc32(ctype + data) & 0xFFFFFFFF)
     )
+
+
+def check_out_write_errors(tmp: Path) -> None:
+    # A missing parent directory is the common caller mistake; an existing
+    # directory or a regular file in the parent slot are the hostile cases.
+    missing_dir = tmp / "missing-output-directory"
+    expect_extract_error(
+        [str(FIXTURE), "--out", str(missing_dir / "digest.md")],
+        f"cannot write {missing_dir / 'digest.md'}",
+        quiet_stdout=True,
+    )
+    expect_extract_error(
+        [str(FIXTURE), "--json", "--out", str(missing_dir / "digest.json")],
+        f"cannot write {missing_dir / 'digest.json'}",
+        quiet_stdout=True,
+    )
+    expect_extract_error(
+        [str(FIXTURE), "--out", str(tmp)], "cannot write", quiet_stdout=True
+    )
+    parent_file = tmp / "regular-file.md"
+    parent_file.write_text("not a directory", encoding="utf-8")
+    expect_extract_error(
+        [str(FIXTURE), "--out", str(parent_file / "digest.md")], "cannot write", quiet_stdout=True
+    )
+    ok("draw.io --out write failures report a clear diagnostic and exit 2")
 
 
 def check_files() -> None:
@@ -781,7 +808,7 @@ def check_docs() -> None:
     )
     if route is None or route.group(1) != "M560,232 H640":
         fail("worked example API Gateway-to-Orders route must be a direct horizontal connector")
-    if example.count("#eb6c36") > 4:
+    if example.count("#bf4520") > 4:
         fail("worked example uses the accent on more than the focal node + legend")
     proc = subprocess.run(
         [sys.executable, str(ROOT / "scripts/lint-skin.py"), str(EXAMPLE)],
@@ -795,10 +822,21 @@ def check_docs() -> None:
     ok("references, SKILL.md wiring, and slash command are consistent")
 
 
+def check_unicode_page_names() -> None:
+    extractor = load_extractor_module()
+    page = extractor.Page(id="page", name="²", index=0)
+    if extractor.select_pages([page], "²") != [page]:
+        fail("non-decimal numeric characters must remain valid page names")
+    if extractor.select_pages([page], "٠") != [page]:
+        fail("decimal Unicode selectors must remain supported")
+    ok("page selection distinguishes decimal indexes from Unicode names")
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="diagram-design-drawio-") as tmp_dir:
         tmp = Path(tmp_dir)
         check_files()
+        check_unicode_page_names()
         check_parse_raw()
         check_arrow_directions(tmp)
         check_relative_geometry(tmp)
@@ -807,6 +845,7 @@ def main() -> int:
         check_bom_prefixed(tmp)
         check_containers(tmp)
         check_legacy_stdout_encoding(tmp)
+        check_out_write_errors(tmp)
         check_digest_escaping(tmp)
         check_security_and_limits(tmp)
         check_docs()
