@@ -101,6 +101,13 @@ STYLE_BLOCK_RE = re.compile(r"<style\b(?:[^>\"']|\"[^\"]*\"|'[^']*')*>(.*?)</sty
 SVG_TAG_RE = re.compile(
     r"<svg(?=[\s/>])(?:[^>\"']|\"[^\"]*\"|'[^']*')*>|</svg\s*>", re.IGNORECASE
 )
+# Consume every tag, including quoted attributes, before checking whether it
+# changes the namespace of a style. Tag-looking attribute values are literal.
+HTML_TOKEN_RE = re.compile(
+    r"<!--.*?(?:-->|$)|<!\[CDATA\[.*?(?:\]\]>|$)|"
+    r"<(?P<close>/)?(?P<tag>[A-Za-z][^\s/>]*)"
+    r"(?:[^>\"']|\"[^\"]*\"|'[^']*')*>", re.IGNORECASE | re.DOTALL
+)
 CDATA_SECTION_RE = re.compile(r"<!\[CDATA\[(.*?)\]\]>", re.DOTALL)
 # Each alternative starts on a different character, and a comment cannot run
 # past its first "*/", so a failed match backtracks linearly, not
@@ -124,14 +131,60 @@ def slug_for(path: Path) -> str:
     return slug
 
 
+def html_tokens(source: str) -> Iterator[tuple[re.Match[str], bool, int, int]]:
+    """Yield markup with its SVG context and any opaque text body boundaries.
+
+    HTML text elements consume through their end tag without interpreting the
+    contents as markup. SVG title/desc remain HTML integration points instead.
+    """
+    contexts: list[str] = []
+    pos = 0
+    while token := HTML_TOKEN_RE.search(source, pos):
+        name = (token.group("tag") or "").lower()
+        in_svg = bool(contexts and contexts[-1] == "svg")
+        body_end = end = token.end()
+        self_closing = token.group(0).endswith("/>")
+        text_element = name in {"script", "style"} or (
+            not in_svg and name in {"textarea", "title", "xmp", "iframe", "noembed", "noframes", "noscript", "plaintext"}
+        )
+        if name and not token.group("close") and text_element and not (in_svg and self_closing):
+            closing = (None if name == "plaintext" else re.compile(
+                r"</" + name + r"(?=[\s/>])(?:[^>\"']|\"[^\"]*\"|'[^']*')*>",
+                re.IGNORECASE,
+            ).search(source, end))
+            body_end = closing.start() if closing else len(source)
+            end = closing.end() if closing else len(source)
+        elif name in {"svg", "foreignobject", "desc", "title"}:
+            if token.group("close"):
+                for index in range(len(contexts) - 1, -1, -1):
+                    if contexts[index] == name:
+                        del contexts[index:]
+                        break
+            elif not self_closing and (name == "svg" or in_svg):
+                contexts.append(name)
+        yield token, in_svg, body_end, end
+        pos = end
+
+
 def mask_opaque_html(source: str, *, styles: bool = False) -> str:
-    tags = "script|style"
-    pattern = re.compile(r"<!\[CDATA\[.*?\]\]>|<!--.*?-->|<(?P<raw>" + tags + r")\b[^>]*>.*?</(?P=raw)\s*>", re.IGNORECASE | re.DOTALL)
-    def mask(match: re.Match[str]) -> str:
-        if not styles and (match.group("raw") or "").lower() == "style":
-            return match.group(0)
-        return " " * len(match.group(0))
-    return pattern.sub(mask, source)
+    out: list[str] = []
+    pos = 0
+    for token, _, _, end in html_tokens(source):
+        out.append(source[pos:token.start()])
+        name = (token.group("tag") or "").lower()
+        if not name or (end > token.end() and (styles or name != "style")):
+            out.append(" " * (end - token.start()))
+        else:
+            # Keep tag names and boundaries, but do not expose markup-looking
+            # quoted attribute values to consumers of the masked source.
+            suffix = "/>" if token.group(0).endswith("/>") else ">"
+            attr_start = token.end("tag")
+            out.append(source[token.start():attr_start])
+            out.append(" " * (token.end() - len(suffix) - attr_start) + suffix)
+            out.append(source[token.end():end])
+        pos = end
+    out.append(source[pos:])
+    return "".join(out)
 
 
 def extract_first_svg(html: str) -> str:
@@ -896,7 +949,12 @@ def _diagram_css_rules(rules: list[_CssRule], root_id: str, names: dict[str, str
 
 def _html_css_rules(html: str) -> list[_CssRule]:
     rules: list[_CssRule] = []
-    for block in STYLE_BLOCK_RE.findall(mask_opaque_html(html)):
+    for token, in_svg, body_end, _ in html_tokens(html):
+        if (token.group("tag") or "").lower() != "style" or token.group("close"):
+            continue
+        block = html[token.end():body_end]
+        if in_svg:
+            block = CDATA_SECTION_RE.sub(lambda match: match.group(1), block)
         rules.extend(_css_rule_tree(CSS_COMMENT_RE.sub("", block)))
     return rules
 

@@ -845,6 +845,136 @@ class ExportSvgStandaloneTests(unittest.TestCase):
         self.assertEqual(root[1].text, "Keep description")
         self.assertEqual(root[2].tag, "{http://www.w3.org/2000/svg}defs")
 
+    def test_cli_carries_cdata_styles_after_root_rename(self) -> None:
+        styles = (
+            '<![CDATA[#original .paint { fill: red; }]]>',
+            '<![CDATA[/* colors */ #original .paint { fill: red; }]]>'
+            '<![CDATA[#original .outline { stroke: blue; }]]>',
+            '#original .outline { stroke: blue; }'
+            '<![CDATA[#original .paint { fill: red; }]]>',
+        )
+        for style in styles:
+            with self.subTest(style=style), tempfile.TemporaryDirectory() as tmp:
+                source = Path(tmp) / "cdata.html"
+                source.write_text(
+                    '<svg id="original" viewBox="0 0 10 10">'
+                    f'<style>{style}</style>'
+                    '<rect class="paint outline" width="5" height="5"/></svg>',
+                    encoding="utf-8",
+                )
+                self.assertEqual(self.mod.main([str(source), "--system-fonts"]), 0)
+                document = ET.fromstring(source.with_suffix(".svg").read_text(encoding="utf-8"))
+                carried = document.find(
+                    "{http://www.w3.org/2000/svg}defs/{http://www.w3.org/2000/svg}style"
+                ).text
+                self.assertIn("#cdata-root .paint { fill: red; }", carried)
+                self.assertNotIn("<![CDATA[", carried)
+                self.assertNotIn("]]>", carried)
+                if ".outline" in style:
+                    self.assertIn("#cdata-root .outline { stroke: blue; }", carried)
+
+    def test_html_style_cdata_looking_literal_is_not_unwrapped(self) -> None:
+        diagram = '<svg viewBox="0 0 10 10"><rect class="paint"/></svg>'
+        style = '<style>.paint::after { content: "<![CDATA[literal]]>"; }</style>'
+        sources = (
+            style + diagram,
+            diagram + '<div title="<svg>"></div>' + style,
+            diagram + "<div title='<svg>'></div>" + style,
+            diagram + '<div title="before > <svg> after"></div>' + style,
+            diagram + '<div data-example="<svg>">' + style + '</div>',
+            *(diagram + f'<{tag}><svg></{tag}>' + style
+              for tag in ("textarea", "title", "xmp", "iframe", "noembed", "noframes", "noscript")),
+        )
+        for html in sources:
+            with self.subTest(html=html):
+                carried = self.mod.diagram_css_from_html(html, "literal-root")
+                self.assertIn('content: "&lt;![CDATA[literal]]>"', carried)
+                with tempfile.TemporaryDirectory() as tmp:
+                    source = Path(tmp) / "literal.html"
+                    source.write_text(html, encoding="utf-8")
+                    self.assertEqual(self.mod.main([str(source), "--system-fonts"]), 2)
+                    self.assertFalse(source.with_suffix(".svg").exists())
+
+    def test_html_text_elements_do_not_supply_svg_or_styles(self) -> None:
+        diagram = '<svg id="real" viewBox="0 0 10 10"><rect/></svg>'
+        for tag in ("textarea", "title", "xmp", "iframe", "noembed", "noframes", "noscript"):
+            with self.subTest(tag=tag):
+                html = (f'<{tag} title="before > after"><svg id="fake">'
+                        '<style>.fake { fill: red; }</style></svg>'
+                        f'</{tag}>' + diagram)
+                self.assertEqual(self.mod.extract_first_svg(html), diagram)
+                self.assertEqual(self.mod.diagram_css_from_html(html, "scope-root"), "")
+
+    def test_foreign_object_textarea_does_not_change_style_namespace(self) -> None:
+        html = ('<svg><foreignObject><textarea><svg></textarea><style>'
+                '.paint::after { content: "<![CDATA[literal]]>"; }'
+                '</style></foreignObject><style><![CDATA[.paint { fill:red }]]></style></svg>')
+        carried = self.mod.diagram_css_from_html(html, "scope-root")
+        self.assertIn('content: "&lt;![CDATA[literal]]>"', carried)
+        self.assertIn("#scope-root .paint { fill:red }", carried)
+
+    def test_foreign_object_html_style_is_not_unwrapped(self) -> None:
+        html = ('<svg id="original" viewBox="0 0 10 10"><foreignObject>'
+                '<div xmlns="http://www.w3.org/1999/xhtml"><style>'
+                '#original .paint::after { content: "<![CDATA[literal]]>"; }'
+                '</style></div></foreignObject></svg>')
+        carried = self.mod.diagram_css_from_html(html, "literal-root", "original")
+        self.assertIn('content: "&lt;![CDATA[literal]]>"', carried)
+        # Preserve the existing refusal of invalid XML rather than silently
+        # changing the HTML CSS string so the document can be exported.
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "literal.html"
+            source.write_text(html, encoding="utf-8")
+            self.assertEqual(self.mod.main([str(source), "--system-fonts"]), 2)
+            self.assertFalse(source.with_suffix(".svg").exists())
+
+    def test_nested_svg_styles_inside_foreign_object_are_unwrapped(self) -> None:
+        html = ('<svg id="original" viewBox="0 0 10 10"><foreignObject>'
+                '<div xmlns="http://www.w3.org/1999/xhtml">'
+                '<svg xmlns="http://www.w3.org/2000/svg"><style>'
+                '<![CDATA[#original .paint { fill: red; }]]>'
+                '</style><rect class="paint" width="5" height="5"/></svg>'
+                '<style>.paint::after { content: "<![CDATA[literal]]>"; }</style>'
+                '</div></foreignObject><style><![CDATA[.outline { stroke: blue; }]]></style></svg>')
+        carried = self.mod.diagram_css_from_html(html, "nested-root", "original")
+        self.assertIn("#nested-root .paint { fill: red; }", carried)
+        self.assertIn('content: "&lt;![CDATA[literal]]>"', carried)
+        self.assertIn("#nested-root .outline { stroke: blue; }", carried)
+        valid_html = html.replace(
+            '<style>.paint::after { content: "<![CDATA[literal]]>"; }</style>', "")
+        exported = self.mod.export_svg_document(valid_html, Path("nested.html"), system_fonts=True)
+        document = ET.fromstring(exported)
+        carried_style = document.find(
+            "{http://www.w3.org/2000/svg}defs/{http://www.w3.org/2000/svg}style"
+        ).text
+        self.assertIn("#nested-root .paint { fill: red; }", carried_style)
+        self.assertIn("#nested-root .outline { stroke: blue; }", carried_style)
+
+    def test_svg_html_integration_points_preserve_style_literals(self) -> None:
+        for tag in ("foreignObject", "desc", "title"):
+            with self.subTest(tag=tag):
+                html = (f'<svg><{tag}><style>'
+                        '.paint::after { content: "<![CDATA[literal]]>"; }'
+                        f'</style></{tag}><style><![CDATA[.paint {{ fill:red }}]]></style></svg>')
+                carried = self.mod.diagram_css_from_html(html, "scope-root")
+                self.assertIn('content: "&lt;![CDATA[literal]]>"', carried)
+                self.assertIn("#scope-root .paint { fill:red }", carried)
+
+    def test_cli_carries_svg_styles_after_stray_closing_svg(self) -> None:
+        html = ('<div></svg></div><svg id="original" viewBox="0 0 10 10">'
+                '<style><![CDATA[#original .paint { fill: red; }]]></style>'
+                '<rect class="paint" width="5" height="5"/></svg>')
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "stray.html"
+            source.write_text(html, encoding="utf-8")
+            self.assertEqual(self.mod.main([str(source), "--system-fonts"]), 0)
+            document = ET.fromstring(source.with_suffix(".svg").read_text(encoding="utf-8"))
+            carried = document.find(
+                "{http://www.w3.org/2000/svg}defs/{http://www.w3.org/2000/svg}style"
+            ).text
+            self.assertIn("#stray-root .paint { fill: red; }", carried)
+            self.assertNotIn("&lt;![CDATA[", carried)
+
     def test_cli_writes_default_path(self) -> None:
         source = ASSETS / "example-loop.html"
         with tempfile.TemporaryDirectory() as tmp:
