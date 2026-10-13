@@ -715,6 +715,8 @@ class ExportSvgStandaloneTests(unittest.TestCase):
             diagram + "<div title='<svg>'></div>" + style,
             diagram + '<div title="before > <svg> after"></div>' + style,
             diagram + '<div data-example="<svg>">' + style + '</div>',
+            *(diagram + f'<{tag}><svg></{tag}>' + style
+              for tag in ("textarea", "title", "xmp", "iframe", "noembed", "noframes", "noscript")),
         )
         for html in sources:
             with self.subTest(html=html):
@@ -725,6 +727,24 @@ class ExportSvgStandaloneTests(unittest.TestCase):
                     source.write_text(html, encoding="utf-8")
                     self.assertEqual(self.mod.main([str(source), "--system-fonts"]), 2)
                     self.assertFalse(source.with_suffix(".svg").exists())
+
+    def test_html_text_elements_do_not_supply_svg_or_styles(self) -> None:
+        diagram = '<svg id="real" viewBox="0 0 10 10"><rect/></svg>'
+        for tag in ("textarea", "title", "xmp", "iframe", "noembed", "noframes", "noscript"):
+            with self.subTest(tag=tag):
+                html = (f'<{tag} title="before > after"><svg id="fake">'
+                        '<style>.fake { fill: red; }</style></svg>'
+                        f'</{tag}>' + diagram)
+                self.assertEqual(self.mod.extract_first_svg(html), diagram)
+                self.assertEqual(self.mod.diagram_css_from_html(html, "scope-root"), "")
+
+    def test_foreign_object_textarea_does_not_change_style_namespace(self) -> None:
+        html = ('<svg><foreignObject><textarea><svg></textarea><style>'
+                '.paint::after { content: "<![CDATA[literal]]>"; }'
+                '</style></foreignObject><style><![CDATA[.paint { fill:red }]]></style></svg>')
+        carried = self.mod.diagram_css_from_html(html, "scope-root")
+        self.assertIn('content: "&lt;![CDATA[literal]]>"', carried)
+        self.assertIn("#scope-root .paint { fill:red }", carried)
 
     def test_foreign_object_html_style_is_not_unwrapped(self) -> None:
         html = ('<svg id="original" viewBox="0 0 10 10"><foreignObject>'

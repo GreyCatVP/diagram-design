@@ -29,7 +29,7 @@ import re
 import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Iterator
 
 GOOGLE_FONTS_IMPORT = (
     "@import url('https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1"
@@ -103,9 +103,10 @@ SVG_TAG_RE = re.compile(
 )
 # Consume every tag, including quoted attributes, before checking whether it
 # changes the namespace of a style. Tag-looking attribute values are literal.
-SVG_STYLE_CONTEXT_RE = re.compile(
+HTML_TOKEN_RE = re.compile(
+    r"<!--.*?(?:-->|$)|<!\[CDATA\[.*?(?:\]\]>|$)|"
     r"<(?P<close>/)?(?P<tag>[A-Za-z][^\s/>]*)"
-    r"(?:[^>\"']|\"[^\"]*\"|'[^']*')*>", re.IGNORECASE
+    r"(?:[^>\"']|\"[^\"]*\"|'[^']*')*>", re.IGNORECASE | re.DOTALL
 )
 CDATA_SECTION_RE = re.compile(r"<!\[CDATA\[(.*?)\]\]>", re.DOTALL)
 # Each alternative starts on a different character, and a comment cannot run
@@ -129,14 +130,60 @@ def slug_for(path: Path) -> str:
     return slug
 
 
+def html_tokens(source: str) -> Iterator[tuple[re.Match[str], bool, int, int]]:
+    """Yield markup with its SVG context and any opaque text body boundaries.
+
+    HTML text elements consume through their end tag without interpreting the
+    contents as markup. SVG title/desc remain HTML integration points instead.
+    """
+    contexts: list[str] = []
+    pos = 0
+    while token := HTML_TOKEN_RE.search(source, pos):
+        name = (token.group("tag") or "").lower()
+        in_svg = bool(contexts and contexts[-1] == "svg")
+        body_end = end = token.end()
+        self_closing = token.group(0).endswith("/>")
+        text_element = name in {"script", "style"} or (
+            not in_svg and name in {"textarea", "title", "xmp", "iframe", "noembed", "noframes", "noscript", "plaintext"}
+        )
+        if name and not token.group("close") and text_element and not (in_svg and self_closing):
+            closing = (None if name == "plaintext" else re.compile(
+                r"</" + name + r"(?=[\s/>])(?:[^>\"']|\"[^\"]*\"|'[^']*')*>",
+                re.IGNORECASE,
+            ).search(source, end))
+            body_end = closing.start() if closing else len(source)
+            end = closing.end() if closing else len(source)
+        elif name in {"svg", "foreignobject", "desc", "title"}:
+            if token.group("close"):
+                for index in range(len(contexts) - 1, -1, -1):
+                    if contexts[index] == name:
+                        del contexts[index:]
+                        break
+            elif not self_closing and (name == "svg" or in_svg):
+                contexts.append(name)
+        yield token, in_svg, body_end, end
+        pos = end
+
+
 def mask_opaque_html(source: str, *, styles: bool = False) -> str:
-    tags = "script|style"
-    pattern = re.compile(r"<!\[CDATA\[.*?\]\]>|<!--.*?-->|<(?P<raw>" + tags + r")\b[^>]*>.*?</(?P=raw)\s*>", re.IGNORECASE | re.DOTALL)
-    def mask(match: re.Match[str]) -> str:
-        if not styles and (match.group("raw") or "").lower() == "style":
-            return match.group(0)
-        return " " * len(match.group(0))
-    return pattern.sub(mask, source)
+    out: list[str] = []
+    pos = 0
+    for token, _, _, end in html_tokens(source):
+        out.append(source[pos:token.start()])
+        name = (token.group("tag") or "").lower()
+        if not name or (end > token.end() and (styles or name != "style")):
+            out.append(" " * (end - token.start()))
+        else:
+            # Keep tag names and boundaries, but do not expose markup-looking
+            # quoted attribute values to consumers of the masked source.
+            suffix = "/>" if token.group(0).endswith("/>") else ">"
+            attr_start = token.end("tag")
+            out.append(source[token.start():attr_start])
+            out.append(" " * (token.end() - len(suffix) - attr_start) + suffix)
+            out.append(source[token.end():end])
+        pos = end
+    out.append(source[pos:])
+    return "".join(out)
 
 
 def extract_first_svg(html: str) -> str:
@@ -548,29 +595,13 @@ def retarget_root_selector(selector: str, original_id: str, root_id: str) -> str
 def diagram_css_from_html(html: str, root_id: str, original_root_id: str = "") -> str:
     """Filter page <style> rules down to diagram rules, scoped under root_id."""
     kept: list[str] = []
-    tags = iter(SVG_STYLE_CONTEXT_RE.finditer(mask_opaque_html(html, styles=True)))
-    tag = next(tags, None)
-    contexts: list[str] = []
-    for style in STYLE_BLOCK_RE.finditer(mask_opaque_html(html)):
-        while tag is not None and tag.start() < style.start():
-            name = tag.group("tag").lower()
-            if name not in {"svg", "foreignobject", "desc", "title"}:
-                pass
-            elif tag.group("close"):
-                # Ignore unmatched closing tags, as browsers do. Closing a
-                # matched ancestor also leaves any nested integration points.
-                for index in range(len(contexts) - 1, -1, -1):
-                    if contexts[index] == name:
-                        del contexts[index:]
-                        break
-            elif not tag.group(0).endswith("/>"):
-                if name == "svg" or (contexts and contexts[-1] == "svg"):
-                    contexts.append(name)
-            tag = next(tags, None)
-        block = style.group(1)
+    for token, in_svg, body_end, _ in html_tokens(html):
+        if (token.group("tag") or "").lower() != "style" or token.group("close"):
+            continue
+        block = html[token.end():body_end]
         # foreignObject/desc/title children are HTML; a nested svg re-enters
         # SVG. CDATA-looking strings in HTML styles must remain literal.
-        if contexts and contexts[-1] == "svg":
+        if in_svg:
             block = CDATA_SECTION_RE.sub(lambda match: match.group(1), block)
         # A comment before a rule would otherwise become part of its selector
         # (`/* Tokens */ :root` is not recognised as `:root`).
