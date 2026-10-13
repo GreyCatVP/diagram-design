@@ -498,6 +498,43 @@ def check_note_placement(tmp: Path) -> None:
     ok("sequence notes keep all covered participants and their message position")
 
 
+def check_activation_shortcuts(tmp: Path) -> None:
+    """`++`, `**`, `!!` change the receiver and `--` the sender, also on reverse arrows."""
+    diagram = extract_json(
+        write_puml(
+            tmp,
+            "activation-shortcuts.puml",
+            "participant A\nparticipant B\nparticipant C\nparticipant D\n"
+            "A -> B ++ : hello\nA <- B ++ : call\nB -> C --++ : hand off\nC --> A -- : ok\n"
+            "B <-- C -- : back\nA -> D ** : create\nA -> D !! : delete\nA -> B ++ #gold : tinted",
+        )
+    )
+    if [node["id"] for node in diagram["nodes"]] != ["A", "B", "C", "D"]:
+        fail(f"activation shortcut text became a participant: {[node['id'] for node in diagram['nodes']]}")
+    timeline = [
+        (item["participant"], item["action"], item["after_message"])
+        for item in diagram["activations"]
+    ]
+    expected = [
+        ("B", "activate", 1),
+        ("A", "activate", 2),
+        ("B", "deactivate", 3),
+        ("C", "activate", 3),
+        ("C", "deactivate", 4),
+        ("C", "deactivate", 5),
+        ("D", "create", 6),
+        ("D", "destroy", 7),
+        ("B", "activate", 8),
+    ]
+    if timeline != expected:
+        fail(f"activation shortcuts landed on the wrong lifeline: {timeline}")
+    expect_error(
+        [str(write_puml(tmp, "activation-left.puml", "participant A\nparticipant B\nA ++ <- B : call"))],
+        "malformed edge at line 4",
+    )
+    ok("activation shortcuts follow the message's sender and receiver on reverse arrows")
+
+
 def check_multi_diagram() -> None:
     payload = json.loads(run_extract([str(MULTI), "--diagram", "1", "--json"]))
     if payload["diagrams_total"] != 2:
@@ -851,6 +888,7 @@ def main() -> int:
         check_generics_survive(tmp)
         check_cardinality_ends(tmp)
         check_note_placement(tmp)
+        check_activation_shortcuts(tmp)
         check_adversarial(tmp)
         check_errors_and_limits(tmp)
         check_legacy_stdout_encoding(tmp)

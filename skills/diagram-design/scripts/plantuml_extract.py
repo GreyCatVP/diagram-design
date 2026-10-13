@@ -913,17 +913,30 @@ def _seq_arrow_style(arrow: str) -> tuple[str, str, bool, bool]:
     return ("dashed" if dashed else "solid"), arrowhead, reverse, bidirectional
 
 
-def _consume_activation_marks(text: str) -> tuple[str, str | None]:
-    stripped = text.strip()
-    if stripped.startswith("++"):
-        return stripped[2:].strip(), "activate"
-    if stripped.startswith("--"):
-        return stripped[2:].strip(), "deactivate"
-    if stripped.endswith("++"):
-        return stripped[:-2].strip(), "activate"
-    if stripped.endswith("--"):
-        return stripped[:-2].strip(), "deactivate"
-    return stripped, None
+ACTIVATION_SHORTCUT_RE = re.compile(
+    r"^(?P<name>.+?)\s*(?P<mark>\+\+--|--\+\+|\+\+|--|\*\*|!!)?\s*"
+    r"(?P<color>#{1,2}[\w:;.#-]*)?$"
+)
+SHORTCUT_ACTIONS = {
+    "++": ("activate",),
+    "--": ("deactivate",),
+    "--++": ("deactivate", "activate"),
+    "++--": ("activate", "deactivate"),
+    "**": ("create",),
+    "!!": ("destroy",),
+}
+
+
+def _activation_shortcut(text: str) -> tuple[str, tuple[str, ...]]:
+    """Split ``B ++ #gold`` into the receiver name and its shortcut actions.
+
+    PlantUML writes these after the second participant only. ``++``, ``**``,
+    and ``!!`` act on the message receiver; ``--`` deactivates the sender.
+    """
+    match = ACTIVATION_SHORTCUT_RE.match(text.strip())
+    if not match:
+        return text.strip(), ()
+    return match.group("name").strip(), SHORTCUT_ACTIONS.get(match.group("mark") or "", ())
 
 
 def _is_skin(text: str) -> bool:
@@ -1185,11 +1198,13 @@ def _parse_sequence(diagram: Diagram, lines: list[tuple[int, str]]) -> None:
         split = _find_arrow(text, SEQ_ARROWS)
         if split:
             left, arrow, right = split
-            left, left_mark = _consume_activation_marks(left)
             message = ""
             if ":" in right:
                 right, _sep, message = right.partition(":")
-            right, right_mark = _consume_activation_marks(right.strip())
+            right, actions = _activation_shortcut(right)
+            if left.endswith(tuple(SHORTCUT_ACTIONS)):
+                # Shortcuts follow the second participant; `A ++ -> B` is not PlantUML.
+                _fail(f"malformed edge at line {line_number}")
             source_name = clean_label(left) or left
             target_name = clean_label(right) or right
             style, arrowhead, reverse, bidirectional = _seq_arrow_style(arrow)
@@ -1209,10 +1224,10 @@ def _parse_sequence(diagram: Diagram, lines: list[tuple[int, str]]) -> None:
                 arrowhead,
                 bidirectional=bidirectional,
             )
-            if left_mark:
-                diagram.add_activation(source, left_mark)
-            if right_mark:
-                diagram.add_activation(target, right_mark)
+            # `source` and `target` are already the sender and receiver after
+            # a reverse arrow swapped them, so shortcuts follow the message.
+            for action in actions:
+                diagram.add_activation(source if action == "deactivate" else target, action)
             continue
         if SEQ_ARROW_RE.search(text):
             _fail(f"malformed edge at line {line_number}")
