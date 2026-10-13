@@ -238,6 +238,34 @@ class ContractTests(unittest.TestCase):
         moved = legend.replace('<g data-role="legend">', '<g data-role="legend" transform="translate(0,-120)">')
         self.rejects(GOOD.replace("</svg>", moved), "transform attribute")
 
+    def test_crossing_arcs_are_rejected(self):
+        # Two same-colour strokes crossing with no gap read as a junction.
+        crossing = ('<path data-kind="modulation" data-from="a" data-to="p" d="M 120,100 H 172"/>'
+                    '<path data-kind="modulation" data-from="b" data-to="p" d="M 140,90 V 112"/></svg>')
+        self.rejects(GOOD.replace("</svg>", crossing), "cross at (140, 100)")
+        curved = crossing.replace('d="M 140,90 V 112"', 'd="M 248,80 H 148 Q 140,80 140,88 V 112"')
+        self.rejects(GOOD.replace("</svg>", curved), "cross at (140, 100)")
+
+    def test_bridged_crossing_is_clean(self):
+        # The hop from type-architecture.md leaves a gap at the crossing.
+        bridged = ('<path data-kind="modulation" data-from="a" data-to="p" '
+                   'd="M 120,100 H 132 a 8,8 0 0,1 16,0 H 172"/>'
+                   '<path data-kind="modulation" data-from="b" data-to="p" d="M 140,90 V 112"/></svg>')
+        self.clean(GOOD.replace("</svg>", bridged))
+
+    def test_arc_ending_on_another_arc_is_rejected(self):
+        touching = ('<path data-kind="modulation" data-from="a" data-to="p" d="M 120,100 H 172"/>'
+                    '<path data-kind="modulation" data-from="b" data-to="p" d="M 140,120 V 100"/></svg>')
+        self.rejects(GOOD.replace("</svg>", touching), "ends on arc")
+
+    def test_overlapping_arcs_are_rejected(self):
+        stacked = ('<path data-kind="modulation" data-from="a" data-to="p" d="M 120,100 H 172"/>'
+                   '<path data-kind="modulation" data-from="b" data-to="p" d="M 150,100 H 190"/></svg>')
+        self.rejects(GOOD.replace("</svg>", stacked), "overlap")
+
+    def test_unreadable_arc_path_is_rejected(self):
+        self.rejects(GOOD.replace('d="M 112,60 H 160"', 'd="M 112,60 X 160"', 1), "path data")
+
     def test_source_sink_is_species(self):
         source = GOOD.replace(
             "</svg>",

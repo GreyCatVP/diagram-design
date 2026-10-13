@@ -5,7 +5,8 @@ Checks unique IDs, arc kinds, bipartite species/process arcs, compartment
 containment, glyph kinds, and the Bruno ceiling. Containment reads x, y, width
 and height, so a transform or positional CSS on a glyph, its bounds or an
 ancestor group inside the map is a finding. Every connector drawn in the map
-must be a declared arc, except legend samples inside <g data-role="legend">. Files without data-diagram="sbgn" are
+must be a declared arc, except legend samples inside <g data-role="legend">.
+Arcs may not cross without the documented hop, overlap, or end on another arc. Files without data-diagram="sbgn" are
 skipped. This verifies authored declarations, not whether they describe an
 external SBML model.
 
@@ -524,6 +525,141 @@ def overlaps(extent: tuple[float, float, float, float], box: Box) -> bool:
     return x0 <= box.right + EPS and x1 + EPS >= box.x and y0 <= box.bottom + EPS and y1 + EPS >= box.y
 
 
+PATH_TOKEN_RE = re.compile(r"[A-Za-z]|" + NUMBER)
+PATH_ARITY = {"M": 2, "L": 2, "H": 1, "V": 1, "Q": 4, "T": 2, "C": 6, "S": 4, "A": 7, "Z": 0}
+
+Point = tuple[float, float]
+
+
+def arc_polyline(node: Node) -> tuple[list[tuple[Point, Point]], Point, Point]:
+    """Stroked segments of an arc, plus its first and last points.
+
+    Curves are approximated by the polyline through their control points,
+    which is exact at the elbow corners the reference draws. An elliptical
+    arc command (the crossing hop) leaves a gap: nothing is stroked under it
+    at the crossing point.
+    """
+    if node.tag == "line":
+        a = (number(node.attrs.get("x1", "0")), number(node.attrs.get("y1", "0")))
+        b = (number(node.attrs.get("x2", "0")), number(node.attrs.get("y2", "0")))
+        return [(a, b)], a, b
+    if node.tag in {"polyline", "polygon"}:
+        values = [number(raw) for raw in re.split(r"[\s,]+", node.attrs.get("points", "").strip()) if raw]
+        if len(values) < 4 or len(values) % 2:
+            raise ValueError("points must list at least two x,y pairs")
+        points = list(zip(values[::2], values[1::2]))
+        if node.tag == "polygon":
+            points.append(points[0])
+        return list(zip(points, points[1:])), points[0], points[-1]
+    if node.tag != "path":
+        raise ValueError(f"<{node.tag}> cannot carry an arc")
+    tokens = PATH_TOKEN_RE.findall(node.attrs.get("d", ""))
+    if "".join(tokens).replace(" ", "") != re.sub(r"[\s,]+", "", node.attrs.get("d", "")):
+        raise ValueError("unsupported characters")
+    segments: list[tuple[Point, Point]] = []
+    current: Point | None = None
+    start: Point | None = None
+    first: Point | None = None
+    command = ""
+    index = 0
+    while index < len(tokens):
+        if tokens[index].isalpha():
+            command = tokens[index]
+            index += 1
+            if command.upper() not in PATH_ARITY:
+                raise ValueError(f"unsupported command {command}")
+            if command.upper() == "Z":
+                if current is None or start is None:
+                    raise ValueError("Z before M")
+                segments.append((current, start))
+                current = start
+                continue
+        if not command or command.upper() == "Z":
+            raise ValueError("coordinates without a command")
+        arity = PATH_ARITY[command.upper()]
+        args = tokens[index:index + arity]
+        if len(args) != arity or any(token.isalpha() for token in args):
+            raise ValueError(f"command {command} needs {arity} numbers")
+        values = [number(token) for token in args]
+        index += arity
+        relative = command.islower()
+        if current is None and command.upper() != "M":
+            raise ValueError("path must start with M")
+        base = current if (relative and current is not None) else (0.0, 0.0)
+        upper = command.upper()
+        if upper == "H":
+            target = (values[0] + (current[0] if relative else 0.0), current[1])
+            points = [target]
+        elif upper == "V":
+            target = (current[0], values[0] + (current[1] if relative else 0.0))
+            points = [target]
+        elif upper == "A":
+            target = (values[5] + base[0], values[6] + base[1])
+            points = []
+        else:
+            points = [(values[i] + base[0], values[i + 1] + base[1]) for i in range(0, arity, 2)]
+            target = points[-1]
+        if upper == "M":
+            current = start = target
+            if first is None:
+                first = target
+            command = "l" if relative else "L"
+            continue
+        previous = current
+        for point in points:
+            segments.append((previous, point))
+            previous = point
+        current = target
+    if first is None or current is None:
+        raise ValueError("empty path")
+    return segments, first, current
+
+
+def _orientation(a: Point, b: Point, c: Point) -> float:
+    value = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+    return 0.0 if abs(value) <= EPS else value
+
+
+def _within(a: Point, b: Point, c: Point) -> bool:
+    """c lies on segment ab, collinearity assumed."""
+    return (min(a[0], b[0]) - EPS <= c[0] <= max(a[0], b[0]) + EPS
+            and min(a[1], b[1]) - EPS <= c[1] <= max(a[1], b[1]) + EPS)
+
+
+def _same(a: Point, b: Point) -> bool:
+    return abs(a[0] - b[0]) <= EPS and abs(a[1] - b[1]) <= EPS
+
+
+def crossing_point(s: tuple[Point, Point], t: tuple[Point, Point]) -> Point | None:
+    """Point where two segments properly cross (interiors only), else None."""
+    (a, b), (c, d) = s, t
+    o1, o2 = _orientation(a, b, c), _orientation(a, b, d)
+    o3, o4 = _orientation(c, d, a), _orientation(c, d, b)
+    if o1 * o2 < 0 and o3 * o4 < 0:
+        denominator = (a[0] - b[0]) * (c[1] - d[1]) - (a[1] - b[1]) * (c[0] - d[0])
+        cross_ab = a[0] * b[1] - a[1] * b[0]
+        cross_cd = c[0] * d[1] - c[1] * d[0]
+        return ((cross_ab * (c[0] - d[0]) - (a[0] - b[0]) * cross_cd) / denominator,
+                (cross_ab * (c[1] - d[1]) - (a[1] - b[1]) * cross_cd) / denominator)
+    return None
+
+
+def overlap_length(s: tuple[Point, Point], t: tuple[Point, Point]) -> float:
+    (a, b), (c, d) = s, t
+    if _orientation(a, b, c) or _orientation(a, b, d):
+        return 0.0
+    axis = 0 if abs(b[0] - a[0]) >= abs(b[1] - a[1]) else 1
+    low = max(min(a[axis], b[axis]), min(c[axis], d[axis]))
+    high = min(max(a[axis], b[axis]), max(c[axis], d[axis]))
+    return max(0.0, high - low)
+
+
+def strictly_inside(point: Point, segment: tuple[Point, Point]) -> bool:
+    a, b = segment
+    return (not _orientation(a, b, point) and _within(a, b, point)
+            and not _same(point, a) and not _same(point, b))
+
+
 def looks_like_sbgn(source: str) -> bool:
     scanner = Scanner()
     scanner.finish(source)
@@ -747,6 +883,42 @@ def check_source(path: Path, source: str) -> list[str]:
             pair = {source, target}
             if not (pair & species and pair & process_ids):
                 fail(node, "reversible must join a species and a process")
+
+    # Arcs must not cross, stack, or end on one another: a crossing with no
+    # gap reads as a junction. The hop in type-architecture.md leaves a gap.
+    drawn = []
+    for node in scanner.nodes:
+        if root not in node.ancestors() or node.attrs.get("data-kind") not in ARC_KINDS:
+            continue
+        name = f'{node.attrs.get("data-from", "?")} to {node.attrs.get("data-to", "?")}'
+        try:
+            segments, head, tail = arc_polyline(node)
+        except ValueError as error:
+            fail(node, f"arc {name}: path data could not be read ({error})")
+            continue
+        drawn.append((node, name, segments, (head, tail)))
+    for index, (node, name, segments, ends) in enumerate(drawn):
+        for other, other_name, other_segments, other_ends in drawn[index + 1:]:
+            reported = set()
+            for s in segments:
+                for t in other_segments:
+                    point = crossing_point(s, t)
+                    if point is not None and ("cross", point) not in reported:
+                        reported.add(("cross", point))
+                        fail(other, f"arcs {name} and {other_name} cross at ({point[0]:g}, {point[1]:g}) "
+                                    "without a gap; reroute one or bridge it with the hop from "
+                                    "type-architecture.md")
+                    elif overlap_length(s, t) > EPS and "overlap" not in reported:
+                        reported.add("overlap")
+                        fail(other, f"arcs {name} and {other_name} overlap; offset one by 12px or more")
+            for end in ends:
+                if any(strictly_inside(end, t) for t in other_segments):
+                    fail(node, f"arc {name} ends on arc {other_name} at ({end[0]:g}, {end[1]:g}); "
+                               "it reads as a junction")
+            for end in other_ends:
+                if any(strictly_inside(end, s) for s in segments):
+                    fail(other, f"arc {other_name} ends on arc {name} at ({end[0]:g}, {end[1]:g}); "
+                                "it reads as a junction")
 
     return findings
 
