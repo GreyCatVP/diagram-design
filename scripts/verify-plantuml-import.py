@@ -452,7 +452,7 @@ def check_cardinality_ends(tmp: Path) -> None:
         ), row
 
     left, left_row = ends('A "1" --> B : owns', "card-left.puml")
-    right, right_row = ends('A --> B "1" : owns', "card-right.puml")
+    right, right_row = ends('A --> "1" B : owns', "card-right.puml")
     if left != ("A", "B", "1", "") or right != ("A", "B", "", "1"):
         fail(f"one-sided cardinality lost its end: {left} vs {right}")
     if "cardinality 1 (source)" not in left_row or "cardinality 1 (target)" not in right_row:
@@ -460,6 +460,12 @@ def check_cardinality_ends(tmp: Path) -> None:
     reverse, _row = ends('A "1" <|-- "many" B', "card-reverse.puml")
     if reverse != ("B", "A", "many", "1"):
         fail(f"reverse arrow moved a cardinality to the wrong class: {reverse}")
+    # PlantUML writes a cardinality between the class and the arrow; one
+    # after the far class is not a cardinality, so it fails by line.
+    expect_error(
+        [str(write_puml(tmp, "card-after.puml", 'class A\nclass B\nA --> B "1"'))],
+        "malformed edge at line 4",
+    )
     ok("source and target cardinalities stay separate in JSON and the digest")
 
 
@@ -671,6 +677,26 @@ def check_inline_block_comments(tmp: Path) -> None:
     if edges != [("A", "B", "x"), ("A", "B", "y"), ("B", "A", "z")]:
         fail(f"inline block comment leaked into the diagram: {edges}")
     ok("inline and mid-line block comments are removed like whole-line ones")
+
+
+def check_quoted_name_cardinality(tmp: Path) -> None:
+    """A quoted class name next to a cardinality keeps both in their places."""
+    diagram = extract_json(
+        write_puml(
+            tmp,
+            "quoted-card.puml",
+            'class "My A" as MA\nclass "My B" as MB\n"My A" "1" --> "many" "My B"',
+        )
+    )
+    edge = diagram["edges"][0]
+    got = (edge["source"], edge["target"], edge["source_cardinality"], edge["target_cardinality"])
+    if [node["id"] for node in diagram["nodes"]] != ["MA", "MB"] or got != ("MA", "MB", "1", "many"):
+        fail(f"a quoted class name swapped places with its cardinality: {got}")
+    expect_error(
+        [str(write_puml(tmp, "card-outside.puml", 'class A\nclass B\n"1" A --> B'))],
+        "malformed edge at line 4",
+    )
+    ok("cardinality is read next to the arrow, so quoted class names stay names")
 
 
 def check_multi_diagram() -> None:
@@ -1032,6 +1058,7 @@ def main() -> int:
         check_activation_keyword_colors(tmp)
         check_together_is_layout_only(tmp)
         check_inline_block_comments(tmp)
+        check_quoted_name_cardinality(tmp)
         check_adversarial(tmp)
         check_errors_and_limits(tmp)
         check_legacy_stdout_encoding(tmp)

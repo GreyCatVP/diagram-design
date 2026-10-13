@@ -910,15 +910,23 @@ def _partition_unquoted(text: str, separator: str) -> tuple[str, str]:
     return text, ""
 
 
-def _split_cardinality(side: str) -> tuple[str, str]:
-    """Split a class name from an optional quoted cardinality on either side."""
+def _split_cardinality(side: str, *, before_arrow: bool) -> tuple[str, str]:
+    """Split a class name from the quoted cardinality written next to the arrow.
+
+    PlantUML puts a cardinality between the class and the arrow
+    (`A "1" --> "many" B`), so it is the last quoted string before the arrow
+    and the first one after it. Reading only that position keeps a quoted
+    class name such as `"My A" "1"` a name.
+    """
     text = side.strip()
+    if before_arrow:
+        trailing = re.match(r'^(.+?)\s+"([^"]*)"$', text)
+        if trailing:
+            return trailing.group(1).strip(), trailing.group(2)
+        return text, ""
     leading = re.match(r'^"([^"]*)"\s+(.+)$', text)
     if leading:
         return leading.group(2).strip(), leading.group(1)
-    trailing = re.match(r'^(.+?)\s+"([^"]*)"$', text)
-    if trailing:
-        return trailing.group(1).strip(), trailing.group(2)
     return text, ""
 
 
@@ -1011,7 +1019,7 @@ def _is_skin(text: str) -> bool:
     # `Scale -> Client : x` or `Show <|-- Base` uses the word as a name.
     split = _scan_arrow(text, "sequence") or _scan_arrow(text, "class")
     if split:
-        left, _cardinality = _split_cardinality(split[0])
+        left, _cardinality = _split_cardinality(split[0], before_arrow=True)
         if left.strip().casefold() == match.group(0).casefold():
             return False
     return True
@@ -1417,8 +1425,8 @@ def _parse_class(diagram: Diagram, lines: list[tuple[int, str]]) -> None:
         if split:
             left, arrow, right = split
             right, label = _partition_unquoted(right, ":")
-            left_name, left_card = _split_cardinality(left)
-            right_name, right_card = _split_cardinality(right.strip())
+            left_name, left_card = _split_cardinality(left, before_arrow=True)
+            right_name, right_card = _split_cardinality(right, before_arrow=False)
             if not ENDPOINT_RE.match(left_name) or not ENDPOINT_RE.match(right_name):
                 _fail(f"malformed edge at line {line_number}")
             source_name = clean_label(left_name) or left_name
