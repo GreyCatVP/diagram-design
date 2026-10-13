@@ -101,9 +101,10 @@ STYLE_BLOCK_RE = re.compile(r"<style\b[^>]*>(.*?)</style\s*>", re.IGNORECASE | r
 SVG_TAG_RE = re.compile(
     r"<svg(?=[\s/>])(?:[^>\"']|\"[^\"]*\"|'[^']*')*>|</svg\s*>", re.IGNORECASE
 )
-# SVG roots and HTML integration points determine the namespace of a style.
+# Consume every tag, including quoted attributes, before checking whether it
+# changes the namespace of a style. Tag-looking attribute values are literal.
 SVG_STYLE_CONTEXT_RE = re.compile(
-    r"<(?P<close>/)?(?P<tag>svg|foreignObject|desc|title)(?=[\s/>])"
+    r"<(?P<close>/)?(?P<tag>[A-Za-z][^\s/>]*)"
     r"(?:[^>\"']|\"[^\"]*\"|'[^']*')*>", re.IGNORECASE
 )
 CDATA_SECTION_RE = re.compile(r"<!\[CDATA\[(.*?)\]\]>", re.DOTALL)
@@ -553,7 +554,9 @@ def diagram_css_from_html(html: str, root_id: str, original_root_id: str = "") -
     for style in STYLE_BLOCK_RE.finditer(mask_opaque_html(html)):
         while tag is not None and tag.start() < style.start():
             name = tag.group("tag").lower()
-            if tag.group("close"):
+            if name not in {"svg", "foreignobject", "desc", "title"}:
+                pass
+            elif tag.group("close"):
                 # Ignore unmatched closing tags, as browsers do. Closing a
                 # matched ancestor also leaves any nested integration points.
                 for index in range(len(contexts) - 1, -1, -1):

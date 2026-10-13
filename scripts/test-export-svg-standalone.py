@@ -707,10 +707,24 @@ class ExportSvgStandaloneTests(unittest.TestCase):
                     self.assertIn("#cdata-root .outline { stroke: blue; }", carried)
 
     def test_html_style_cdata_looking_literal_is_not_unwrapped(self) -> None:
-        source = ('<style>.paint::after { content: "<![CDATA[literal]]>"; }</style>'
-                  '<svg viewBox="0 0 10 10"><rect class="paint"/></svg>')
-        carried = self.mod.diagram_css_from_html(source, "literal-root")
-        self.assertIn('content: "&lt;![CDATA[literal]]>"', carried)
+        diagram = '<svg viewBox="0 0 10 10"><rect class="paint"/></svg>'
+        style = '<style>.paint::after { content: "<![CDATA[literal]]>"; }</style>'
+        sources = (
+            style + diagram,
+            diagram + '<div title="<svg>"></div>' + style,
+            diagram + "<div title='<svg>'></div>" + style,
+            diagram + '<div title="before > <svg> after"></div>' + style,
+            diagram + '<div data-example="<svg>">' + style + '</div>',
+        )
+        for html in sources:
+            with self.subTest(html=html):
+                carried = self.mod.diagram_css_from_html(html, "literal-root")
+                self.assertIn('content: "&lt;![CDATA[literal]]>"', carried)
+                with tempfile.TemporaryDirectory() as tmp:
+                    source = Path(tmp) / "literal.html"
+                    source.write_text(html, encoding="utf-8")
+                    self.assertEqual(self.mod.main([str(source), "--system-fonts"]), 2)
+                    self.assertFalse(source.with_suffix(".svg").exists())
 
     def test_foreign_object_html_style_is_not_unwrapped(self) -> None:
         html = ('<svg id="original" viewBox="0 0 10 10"><foreignObject>'
