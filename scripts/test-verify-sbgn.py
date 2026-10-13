@@ -200,6 +200,44 @@ class ContractTests(unittest.TestCase):
                 source = wrapped.replace("<html><body>", f"<html><head><style>{rule}</style></head><body>", 1)
                 self.rejects(source, "stylesheet")
 
+    def test_undeclared_connector_is_rejected(self):
+        # Stripping the arc attributes used to hide a species-to-species
+        # arrow from every check.
+        for drawn in ('<path d="M 112,60 H 240" marker-end="url(#arrow)"/>',
+                      '<line x1="112" y1="60" x2="240" y2="60"/>',
+                      '<polyline points="112,60 240,60"/>',
+                      '<use href="#shared-arc"/>'):
+            with self.subTest(drawn=drawn):
+                self.rejects(GOOD.replace("</svg>", drawn + "</svg>"), "declares no arc")
+        stripped = GOOD.replace('<path data-kind="consumption" data-from="a" data-to="p" d="M 112,60 H 160"/>',
+                                '<path d="M 112,60 H 240"/>', 1)
+        self.rejects(stripped, "declares no arc")
+
+    def test_marker_defs_and_glyph_parts_are_not_connectors(self):
+        source = GOOD.replace(
+            '<svg data-diagram="sbgn" viewBox="0 0 400 200">',
+            '<svg data-diagram="sbgn" viewBox="0 0 400 200"><defs><marker id="arrow">'
+            '<polygon points="0 0, 8 3, 0 6"/></marker></defs>', 1,
+        ).replace(
+            "</svg>",
+            '<g data-kind="source-sink" data-entity-id="src" data-compartment="cyt">'
+            '<rect data-role="bounds" x="32" y="120" width="24" height="24"/>'
+            '<circle cx="44" cy="132" r="12"/><line x1="32" y1="144" x2="56" y2="120"/></g>'
+            '<path data-kind="consumption" data-from="src" data-to="p" d="M 56,132 H 160"/></svg>',
+        )
+        self.clean(source)
+
+    def test_legend_samples_are_documented_exceptions(self):
+        legend = ('<g data-role="legend"><line x1="32" y1="176" x2="60" y2="176" marker-end="url(#arrow)"/>'
+                  '<rect x="80" y="170" width="28" height="12"/><text x="116" y="179">Arc</text></g></svg>')
+        self.clean(GOOD.replace("</svg>", legend))
+        touching = legend.replace('x1="32" y1="176" x2="60" y2="176"', 'x1="112" y1="60" x2="240" y2="60"')
+        self.rejects(GOOD.replace("</svg>", touching), "legend sample")
+        path = legend.replace('<line x1="32" y1="176" x2="60" y2="176"', '<path d="M 32,176 H 60"')
+        self.rejects(GOOD.replace("</svg>", path), "legend samples use")
+        moved = legend.replace('<g data-role="legend">', '<g data-role="legend" transform="translate(0,-120)">')
+        self.rejects(GOOD.replace("</svg>", moved), "transform attribute")
+
     def test_source_sink_is_species(self):
         source = GOOD.replace(
             "</svg>",

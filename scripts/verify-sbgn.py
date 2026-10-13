@@ -4,7 +4,8 @@
 Checks unique IDs, arc kinds, bipartite species/process arcs, compartment
 containment, glyph kinds, and the Bruno ceiling. Containment reads x, y, width
 and height, so a transform or positional CSS on a glyph, its bounds or an
-ancestor group inside the map is a finding. Files without data-diagram="sbgn" are
+ancestor group inside the map is a finding. Every connector drawn in the map
+must be a declared arc, except legend samples inside <g data-role="legend">. Files without data-diagram="sbgn" are
 skipped. This verifies authored declarations, not whether they describe an
 external SBML model.
 
@@ -48,6 +49,12 @@ POSITION_PROPERTIES = {
     "transform", "translate", "rotate", "scale", "x", "y", "width", "height",
     "offset", "offset-path", "offset-distance", "offset-position", "offset-anchor", "offset-rotate",
 }
+# Elements that draw a line between two places. Inside the map each must be a
+# declared arc, part of a glyph, or a legend sample.
+CONNECTOR_TAGS = {"path", "line", "polyline", "polygon", "use"}
+NON_RENDERED = {"defs", "marker", "pattern", "clippath", "mask", "symbol", "lineargradient",
+                "radialgradient", "filter", "title", "desc", "metadata"}
+LEGEND_TAGS = {"g", "line", "rect", "circle", "text", "tspan"}
 CSS_ESCAPE_RE = re.compile(r"\\([0-9a-fA-F]{1,6})[ \t\r\n\f]?|\\(.)", re.DOTALL)
 CSS_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
 CSS_BLOCK_RE = re.compile(r"([^{}]*)\{([^{}]*)\}")
@@ -490,6 +497,27 @@ def ancestry(scanner: Scanner):
     return parent_of
 
 
+def sample_extent(node: Node) -> tuple[float, float, float, float] | None:
+    """Axis-aligned extent (x0, y0, x1, y1) of a legend sample, None for text."""
+    attrs = node.attrs
+    if node.tag == "line":
+        x1, y1 = number(attrs.get("x1", "0")), number(attrs.get("y1", "0"))
+        x2, y2 = number(attrs.get("x2", "0")), number(attrs.get("y2", "0"))
+        return min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2)
+    if node.tag == "rect":
+        x, y = number(attrs.get("x", "0")), number(attrs.get("y", "0"))
+        return x, y, x + number(attrs.get("width", "")), y + number(attrs.get("height", ""))
+    if node.tag == "circle":
+        cx, cy, r = number(attrs.get("cx", "0")), number(attrs.get("cy", "0")), number(attrs.get("r", ""))
+        return cx - r, cy - r, cx + r, cy + r
+    return None
+
+
+def overlaps(extent: tuple[float, float, float, float], box: Box) -> bool:
+    x0, y0, x1, y1 = extent
+    return x0 <= box.right + EPS and x1 + EPS >= box.x and y0 <= box.bottom + EPS and y1 + EPS >= box.y
+
+
 def looks_like_sbgn(source: str) -> bool:
     scanner = Scanner()
     scanner.finish(source)
@@ -542,21 +570,29 @@ def check_source(path: Path, source: str) -> list[str]:
     position_checked: set[int] = set()
     positioned: list[Node] = []
 
-    def check_position(node: Node, identity: str, role: str) -> None:
-        """Containment reads x/y/width/height; nothing may move the drawn glyph."""
+    def check_position(node: Node, where: str, owner: str | None = None) -> None:
+        """Containment reads x/y/width/height; nothing may move what is drawn.
+
+        owner names what an ancestor holds, so a nested <svg> can be reported.
+        """
         if id(node) in position_checked:
             return
         position_checked.add(id(node))
         positioned.append(node)
-        where = f'{role} <{node.tag}> of glyph "{identity}"'
         if "transform" in node.attrs:
             fail(node, f"{where} has a transform attribute; place glyphs with x, y, width and height only")
         moved = positional_properties(node.attrs.get("style", ""))
         if moved:
             fail(node, f"{where} has a positional inline style ({', '.join(moved)}); "
                        "place glyphs with x, y, width and height only")
-        if role == "ancestor" and node.tag in {"svg", "symbol"}:
-            fail(node, f'glyph "{identity}" sits inside a nested <{node.tag}>, which offsets and scales it')
+        if owner and node.tag in {"svg", "symbol"}:
+            fail(node, f"{owner} sits inside a nested <{node.tag}>, which offsets and scales it")
+
+    def check_ancestors(node: Node, owner: str) -> None:
+        for ancestor in node.ancestors():
+            if ancestor is root:
+                break
+            check_position(ancestor, f"ancestor <{ancestor.tag}> of {owner}", owner)
 
     for node in scanner.nodes:
         if node is not root and root not in node.ancestors():
@@ -566,14 +602,12 @@ def check_source(path: Path, source: str) -> list[str]:
             identity = identity_for(kind, node.attrs)
             if not register(identity, node):
                 continue
-            check_position(node, identity, "glyph")
+            owner = f'glyph "{identity}"'
+            check_position(node, f"glyph <{node.tag}> of {owner}")
             for child in node.children:
                 if child.attrs.get("data-role") == "bounds":
-                    check_position(child, identity, "bounds")
-            for ancestor in node.ancestors():
-                if ancestor is root:
-                    break
-                check_position(ancestor, identity, "ancestor")
+                    check_position(child, f"bounds <{child.tag}> of {owner}")
+            check_ancestors(node, owner)
             try:
                 x, y, w, h = parse_bounds(node)
             except ValueError as error:
@@ -586,6 +620,41 @@ def check_source(path: Path, source: str) -> list[str]:
                         break
             compartment = node.attrs.get("data-compartment") or None
             glyphs[identity] = Box(node, identity, kind, x, y, w, h, compartment)
+
+    blockers = [g for g in glyphs.values() if g.kind != "compartment"]
+    for node in scanner.nodes:
+        if root not in node.ancestors():
+            continue
+        chain = [node, *node.ancestors()]
+        chain = chain[:chain.index(root)]
+        if any(item.tag in NON_RENDERED for item in chain):
+            continue
+        if any(item.attrs.get("data-kind", "") in GLYPH_KINDS for item in chain):
+            continue
+        legend = next((item for item in chain
+                       if item.tag == "g" and item.attrs.get("data-role") == "legend"), None)
+        if legend is not None:
+            check_position(node, f"legend <{node.tag}>")
+            if node is legend:
+                check_ancestors(node, "the legend")
+            if node.tag not in LEGEND_TAGS:
+                fail(node, f"legend samples use <line>, <rect>, <circle> and <text> only; found <{node.tag}>")
+                continue
+            try:
+                extent = sample_extent(node)
+            except ValueError as error:
+                fail(node, f"legend sample <{node.tag}>: {error}")
+                continue
+            if extent is None:
+                continue
+            for glyph in blockers:
+                if overlaps(extent, glyph):
+                    fail(node, f'legend sample <{node.tag}> touches glyph "{glyph.identity}"; '
+                               "keep legend samples clear of the map")
+            continue
+        if node.tag in CONNECTOR_TAGS and not ({"data-kind", "data-from", "data-to"} & node.attrs.keys()):
+            fail(node, f"drawn connector <{node.tag}> declares no arc; give it data-kind, data-from and "
+                       'data-to, or put a legend sample inside <g data-role="legend">')
 
     macros = [g for g in glyphs.values() if g.kind == "macromolecule"]
     processes = [g for g in glyphs.values() if g.kind == "process"]
