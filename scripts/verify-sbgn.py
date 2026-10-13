@@ -48,12 +48,6 @@ POSITION_PROPERTIES = {
     "transform", "translate", "rotate", "scale", "x", "y", "width", "height",
     "offset", "offset-path", "offset-distance", "offset-position", "offset-anchor", "offset-rotate",
 }
-# Element names a stylesheet selector can use to reach a glyph or its group.
-# The root <svg> is left out: sizing it scales the whole map uniformly.
-SVG_MARK_TAGS = {
-    "a", "circle", "defs", "ellipse", "foreignobject", "g", "image", "line", "marker", "path",
-    "pattern", "polygon", "polyline", "rect", "switch", "symbol", "text", "textpath", "tspan", "use",
-}
 CSS_ESCAPE_RE = re.compile(r"\\([0-9a-fA-F]{1,6})[ \t\r\n\f]?|\\(.)", re.DOTALL)
 CSS_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
 CSS_BLOCK_RE = re.compile(r"([^{}]*)\{([^{}]*)\}")
@@ -236,56 +230,264 @@ def positional_properties(declarations: str) -> list[str]:
     return found
 
 
-def _without_groups(compound: str) -> str:
-    """Drop attribute-selector and functional-pseudo contents, quotes included."""
-    out, depth, quote, index = [], 0, "", 0
-    while index < len(compound):
-        char = compound[index]
-        escape = CSS_ESCAPE_RE.match(compound, index) if char == "\\" else None
+# Selector matching is three-valued: True (matches), False (cannot match), or
+# None (may match: a part the checker cannot evaluate, such as :hover or a
+# sibling combinator). A rule is a finding unless every selector is False for
+# every positioned element.
+PSEUDO_ELEMENTS = {"before", "after", "first-line", "first-letter", "marker", "placeholder",
+                   "selection", "backdrop", "file-selector-button"}
+HEAD_TAGS = {"head", "title", "meta", "link", "style", "script", "base", "noscript", "template"}
+ATTRIBUTE_RE = re.compile(
+    r"""^\s*(?:(?P<ns>[^\s|=~^$*\]]*)\|(?!=))?(?P<name>[^\s|=~^$*\]]+)\s*"""
+    r"""(?:(?P<op>[~|^$*]?=)\s*(?P<value>"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\s\]]+)"""
+    r"""\s*(?P<flag>[iIsS])?)?\s*$""",
+    re.DOTALL,
+)
+
+
+def _tri_and(left: bool | None, right: bool | None) -> bool | None:
+    if left is False or right is False:
+        return False
+    if left is None or right is None:
+        return None
+    return True
+
+
+def _tri_or(left: bool | None, right: bool | None) -> bool | None:
+    if left is True or right is True:
+        return True
+    if left is None or right is None:
+        return None
+    return False
+
+
+def _read_ident(text: str, index: int) -> tuple[str, int]:
+    """Read a CSS identifier (escapes decoded) starting at index."""
+    out = []
+    while index < len(text):
+        char = text[index]
+        escape = CSS_ESCAPE_RE.match(text, index) if char == "\\" else None
         if escape:
-            if depth == 0:
-                out.append(escape.group(0))
+            out.append(_css_unescape(escape.group(0)))
+            index = escape.end()
+        elif char.isalnum() or char in "-_" or ord(char) > 0x7F:
+            out.append(char)
+            index += 1
+        else:
+            break
+    return "".join(out), index
+
+
+def _read_group(text: str, index: int, close: str) -> tuple[str, int]:
+    """Read from an opening ( or [ to its matching close, outside quotes."""
+    depth, quote, start = 0, "", index
+    while index < len(text):
+        char = text[index]
+        escape = CSS_ESCAPE_RE.match(text, index) if char == "\\" else None
+        if escape:
             index = escape.end()
             continue
         if quote:
             if char == quote:
                 quote = ""
-        elif depth and char in "\"'":
+        elif char in "\"'":
             quote = char
         elif char in "([":
             depth += 1
         elif char in ")]":
-            depth = max(0, depth - 1)
-        elif depth == 0:
-            out.append(char)
+            depth -= 1
+            if depth == 0:
+                return text[start + 1:index], index + 1
         index += 1
-    return "".join(out)
+    return text[start + 1:], index
 
 
-def selector_can_reach_marks(selector: str, svg_names: set[str]) -> bool:
-    """False only when the selector's subject is provably page chrome.
+def parse_selector(selector: str) -> list[tuple[str, str]] | None:
+    """Split one complex selector into (combinator, compound) pairs.
 
-    The subject (last compound) can be a glyph when it names an SVG mark
-    element, uses an attribute selector or functional pseudo-class without
-    naming an HTML element, or carries a class or id that an element inside
-    the diagram also carries. Anything unclear counts as able to reach.
+    The first pair's combinator is empty. None means the selector could not be
+    split (for example a leading combinator), which callers treat as may match.
     """
-    compounds = [part for part in _split_top_level(selector, " \t\r\n\f>+~") if part.strip()]
-    if not compounds:
+    parts: list[tuple[str, str]] = []
+    current: list[str] = []
+    pending = ""
+    index = 0
+    while index < len(selector):
+        char = selector[index]
+        escape = CSS_ESCAPE_RE.match(selector, index) if char == "\\" else None
+        if escape:
+            current.append(escape.group(0))
+            index = escape.end()
+            continue
+        if char in "([":
+            group, end = _read_group(selector, index, ")" if char == "(" else "]")
+            current.append(selector[index:end])
+            index = end
+            continue
+        if char in " \t\r\n\f>+~":
+            if current:
+                parts.append((pending, "".join(current)))
+                current = []
+                pending = " "
+            if char in ">+~":
+                if not parts:
+                    return None
+                pending = char
+            index += 1
+            continue
+        current.append(char)
+        index += 1
+    if current:
+        parts.append((pending, "".join(current)))
+    elif parts and pending.strip():
+        return None
+    return parts or None
+
+
+def _attribute_match(inner: str, node: Node) -> bool | None:
+    match = ATTRIBUTE_RE.match(inner)
+    if not match:
+        return None
+    if match.group("ns") not in (None, "", "*"):
+        return None
+    name = _css_unescape(match.group("name")).lower()
+    if name not in node.attrs:
         return False
-    compound = compounds[-1].strip()
-    bare = _css_unescape(_without_groups(compound))
-    element = re.match(r"(?:(?:[A-Za-z_][\w-]*|\*)?\|)?([A-Za-z][\w-]*|\*)?", bare)
-    tag = (element.group(1) or "").lower() if element else ""
-    if tag and tag != "*":
-        # An HTML element, or the root <svg>, cannot be a glyph or its group.
-        return tag in SVG_MARK_TAGS
-    if "[" in compound or "(" in compound:
+    op = match.group("op")
+    if not op:
         return True
-    names = set(re.findall(r"[.#]([\w-]+)", bare))
-    if not names:
-        return True
-    return bool(names & svg_names)
+    raw = match.group("value")
+    if raw[:1] in "\"'":
+        raw = raw[1:-1]
+    expected = _css_unescape(raw)
+    actual = node.attrs[name]
+    if (match.group("flag") or "").lower() == "i":
+        expected, actual = expected.lower(), actual.lower()
+    if op == "=":
+        return actual == expected
+    if op == "~=":
+        return expected in actual.split()
+    if op == "|=":
+        return actual == expected or actual.startswith(expected + "-")
+    if not expected:
+        return False
+    if op == "^=":
+        return actual.startswith(expected)
+    if op == "$=":
+        return actual.endswith(expected)
+    return expected in actual
+
+
+def compound_match(compound: str, node: Node, parent_of) -> bool | None:
+    """Match one compound selector against one element, three-valued."""
+    result: bool | None = True
+    index = 0
+    name, end = _read_ident(compound, index)
+    if compound.startswith("*"):
+        name, end = "*", 1
+    if end < len(compound) and compound[end] == "|":
+        # A namespace prefix; the element name follows it.
+        if name not in ("", "*"):
+            result = None
+        name, end = (("*", end + 2) if compound[end + 1:end + 2] == "*"
+                     else _read_ident(compound, end + 1))
+    if name and name != "*" and name.lower() != node.tag:
+        return False
+    index = end
+    while index < len(compound):
+        char = compound[index]
+        if char == ".":
+            value, index = _read_ident(compound, index + 1)
+            if not value:
+                result = _tri_and(result, None)
+            elif value not in node.attrs.get("class", "").split():
+                return False
+        elif char == "#":
+            value, index = _read_ident(compound, index + 1)
+            if not value:
+                result = _tri_and(result, None)
+            elif node.attrs.get("id") != value:
+                return False
+        elif char == "[":
+            inner, index = _read_group(compound, index, "]")
+            result = _tri_and(result, _attribute_match(inner, node))
+            if result is False:
+                return False
+        elif char == ":":
+            element = compound.startswith("::", index)
+            index += 2 if element else 1
+            value, index = _read_ident(compound, index)
+            if index < len(compound) and compound[index] == "(":
+                _inner, index = _read_group(compound, index, ")")
+            value = value.lower()
+            if element or value in PSEUDO_ELEMENTS:
+                # The rule styles a generated box, not the element itself.
+                return False
+            if value == "root":
+                if not (node.tag == "html" and parent_of(node) is None):
+                    return False
+            else:
+                result = _tri_and(result, None)
+        else:
+            return _tri_and(result, None)
+    return result
+
+
+def selector_matches(selector: str, node: Node, parent_of) -> bool | None:
+    """Match a complex selector against node and its real ancestor chain."""
+    parts = parse_selector(selector.strip())
+    if parts is None:
+        return None
+    memo: dict[tuple[int, int], bool | None] = {}
+
+    def match(position: int, element: Node) -> bool | None:
+        key = (position, id(element))
+        if key in memo:
+            return memo[key]
+        combinator, compound = parts[position]
+        result = compound_match(compound, element, parent_of)
+        if result is not False and position > 0:
+            if combinator in "+~":
+                rest: bool | None = None
+            elif combinator == ">":
+                parent = parent_of(element)
+                rest = match(position - 1, parent) if parent is not None else False
+            else:
+                rest = False
+                ancestor = parent_of(element)
+                while ancestor is not None and rest is not True:
+                    rest = _tri_or(rest, match(position - 1, ancestor))
+                    ancestor = parent_of(ancestor)
+            result = _tri_and(result, rest)
+        memo[key] = result
+        return result
+
+    return match(len(parts) - 1, node)
+
+
+def ancestry(scanner: Scanner):
+    """Parent lookup that adds the <html> and <body> a browser would imply."""
+    real_html = next((node for node in scanner.nodes if node.tag == "html"), None)
+    has_body = any(node.tag == "body" for node in scanner.nodes)
+    implied_html = None if real_html else Node("html", {}, 0)
+    implied_body = None if has_body else Node("body", {}, 0)
+    html = real_html or implied_html
+
+    def parent_of(node: Node) -> Node | None:
+        if node is implied_html or node is real_html:
+            return None
+        if node is implied_body:
+            return html
+        parent = node.parent
+        if parent is None:
+            return None
+        if parent.tag == "document":
+            parent = html
+        if parent is html and implied_body is not None and node.tag not in HEAD_TAGS | {"head", "body"}:
+            return implied_body
+        return parent
+
+    return parent_of
 
 
 def looks_like_sbgn(source: str) -> bool:
@@ -338,12 +540,14 @@ def check_source(path: Path, source: str) -> list[str]:
         return attrs.get("data-compartment-id", "")
 
     position_checked: set[int] = set()
+    positioned: list[Node] = []
 
     def check_position(node: Node, identity: str, role: str) -> None:
         """Containment reads x/y/width/height; nothing may move the drawn glyph."""
         if id(node) in position_checked:
             return
         position_checked.add(id(node))
+        positioned.append(node)
         where = f'{role} <{node.tag}> of glyph "{identity}"'
         if "transform" in node.attrs:
             fail(node, f"{where} has a transform attribute; place glyphs with x, y, width and height only")
@@ -402,12 +606,7 @@ def check_source(path: Path, source: str) -> list[str]:
     if len(sources) > MAX_SOURCE:
         fail(root, "source-sink budget is 2")
 
-    svg_names: set[str] = set()
-    for node in scanner.nodes:
-        if root in node.ancestors():
-            svg_names.update(node.attrs.get("class", "").split())
-            if node.attrs.get("id"):
-                svg_names.add(node.attrs["id"])
+    parent_of = ancestry(scanner)
     for line, sheet in scanner.stylesheets:
         sheet = CSS_COMMENT_RE.sub(lambda match: "\n" * match.group(0).count("\n"), sheet)
         for match in CSS_BLOCK_RE.finditer(sheet):
@@ -415,8 +614,8 @@ def check_source(path: Path, source: str) -> list[str]:
             if not moved:
                 continue
             selectors = [selector.strip() for selector in _split_top_level(match.group(1), ",")]
-            reaching = [selector for selector in selectors
-                        if selector and selector_can_reach_marks(selector, svg_names)]
+            reaching = [selector for selector in selectors if selector and any(
+                selector_matches(selector, node, parent_of) is not False for node in positioned)]
             if reaching:
                 at = line + sheet[:match.start(2)].count("\n")
                 findings.append(

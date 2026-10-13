@@ -174,6 +174,32 @@ class ContractTests(unittest.TestCase):
                 'div[class="g"] { width: 100%; }')
         self.clean(GOOD.replace("<html><body>", f"<html><head><style>{page}</style></head><body>", 1))
 
+    def test_rules_that_cannot_match_a_glyph_are_clean(self):
+        # The selector is matched against each glyph's real ancestor chain,
+        # so page rules whose ancestors or root never match are not findings.
+        for rule in (":root { height: 100%; }",
+                     ".card rect { x: 0; }",
+                     "#nothere g { transform: translate(5px, 0); }",
+                     "svg { width: 100%; }",
+                     "html, body { height: 100%; }",
+                     '[data-name="a, b"], .frame { width: 3px; }',
+                     "body > rect { transform: scale(2); }",
+                     "rect::before { transform: scale(2); }"):
+            with self.subTest(rule=rule):
+                self.clean(GOOD.replace("<html><body>", f"<html><head><style>{rule}</style></head><body>", 1))
+
+    def test_rules_that_match_through_real_ancestors_are_rejected(self):
+        wrapped = GOOD.replace("<body>", '<body><div class="card" id="here">', 1).replace("</svg>", "</svg></div>", 1)
+        for rule in (".card g { transform: translate(5px, 0); }",
+                     "div.card > svg rect { x: 0; }",
+                     "#here [data-kind=macromolecule] { translate: 5px 0; }",
+                     ":root g { rotate: 5deg; }",
+                     "body .card rect:hover { transform: none; }",
+                     "div + rect, p { width: 9px; }"):
+            with self.subTest(rule=rule):
+                source = wrapped.replace("<html><body>", f"<html><head><style>{rule}</style></head><body>", 1)
+                self.rejects(source, "stylesheet")
+
     def test_source_sink_is_species(self):
         source = GOOD.replace(
             "</svg>",
