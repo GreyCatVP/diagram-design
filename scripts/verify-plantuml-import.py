@@ -331,6 +331,32 @@ def check_review_regressions(tmp: Path) -> None:
     ok("review regressions: timeline positions, declaration tails, case, packages, styling, braces, comments, stereotypes")
 
 
+def check_kind_detection_skips_bodies(tmp: Path) -> None:
+    """Note, legend, and class bodies are text, not statements, when picking the kind."""
+    diagram = extract_json(
+        write_puml(
+            tmp,
+            "note-body-kind.puml",
+            "participant A\nparticipant B\nnote over A\n  class Foo\n  interface Bar\nend note\n"
+            "legend\n  class Legend\nendlegend\nA -> B : hi",
+        )
+    )
+    if diagram["kind"] != "sequence" or [edge["label"] for edge in diagram["edges"]] != ["hi"]:
+        fail(f"note or legend body changed the diagram kind: {diagram['kind']}")
+    if "class Foo\ninterface Bar" not in diagram["notes"]:
+        fail(f"multiline note body was not kept as note text: {diagram['notes']}")
+    diagram = extract_json(
+        write_puml(
+            tmp,
+            "member-kind.puml",
+            "class Casting {\n  participant: Person\n  actor: Role\n}\nclass Person\nCasting --> Person",
+        )
+    )
+    if diagram["kind"] != "class" or diagram["nodes"][0]["fields"] != ["participant: Person", "actor: Role"]:
+        fail(f"class members that look like declarations changed the kind: {diagram['kind']}")
+    ok("kind detection ignores note, legend, and class body text")
+
+
 def check_multi_diagram() -> None:
     payload = json.loads(run_extract([str(MULTI), "--diagram", "1", "--json"]))
     if payload["diagrams_total"] != 2:
@@ -678,6 +704,7 @@ def main() -> int:
         check_class()
         check_multi_diagram()
         check_review_regressions(tmp)
+        check_kind_detection_skips_bodies(tmp)
         check_adversarial(tmp)
         check_errors_and_limits(tmp)
         check_legacy_stdout_encoding(tmp)

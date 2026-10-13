@@ -554,16 +554,61 @@ def _unsupported_body_kind(text: str) -> str | None:
     return None
 
 
+def _statement_lines(lines: list[tuple[int, str]]) -> list[str]:
+    """Return statement text, skipping note, legend, styling, and class bodies.
+
+    Body lines are content for the parser, so they must not decide the kind:
+    a note that mentions ``class Foo`` or a member named ``participant`` is
+    still text inside a block.
+    """
+    statements: list[str] = []
+    skin = _SkinBlocks()
+    scratch = Diagram(0, "", 0)
+    in_note = False
+    in_class_body = False
+    for _line_number, raw in lines:
+        text = raw.strip()
+        if not text:
+            continue
+        if in_note:
+            if text.casefold() in {"end note", "endnote"}:
+                in_note = False
+            continue
+        if in_class_body:
+            if text == "}":
+                in_class_body = False
+            continue
+        if skin.consume(scratch, text, _line_number):
+            continue
+        statements.append(text)
+        if re.match(r"^note\b", text, re.I) and not _note_has_inline_body(text):
+            in_note = True
+        elif CLASS_DECL_RE.match(text) and text.endswith("{"):
+            in_class_body = True
+    return statements
+
+
+def _note_has_inline_body(text: str) -> bool:
+    """True for a one-line note (`note over A : text`), False for a block opener."""
+    in_quote: str | None = None
+    for character in text:
+        if in_quote:
+            if character == in_quote:
+                in_quote = None
+        elif character == '"':
+            in_quote = character
+        elif character == ":":
+            return True
+    return False
+
+
 def _detect_kind(lines: list[tuple[int, str]]) -> str:
     has_class = False
     has_seq_decl = False
     has_class_rel = False
     has_seq_msg = False
     unsupported: str | None = None
-    for _line_number, raw in lines:
-        text = raw.strip()
-        if not text:
-            continue
+    for text in _statement_lines(lines):
         if CLASS_DECL_RE.match(text):
             has_class = True
         if SEQ_DECL_RE.match(text):
