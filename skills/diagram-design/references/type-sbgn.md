@@ -63,7 +63,7 @@ The file has exactly one `<svg data-diagram="sbgn">`. Process squares are 32×32
 
 ## Budget
 
-≤7 macromolecules, ≤6 processes, ≤1 compartment, ≤2 source/sink glyphs, 2 accent elements. That ceiling is the [Bruno_JExpBot2016](https://github.com/Benchmarking-Initiative/Benchmark-Models-PEtab) fixture: seven carotenoid species, six cleavage reactions, one cytosol. More species → split the map (overview of the pools, then one cleavage family).
+≤7 macromolecules, ≤6 processes, ≤1 compartment, ≤2 source/sink glyphs, ≤16 arcs, 2 accent elements. This ceiling replaces SKILL.md §7's 9 nodes and 12 arrows rows for SBGN only (see [layout-budget.md](layout-budget.md#complexity-budget-per-diagram)); the other universal rows still apply. That ceiling is the [Bruno_JExpBot2016](https://github.com/Benchmarking-Initiative/Benchmark-Models-PEtab) fixture: seven carotenoid species, six cleavage reactions, one cytosol. More species → split the map (overview of the pools, then one cleavage family).
 
 ## Anti-patterns
 

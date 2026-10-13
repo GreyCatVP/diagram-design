@@ -18,7 +18,7 @@ No existing grammar forces (a) a bipartite species/process graph, (b) role-typed
 
 ## Decision
 
-Add **SBGN** as visual type #46 with the full §10 shipping set: `references/type-sbgn.md`, the three Bruno carotenoid-cleavage example variants, a gallery tab, the selection-table row and frontmatter hook, a §7 budget row (7 macromolecules, 6 processes, 1 compartment, 2 source/sink), the canonical screenshot, and an executable contract.
+Add **SBGN** as visual type #46 with the full §10 shipping set: `references/type-sbgn.md`, the three Bruno carotenoid-cleavage example variants, a gallery tab, the selection-table row and frontmatter hook, a §7 budget row (7 macromolecules, 6 processes, 1 compartment, 2 source/sink, 16 arcs) that replaces the universal 9 node and 12 arrow rows for this type only, the canonical screenshot, and an executable contract.
 
 The grammar is declared, not inferred: every species, process, and compartment carries a stable ID; every arc states `data-kind`, `data-from`, and `data-to`. `scripts/verify-sbgn.py` fails duplicate IDs, unresolved endpoints, an arc that skips the bipartite rule, a macromolecule drawn outside its compartment, off-grid structural geometry, and a figure over the Bruno ceiling; `scripts/test-verify-sbgn.py` proves both polarities per ADR 0005.
 

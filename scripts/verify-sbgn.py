@@ -40,6 +40,8 @@ MAX_MACRO = 7
 MAX_PROCESS = 6
 MAX_COMPARTMENT = 1
 MAX_SOURCE = 2
+# The Bruno map draws 16 arcs; SBGN's ceiling replaces SKILL.md's 9 node / 12 arrow rows.
+MAX_ARC = 16
 GRID = 4.0
 EPS = 1e-6
 MAX_COORDINATE = 1e7
@@ -678,6 +680,10 @@ def check_source(path: Path, source: str) -> list[str]:
         fail(root, "compartment budget is 1")
     if len(sources) > MAX_SOURCE:
         fail(root, "source-sink budget is 2")
+    arc_count = sum(1 for node in scanner.nodes
+                    if root in node.ancestors() and node.attrs.get("data-kind") in ARC_KINDS)
+    if arc_count > MAX_ARC:
+        fail(root, f"arc budget is {MAX_ARC}; found {arc_count}")
 
     parent_of = ancestry(scanner)
     for line, sheet in scanner.stylesheets:

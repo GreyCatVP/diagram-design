@@ -287,6 +287,31 @@ class ContractTests(unittest.TestCase):
         ) + "</svg>")
         self.rejects(extra, "macromolecule budget")
 
+    def test_arc_budget(self):
+        arcs = "".join(f'<path data-kind="modulation" data-from="a" data-to="p" d="M 112,{64 + 4 * i} H 160"/>'
+                       for i in range(checker.MAX_ARC - 2))  # GOOD already draws two arcs
+        self.clean(GOOD.replace("</svg>", arcs + "</svg>"))
+        extra = arcs + '<path data-kind="modulation" data-from="b" data-to="p" d="M 240,72 H 192"/>'
+        self.rejects(GOOD.replace("</svg>", extra + "</svg>"), f"arc budget is {checker.MAX_ARC}")
+
+    def test_budget_docs_agree_with_checker(self):
+        # SBGN replaces the shared 9 node / 12 arrow rows, so the shared
+        # budget page must say so and carry the checker's numbers.
+        budget = (ROOT / "skills/diagram-design/references/layout-budget.md").read_text(encoding="utf-8")
+        ceiling = (f"{checker.MAX_MACRO} / {checker.MAX_PROCESS} / {checker.MAX_COMPARTMENT} / "
+                   f"{checker.MAX_SOURCE} / {checker.MAX_ARC}")
+        rows = [line for line in budget.splitlines() if line.startswith("|") and "(SBGN)" in line]
+        self.assertEqual(len(rows), 1, "layout-budget.md needs exactly one SBGN row")
+        self.assertIn(ceiling, rows[0])
+        intro = budget.split("| Limit | Rule |")[0]
+        self.assertRegex(intro, r"SBGN[^.]*replaces[^.]*9 nodes[^.]*12 arrows")
+        reference = (ROOT / "skills/diagram-design/references/type-sbgn.md").read_text(encoding="utf-8")
+        section = reference.split("## Budget", 1)[1].split("\n## ", 1)[0]
+        for phrase in (f"≤{checker.MAX_MACRO} macromolecules", f"≤{checker.MAX_PROCESS} processes",
+                       f"≤{checker.MAX_COMPARTMENT} compartment", f"≤{checker.MAX_SOURCE} source/sink",
+                       f"≤{checker.MAX_ARC} arcs"):
+            self.assertIn(phrase, section)
+
     def test_all_shipped_variants(self):
         for suffix in ("", "-dark", "-full"):
             path = ROOT / f"skills/diagram-design/assets/example-sbgn{suffix}.html"
