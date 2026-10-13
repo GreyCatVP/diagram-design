@@ -118,6 +118,61 @@ class ContractTests(unittest.TestCase):
                                   'data-kind="macromolecul" data-entity-id="b"', 1),
                      'unknown data-kind "macromolecul"')
 
+    def test_transform_attribute_on_glyph_is_rejected(self):
+        # Valid bounds plus a translate draw the glyph outside its compartment.
+        moved = GOOD.replace('data-entity-id="b" data-compartment="cyt">',
+                             'data-entity-id="b" data-compartment="cyt" transform="translate(400,0)">', 1)
+        self.rejects(moved, "transform attribute")
+        bounds = GOOD.replace('<rect data-role="bounds" x="240" y="40"',
+                              '<rect data-role="bounds" transform="translate(400,0)" x="240" y="40"', 1)
+        self.rejects(bounds, "transform attribute")
+
+    def test_positional_inline_style_on_glyph_is_rejected(self):
+        for style in ("transform: translate(400px, 0)", "translate: 400px 0",
+                      "x: 400px", "width: 800px"):
+            with self.subTest(style=style):
+                moved = GOOD.replace('data-entity-id="b" data-compartment="cyt">',
+                                     f'data-entity-id="b" data-compartment="cyt" style="{style}">', 1)
+                self.rejects(moved, "inline style")
+        bounds = GOOD.replace('<rect data-role="bounds" x="240" y="40"',
+                              '<rect data-role="bounds" style="TRANSFORM:translate(400px,0)" x="240" y="40"', 1)
+        self.rejects(bounds, "inline style")
+
+    def test_harmless_inline_style_is_clean(self):
+        self.clean(GOOD.replace('data-entity-id="b" data-compartment="cyt">',
+                                'data-entity-id="b" data-compartment="cyt" style="opacity: 0.9">', 1))
+
+    def test_transform_on_ancestor_group_is_rejected(self):
+        start = '<g data-kind="macromolecule" data-entity-id="b"'
+        wrapped = GOOD.replace(start, '<g transform="translate(400,0)">' + start, 1)
+        wrapped = wrapped.replace('  <path data-kind="consumption"', '</g>\n  <path data-kind="consumption"', 1)
+        self.rejects(wrapped, "transform attribute")
+        styled = GOOD.replace(start, '<g style="transform: translateX(400px)">' + start, 1)
+        styled = styled.replace('  <path data-kind="consumption"', '</g>\n  <path data-kind="consumption"', 1)
+        self.rejects(styled, "inline style")
+
+    def test_nested_svg_ancestor_is_rejected(self):
+        start = '<g data-kind="macromolecule" data-entity-id="b"'
+        nested = GOOD.replace(start, '<svg x="400">' + start, 1)
+        nested = nested.replace('  <path data-kind="consumption"', '</svg>\n  <path data-kind="consumption"', 1)
+        self.rejects(nested, "nested <svg>")
+
+    def test_positional_stylesheet_rule_is_rejected(self):
+        for rule in ("rect { transform: translate(400px, 0); }",
+                     '[data-entity-id="b"] { translate: 400px 0; }',
+                     "svg g > rect { x: 400px; }",
+                     ":is(rect, circle) { transform: scale(2); }",
+                     "\\72 ect { transform: translate(400px, 0); }"):
+            with self.subTest(rule=rule):
+                source = GOOD.replace("<html><body>", f"<html><head><style>{rule}</style></head><body>", 1)
+                self.rejects(source, "stylesheet")
+
+    def test_page_stylesheet_is_clean(self):
+        page = ("svg { width: 100%; min-width: 1000px; display: block; }"
+                ".eyebrow { text-transform: uppercase; } .frame { max-width: 1200px; width: 100%; }"
+                'div[class="g"] { width: 100%; }')
+        self.clean(GOOD.replace("<html><body>", f"<html><head><style>{page}</style></head><body>", 1))
+
     def test_source_sink_is_species(self):
         source = GOOD.replace(
             "</svg>",

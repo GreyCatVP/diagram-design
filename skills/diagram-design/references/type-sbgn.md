@@ -59,7 +59,7 @@ Authoring-only: the model arrives as text in the prompt. This type does not impo
 
 The file has exactly one `<svg data-diagram="sbgn">`. Process squares are 32×32 so they stay below the geometry-checker's 60×40 node floor; macromolecules are the nodes the connector rules attach to. Source/sink circles are decoration-sized and also below that floor.
 
-**Machine-readable contract.** Species, processes, and the compartment carry stable IDs. Every arc declares `data-kind`, `data-from`, and `data-to`. `scripts/verify-sbgn.py` fails duplicate IDs, unresolved endpoints, an arc that skips the bipartite rule, a macromolecule drawn outside its compartment, and a figure over the Bruno ceiling.
+**Machine-readable contract.** Species, processes, and the compartment carry stable IDs. Every arc declares `data-kind`, `data-from`, and `data-to`. `scripts/verify-sbgn.py` fails duplicate IDs, unresolved endpoints, an arc whose `data-kind` is missing or unknown, an arc that skips the bipartite rule, a macromolecule drawn outside its compartment, a glyph moved by a `transform` or positional CSS, and a figure over the Bruno ceiling. Place glyphs with `x`, `y`, `width`, and `height` only.
 
 ## Budget
 

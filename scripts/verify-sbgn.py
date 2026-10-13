@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Verify the SBGN process-description HTML contract using only the stdlib.
 
-Checks unique IDs, bipartite species/process arcs, compartment containment,
-glyph kinds, and the Bruno ceiling. Files without data-diagram="sbgn" are
+Checks unique IDs, arc kinds, bipartite species/process arcs, compartment
+containment, glyph kinds, and the Bruno ceiling. Containment reads x, y, width
+and height, so a transform or positional CSS on a glyph, its bounds or an
+ancestor group inside the map is a finding. Files without data-diagram="sbgn" are
 skipped. This verifies authored declarations, not whether they describe an
 external SBML model.
 
@@ -40,6 +42,21 @@ MAX_SOURCE = 2
 GRID = 4.0
 EPS = 1e-6
 MAX_COORDINATE = 1e7
+# CSS properties that move or resize an SVG element away from the x, y,
+# width and height attributes the containment check reads.
+POSITION_PROPERTIES = {
+    "transform", "translate", "rotate", "scale", "x", "y", "width", "height",
+    "offset", "offset-path", "offset-distance", "offset-position", "offset-anchor", "offset-rotate",
+}
+# Element names a stylesheet selector can use to reach a glyph or its group.
+# The root <svg> is left out: sizing it scales the whole map uniformly.
+SVG_MARK_TAGS = {
+    "a", "circle", "defs", "ellipse", "foreignobject", "g", "image", "line", "marker", "path",
+    "pattern", "polygon", "polyline", "rect", "switch", "symbol", "text", "textpath", "tspan", "use",
+}
+CSS_ESCAPE_RE = re.compile(r"\\([0-9a-fA-F]{1,6})[ \t\r\n\f]?|\\(.)", re.DOTALL)
+CSS_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
+CSS_BLOCK_RE = re.compile(r"([^{}]*)\{([^{}]*)\}")
 
 
 @dataclass(eq=False)
@@ -65,6 +82,7 @@ class Scanner(HTMLParser):
         self.stack = [self.root]
         self.nodes: list[Node] = []
         self.errors: list[str] = []
+        self.stylesheets: list[tuple[int, str]] = []
 
     def handle_starttag(self, tag, attrs):
         values = {}
@@ -97,7 +115,8 @@ class Scanner(HTMLParser):
         del self.stack[index:]
 
     def handle_data(self, data):
-        return
+        if self.stack[-1].tag == "style":
+            self.stylesheets.append((self.getpos()[0], data))
 
     def finish(self, source):
         self.feed(source)
@@ -166,6 +185,109 @@ def parse_bounds(carrier: Node) -> tuple[float, float, float, float]:
     return x, y, w, h
 
 
+def _split_top_level(text: str, separators: str) -> list[str]:
+    """Split at separators outside quotes, brackets and parentheses."""
+    parts, current, depth, quote, index = [], [], 0, "", 0
+    while index < len(text):
+        char = text[index]
+        escape = CSS_ESCAPE_RE.match(text, index) if char == "\\" else None
+        if escape:
+            # A hex escape may swallow one whitespace; it is not a combinator.
+            current.append(escape.group(0))
+            index = escape.end()
+            continue
+        if quote:
+            if char == quote:
+                quote = ""
+        elif char in "\"'":
+            quote = char
+        elif char in "([":
+            depth += 1
+        elif char in ")]":
+            depth = max(0, depth - 1)
+        elif depth == 0 and char in separators:
+            parts.append("".join(current))
+            current = []
+            index += 1
+            continue
+        current.append(char)
+        index += 1
+    parts.append("".join(current))
+    return parts
+
+
+def _css_unescape(text: str) -> str:
+    def replace(match: re.Match[str]) -> str:
+        if match.group(1):
+            code = int(match.group(1), 16)
+            return chr(code) if 0 < code <= 0x10FFFF else "\ufffd"
+        return match.group(2)
+    return CSS_ESCAPE_RE.sub(replace, text)
+
+
+def positional_properties(declarations: str) -> list[str]:
+    """CSS property names in a declaration block that can move an element."""
+    found = []
+    for declaration in _split_top_level(CSS_COMMENT_RE.sub("", declarations), ";"):
+        name, colon, _value = declaration.partition(":")
+        name = _css_unescape(name).strip().lower()
+        if colon and name in POSITION_PROPERTIES:
+            found.append(name)
+    return found
+
+
+def _without_groups(compound: str) -> str:
+    """Drop attribute-selector and functional-pseudo contents, quotes included."""
+    out, depth, quote, index = [], 0, "", 0
+    while index < len(compound):
+        char = compound[index]
+        escape = CSS_ESCAPE_RE.match(compound, index) if char == "\\" else None
+        if escape:
+            if depth == 0:
+                out.append(escape.group(0))
+            index = escape.end()
+            continue
+        if quote:
+            if char == quote:
+                quote = ""
+        elif depth and char in "\"'":
+            quote = char
+        elif char in "([":
+            depth += 1
+        elif char in ")]":
+            depth = max(0, depth - 1)
+        elif depth == 0:
+            out.append(char)
+        index += 1
+    return "".join(out)
+
+
+def selector_can_reach_marks(selector: str, svg_names: set[str]) -> bool:
+    """False only when the selector's subject is provably page chrome.
+
+    The subject (last compound) can be a glyph when it names an SVG mark
+    element, uses an attribute selector or functional pseudo-class without
+    naming an HTML element, or carries a class or id that an element inside
+    the diagram also carries. Anything unclear counts as able to reach.
+    """
+    compounds = [part for part in _split_top_level(selector, " \t\r\n\f>+~") if part.strip()]
+    if not compounds:
+        return False
+    compound = compounds[-1].strip()
+    bare = _css_unescape(_without_groups(compound))
+    element = re.match(r"(?:(?:[A-Za-z_][\w-]*|\*)?\|)?([A-Za-z][\w-]*|\*)?", bare)
+    tag = (element.group(1) or "").lower() if element else ""
+    if tag and tag != "*":
+        # An HTML element, or the root <svg>, cannot be a glyph or its group.
+        return tag in SVG_MARK_TAGS
+    if "[" in compound or "(" in compound:
+        return True
+    names = set(re.findall(r"[.#]([\w-]+)", bare))
+    if not names:
+        return True
+    return bool(names & svg_names)
+
+
 def looks_like_sbgn(source: str) -> bool:
     scanner = Scanner()
     scanner.finish(source)
@@ -215,6 +337,23 @@ def check_source(path: Path, source: str) -> list[str]:
             return attrs.get("data-process-id", "")
         return attrs.get("data-compartment-id", "")
 
+    position_checked: set[int] = set()
+
+    def check_position(node: Node, identity: str, role: str) -> None:
+        """Containment reads x/y/width/height; nothing may move the drawn glyph."""
+        if id(node) in position_checked:
+            return
+        position_checked.add(id(node))
+        where = f'{role} <{node.tag}> of glyph "{identity}"'
+        if "transform" in node.attrs:
+            fail(node, f"{where} has a transform attribute; place glyphs with x, y, width and height only")
+        moved = positional_properties(node.attrs.get("style", ""))
+        if moved:
+            fail(node, f"{where} has a positional inline style ({', '.join(moved)}); "
+                       "place glyphs with x, y, width and height only")
+        if role == "ancestor" and node.tag in {"svg", "symbol"}:
+            fail(node, f'glyph "{identity}" sits inside a nested <{node.tag}>, which offsets and scales it')
+
     for node in scanner.nodes:
         if node is not root and root not in node.ancestors():
             continue
@@ -223,6 +362,14 @@ def check_source(path: Path, source: str) -> list[str]:
             identity = identity_for(kind, node.attrs)
             if not register(identity, node):
                 continue
+            check_position(node, identity, "glyph")
+            for child in node.children:
+                if child.attrs.get("data-role") == "bounds":
+                    check_position(child, identity, "bounds")
+            for ancestor in node.ancestors():
+                if ancestor is root:
+                    break
+                check_position(ancestor, identity, "ancestor")
             try:
                 x, y, w, h = parse_bounds(node)
             except ValueError as error:
@@ -254,6 +401,27 @@ def check_source(path: Path, source: str) -> list[str]:
         fail(root, "compartment budget is 1")
     if len(sources) > MAX_SOURCE:
         fail(root, "source-sink budget is 2")
+
+    svg_names: set[str] = set()
+    for node in scanner.nodes:
+        if root in node.ancestors():
+            svg_names.update(node.attrs.get("class", "").split())
+            if node.attrs.get("id"):
+                svg_names.add(node.attrs["id"])
+    for line, sheet in scanner.stylesheets:
+        sheet = CSS_COMMENT_RE.sub(lambda match: "\n" * match.group(0).count("\n"), sheet)
+        for match in CSS_BLOCK_RE.finditer(sheet):
+            moved = positional_properties(match.group(2))
+            if not moved:
+                continue
+            selectors = [selector.strip() for selector in _split_top_level(match.group(1), ",")]
+            reaching = [selector for selector in selectors
+                        if selector and selector_can_reach_marks(selector, svg_names)]
+            if reaching:
+                at = line + sheet[:match.start(2)].count("\n")
+                findings.append(
+                    f"{path.name}:{at}: stylesheet rule {', '.join(reaching)!r} sets {', '.join(moved)} "
+                    "on elements the diagram's glyphs can match; place glyphs with x, y, width and height only")
 
     compartment_ids = {g.identity for g in compartments}
     for box in glyphs.values():
