@@ -1282,6 +1282,18 @@ def _has_cycle(nodes: list[Node], edges: list[Edge]) -> bool:
     return any(colors[node.id] == WHITE and visit(node.id) for node in nodes)
 
 
+def node_ref(node: Node) -> str:
+    """Name a node unambiguously: its id, plus its label when that differs.
+
+    Two classes named `User` in different packages share a label, so every
+    digest reference that points at a node carries the id the edges use.
+    """
+    label = node.label.replace("\n", " · ")
+    if not label or label == node.id:
+        return node.id
+    return f"{node.id} ({label})"
+
+
 def analyze(diagram: Diagram) -> dict[str, Any]:
     containers = [node for node in diagram.nodes if node.container or node.children]
     leaves = [node for node in diagram.nodes if not (node.container or node.children)]
@@ -1291,10 +1303,15 @@ def analyze(diagram: Diagram) -> dict[str, Any]:
         shapes[family] = shapes.get(family, 0) + 1
 
     def name(node: Node) -> str:
-        return node.label.replace("\n", " · ") or node.id
+        return node_ref(node)
 
     hubs = [
-        {"id": node.id, "label": name(node), "degree": node.in_degree + node.out_degree}
+        {
+            "id": node.id,
+            "label": node.label.replace("\n", " · ") or node.id,
+            "ref": name(node),
+            "degree": node.in_degree + node.out_degree,
+        }
         for node in sorted(
             leaves,
             key=lambda item: (item.in_degree + item.out_degree, item.id),
@@ -1455,7 +1472,7 @@ def digest(
             output.append(
                 "- hubs (focal candidates): "
                 + ", ".join(
-                    f"{_escape_markdown(hub['label'])}({hub['degree']})"
+                    f"{_escape_markdown(hub['ref'])}({hub['degree']})"
                     for hub in info["hubs"]
                 )
             )
@@ -1510,7 +1527,7 @@ def digest(
                 "|---|---|---|---|---|",
             ]
         )
-        names = {node.id: node.label.split("\n")[0] for node in diagram.nodes}
+        names = {node.id: node_ref(node) for node in diagram.nodes}
         for edge in diagram.edges[:max_rows]:
             marks = [edge.style, edge.arrowhead]
             if edge.bidirectional:

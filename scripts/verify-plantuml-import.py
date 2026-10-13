@@ -357,6 +357,26 @@ def check_kind_detection_skips_bodies(tmp: Path) -> None:
     ok("kind detection ignores note, legend, and class body text")
 
 
+def check_digest_edges_use_ids(tmp: Path) -> None:
+    """Same-named classes stay distinguishable in the default digest."""
+    source = write_puml(
+        tmp,
+        "edge-ids.puml",
+        "package billing {\n  class User\n}\npackage auth {\n  class User\n}\n"
+        "billing.User --> auth.User : syncs",
+    )
+    digest = run_extract([str(source)])
+    row = r"| 1 | billing\.User \(User\) | auth\.User \(User\) | syncs |"
+    if row not in digest:
+        fail(f"edge table lost the class ids of its endpoints: {digest!r}")
+    if r"- entry points: billing\.User \(User\)" not in digest:
+        fail(f"entry points lost the class id: {digest!r}")
+    sequence = run_extract([str(SEQUENCE)])
+    if r"| 1 | Client | api \(Resource API\) | GET /orders |" not in sequence:
+        fail(f"sequence edge table lost participant ids: {sequence!r}")
+    ok("digest edges and summaries name endpoints by id, with the label alongside")
+
+
 def check_multi_diagram() -> None:
     payload = json.loads(run_extract([str(MULTI), "--diagram", "1", "--json"]))
     if payload["diagrams_total"] != 2:
@@ -705,6 +725,7 @@ def main() -> int:
         check_multi_diagram()
         check_review_regressions(tmp)
         check_kind_detection_skips_bodies(tmp)
+        check_digest_edges_use_ids(tmp)
         check_adversarial(tmp)
         check_errors_and_limits(tmp)
         check_legacy_stdout_encoding(tmp)
