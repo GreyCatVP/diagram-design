@@ -74,6 +74,37 @@ UNPAINTED_TAGS = {
     "foreignobject",
     "svg",
 }
+# CSS that can move, hide or clip an element, so its painted position is not its attributes.
+UNSTATIC_CSS_PROPERTIES = {
+    "transform",
+    "translate",
+    "rotate",
+    "scale",
+    "display",
+    "visibility",
+    "x",
+    "y",
+    "cx",
+    "cy",
+    "r",
+    "rx",
+    "ry",
+    "width",
+    "height",
+}
+UNSTATIC_CSS_PREFIXES = ("animation", "offset", "clip", "mask")
+CSS_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
+CSS_KEYFRAMES_RE = re.compile(
+    r"@(?:-[a-z]+-)?keyframes[^{]*\{(?:[^{}]*\{[^{}]*\})*[^{}]*\}", re.IGNORECASE
+)
+CSS_RULE_RE = re.compile(r"([^{}]+)\{([^{}]*)\}")
+CSS_STRING_RE = re.compile(r"\"[^\"]*\"|'[^']*'")
+CSS_PARENS_RE = re.compile(r"\([^()]*\)")
+CSS_COMBINATOR_RE = re.compile(r"\s*[>+~]\s*|\s+")
+CSS_TAG_RE = re.compile(r"^[a-zA-Z][\w-]*")
+CSS_CLASS_RE = re.compile(r"\.([\w-]+)")
+CSS_ID_RE = re.compile(r"#([\w-]+)")
+CSS_ATTRIBUTE_RE = re.compile(r"\[\s*([\w:-]+)")
 GEOMETRY_ATTRS = {
     "rect": ("x", "y", "width", "height"),
     "line": ("x1", "y1", "x2", "y2"),
@@ -254,13 +285,80 @@ def painted_points(tag: str, attrs: dict[str, str]) -> list[tuple[float, float]]
     return []
 
 
+def declares_unstatic_css(declarations: str) -> bool:
+    for declaration in declarations.split(";"):
+        name = declaration.split(":", 1)[0].strip().casefold()
+        if name in UNSTATIC_CSS_PROPERTIES or name.startswith(UNSTATIC_CSS_PREFIXES):
+            return True
+    return False
+
+
+def selector_subjects(selector: str) -> list[tuple[str, set[str], set[str], set[str]]]:
+    """Tag, classes, IDs and attribute names a selector's last compound requires."""
+    subjects = []
+    for alternative in CSS_PARENS_RE.sub("", CSS_STRING_RE.sub("", selector)).split(","):
+        parts = [part for part in CSS_COMBINATOR_RE.split(alternative.strip()) if part]
+        if not parts:
+            continue
+        compound = parts[-1].split("::", 1)[0]
+        tag = CSS_TAG_RE.match(compound)
+        subjects.append((
+            tag.group(0).casefold() if tag else "",
+            set(CSS_CLASS_RE.findall(compound)),
+            set(CSS_ID_RE.findall(compound)),
+            {name.casefold() for name in CSS_ATTRIBUTE_RE.findall(compound)},
+        ))
+    return subjects
+
+
+def unstatic_css_subjects(source: str) -> list[tuple[str, set[str], set[str], set[str]]]:
+    """Selector subjects of stylesheet rules that move, hide or clip what they match.
+
+    Matching keeps only the last compound and drops pseudo-classes, so it can match more
+    elements than the browser does. That only skips checks; it never adds a finding.
+    """
+    styles = re.findall(r"<style\b[^>]*>(.*?)</style\s*>", source, re.IGNORECASE | re.DOTALL)
+    sheet = CSS_KEYFRAMES_RE.sub("", CSS_COMMENT_RE.sub("", "\n".join(styles)))
+    subjects = []
+    for selector, declarations in CSS_RULE_RE.findall(sheet):
+        if declares_unstatic_css(declarations):
+            subjects.extend(selector_subjects(selector))
+    return subjects
+
+
+def matches_subject(
+    tag: str, attrs: dict[str, str], subject: tuple[str, set[str], set[str], set[str]]
+) -> bool:
+    subject_tag, classes, ids, attribute_names = subject
+    if subject_tag not in {"", "*", tag}:
+        return False
+    if not classes <= set(attrs.get("class", "").split()):
+        return False
+    if not ids <= {attrs.get("id", "")}:
+        return False
+    return attribute_names <= set(attrs)
+
+
 def child_offset(
-    tag: str, attrs: dict[str, str], parent: tuple[float, float] | None
+    tag: str,
+    attrs: dict[str, str],
+    parent: tuple[float, float] | None,
+    css_subjects: list[tuple[str, set[str], set[str], set[str]]],
 ) -> tuple[float, float] | None:
-    """Offset of an element in viewBox units, or None when its position is not static."""
+    """Offset of an element in viewBox units, or None when its paint is not static."""
     if parent is None or tag in UNPAINTED_TAGS:
         return None
-    if "transform" in attrs.get("style", "").casefold():
+    if declares_unstatic_css(attrs.get("style", "")):
+        return None
+    if attrs.get("display", "").strip().casefold() == "none":
+        return None
+    if attrs.get("visibility", "").strip().casefold() in {"hidden", "collapse"}:
+        return None
+    if attrs.get("clip-path", "none").strip().casefold() != "none":
+        return None
+    if attrs.get("mask", "none").strip().casefold() != "none":
+        return None
+    if any(matches_subject(tag, attrs, subject) for subject in css_subjects):
         return None
     transform = attrs.get("transform")
     if transform is None:
@@ -272,9 +370,10 @@ def child_offset(
 
 
 class ViewBoxParser(HTMLParser):
-    def __init__(self) -> None:
+    def __init__(self, css_subjects: list[tuple[str, set[str], set[str], set[str]]]) -> None:
         super().__init__(convert_charrefs=True)
         self.svgs: list[SvgExtent] = []
+        self._css_subjects = css_subjects
         self._frames: list[tuple[str, tuple[float, float] | None]] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
@@ -285,7 +384,7 @@ class ViewBoxParser(HTMLParser):
                 self.svgs.append(SvgExtent(data))
                 self._frames.append((tag, (0.0, 0.0)))
             return
-        offset = child_offset(tag, data, self._frames[-1][1])
+        offset = child_offset(tag, data, self._frames[-1][1], self._css_subjects)
         self._frames.append((tag, offset))
         if offset is None:
             return
@@ -436,7 +535,7 @@ def check_svgs(parser: DiagramParser, errors: list[str]) -> None:
 
 
 def check_viewbox(source: str, errors: list[str]) -> None:
-    parser = ViewBoxParser()
+    parser = ViewBoxParser(unstatic_css_subjects(source))
     parser.feed(source)
     parser.close()
     checkable = [

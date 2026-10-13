@@ -277,8 +277,31 @@ def main() -> int:
         ("definitions off-canvas", '<defs><rect x="5000" y="5000" width="1" height="1"/></defs>'),
         ("rotated group", '<g transform="rotate(90)"><rect x="5000" y="0" width="1" height="1"/></g>'),
         ("percentage size", '<rect x="0" y="0" width="200%" height="200%"/>'),
+        ("display none group", '<g display="none"><rect x="1100" y="20" width="10" height="10"/></g>'),
+        ("inline display none", '<rect style="display: none" x="1100" y="20" width="10" height="10"/>'),
+        ("visibility hidden group", '<g visibility="hidden"><rect x="1100" y="20" width="10" height="10"/></g>'),
+        ("oversized artwork clipped inside the canvas",
+         '<clipPath id="inside"><rect x="10" y="10" width="200" height="100"/></clipPath>'
+         '<g clip-path="url(#inside)"><rect x="-100" y="20" width="1200" height="40"/></g>'),
+        ("masked group", '<g mask="url(#m)"><rect x="1100" y="20" width="10" height="10"/></g>'),
     ):
         check_source_pass(label, static.replace("</svg>", markup + "</svg>", 1))
+    def styled(rule: str, markup: str) -> str:
+        return static.replace("</style>", rule + "</style>", 1).replace("</svg>", markup + "</svg>", 1)
+
+    placed_rect = '<rect class="placed" x="1100" y="20" width="10" height="10"/>'
+    check_source_pass("stylesheet transform moves it inside",
+                      styled(".placed { transform: translateX(-200px); }", placed_rect))
+    check_source_pass("stylesheet display none on an ancestor",
+                      styled("g.off { display: none; }",
+                             '<g class="off"><rect x="1100" y="20" width="10" height="10"/></g>'))
+    check_source_pass("stylesheet transform under a combinator",
+                      styled(".motion-ready svg > .placed:hover { transform: none; }", placed_rect))
+    check_fail("stylesheet rule that only colors it",
+               styled(".placed { fill: #bf4520; }", placed_rect), "past the viewBox right edge")
+    check_fail("transform keyframes alone do not exempt it",
+               styled("@keyframes slide { 0% { transform: translateX(0); } }", placed_rect),
+               "past the viewBox right edge")
     check_source_pass("aria-hidden decorative SVG", static.replace("</body>",
         '<svg aria-hidden="true" viewBox="0 0 10 10"><rect x="50" y="50" width="5" height="5"/></svg></body>', 1))
     outside_assets = []
