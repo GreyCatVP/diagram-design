@@ -97,6 +97,27 @@ class ContractTests(unittest.TestCase):
                                   '<path data-kind="reversible" data-from="a" data-to="b" d="M 112,80 H 240"/></svg>'),
                      "reversible must join a species and a process")
 
+    def test_misspelled_arc_kind_is_rejected(self):
+        # A typo used to skip every endpoint check, so a species-to-species
+        # arc passed as long as its kind was misspelled.
+        self.rejects(GOOD.replace('data-kind="consumption" data-from="a" data-to="p"',
+                                  'data-kind="consumtion" data-from="a" data-to="b"', 1),
+                     'arc data-kind "consumtion" must be one of')
+
+    def test_missing_arc_kind_is_rejected(self):
+        self.rejects(GOOD.replace('data-kind="consumption" data-from="a" data-to="p"',
+                                  'data-from="a" data-to="b"', 1),
+                     "arc data-kind is missing")
+        self.rejects(GOOD.replace("</svg>", '<path data-to="b" d="M 112,80 H 240"/></svg>'),
+                     "arc data-kind is missing")
+
+    def test_unknown_glyph_kind_is_rejected(self):
+        # A misspelled glyph kind would drop the glyph from the budget and
+        # containment checks without a finding.
+        self.rejects(GOOD.replace('data-kind="macromolecule" data-entity-id="b"',
+                                  'data-kind="macromolecul" data-entity-id="b"', 1),
+                     'unknown data-kind "macromolecul"')
+
     def test_source_sink_is_species(self):
         source = GOOD.replace(
             "</svg>",

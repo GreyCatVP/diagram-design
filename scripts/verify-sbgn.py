@@ -30,6 +30,8 @@ VOID = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "met
 DIAGRAM = "sbgn"
 GLYPH_KINDS = {"macromolecule", "process", "compartment", "source-sink"}
 ARC_KINDS = {"consumption", "production", "reversible", "modulation"}
+ARC_LIST = ", ".join(sorted(ARC_KINDS))
+GLYPH_LIST = ", ".join(sorted(GLYPH_KINDS))
 SPECIES = {"macromolecule", "source-sink"}
 MAX_MACRO = 7
 MAX_PROCESS = 6
@@ -270,7 +272,16 @@ def check_source(path: Path, source: str) -> list[str]:
         if node is not root and root not in node.ancestors():
             continue
         kind = node.attrs.get("data-kind", "")
+        is_arc = "data-from" in node.attrs or "data-to" in node.attrs
         if kind not in ARC_KINDS:
+            # An unknown kind must fail here: skipping it would also skip the
+            # endpoint checks, so a typo would pass a species-to-species arc.
+            if is_arc and not kind:
+                fail(node, f"arc data-kind is missing; use one of {ARC_LIST}")
+            elif is_arc:
+                fail(node, f'arc data-kind "{kind}" must be one of {ARC_LIST}')
+            elif "data-kind" in node.attrs and kind not in GLYPH_KINDS:
+                fail(node, f'unknown data-kind "{kind}"; glyphs use {GLYPH_LIST}, arcs use {ARC_LIST}')
             continue
         source = node.attrs.get("data-from", "")
         target = node.attrs.get("data-to", "")
