@@ -670,6 +670,32 @@ class ExportSvgStandaloneTests(unittest.TestCase):
             self.assertIn('unsupported nested CSS animation declaration', errors.getvalue())
             self.assertNotIn('Traceback', errors.getvalue())
 
+    def test_animation_after_nested_block_is_refused(self) -> None:
+        html = '<style>@keyframes pulse {to{opacity:1}} .paint { & {fill:red;} animation:pulse 1s; }</style><svg viewBox="0 0 40 40"><rect class="paint"/></svg>'
+        with self.assertRaisesRegex(ValueError, 'unsupported nested CSS animation declaration'):
+            self.mod.export_svg_document(html, Path("trailing.html"))
+
+    def test_animation_between_nested_blocks_is_refused(self) -> None:
+        html = '<style>@keyframes pulse {to{opacity:1}} .paint { & {fill:red;} animation:pulse 1s; & {stroke:blue;} }</style><svg viewBox="0 0 40 40"><rect class="paint"/></svg>'
+        with self.assertRaisesRegex(ValueError, 'unsupported nested CSS animation declaration'):
+            self.mod.export_svg_document(html, Path("middle.html"))
+
+    def test_animation_before_nested_block_is_namespaced(self) -> None:
+        html = '<style>@keyframes pulse {to{opacity:1}} .paint {animation:pulse 1s; & {fill:red;}}</style><svg viewBox="0 0 40 40"><rect class="paint"/></svg>'
+        result = self.mod.export_svg_document(html, Path("prefix.html"))
+        self.assertIn('animation:prefix-root-pulse 1s', embedded_css(result))
+
+    def test_important_priority_is_not_a_keyframe_name(self) -> None:
+        html = '<style>@keyframes pulse {to{opacity:1}} @keyframes important {to{opacity:0}} .paint {animation:pulse 1s !important;}</style><svg viewBox="0 0 40 40"><rect class="paint"/></svg>'
+        result = self.mod.export_svg_document(html, Path("priority.html"))
+        self.assertIn('animation:priority-root-pulse 1s !important', embedded_css(result))
+        self.assertNotIn('!priority-root-important', result)
+
+    def test_comment_prefixed_svg_local_animation_is_refused(self) -> None:
+        html = '<style>@keyframes pulse {to{opacity:1}}</style><svg viewBox="0 0 40 40"><style>#paint {/*note*/animation:pulse 1s;}</style><rect id="paint"/></svg>'
+        with self.assertRaisesRegex(ValueError, 'unsupported SVG-local animation stylesheet'):
+            self.mod.export_svg_document(html, Path("local-comment.html"))
+
     def test_custom_property_value_blocks_are_not_nested_animation_rules(self) -> None:
         for value in ('{animation:pulse 1s;}', '{ .nested {animation-name:pulse;} }'):
             with self.subTest(value=value):

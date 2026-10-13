@@ -782,7 +782,8 @@ def _animation_component(value: str, names: dict[str, str], shorthand: bool) -> 
             name = token[1:-1] if quote else token
             function = not quote and re.match(r"\s*\(", value[match.end():]) is not None
             variable = variable or (function and name.lower() == "var")
-            if function:
+            if function or (not quote and name.lower() == "important"
+                            and re.search(r"!\s*$", value[:match.start()])):
                 continue
             # Unquoted none disables animation; CSS-wide values reset/inherit it.
             # Quoted spellings are actual keyframe names and must be namespaced.
@@ -818,7 +819,7 @@ def namespace_inline_animations(svg: str, names: dict[str, str]) -> str:
     if not names:
         return svg
     if any(re.search(r"@(?:-webkit-)?keyframes\b|(?:^|[;{])\s*(?:-webkit-)?animation(?:-name)?\s*:", block, re.IGNORECASE)
-                     for block in STYLE_BLOCK_RE.findall(svg)):
+                     for block in (CSS_COMMENT_RE.sub("", block) for block in STYLE_BLOCK_RE.findall(svg))):
         raise ValueError("unsupported SVG-local animation stylesheet in SVG export")
 
     def rewrite_tag(match: re.Match[str]) -> str:
@@ -879,6 +880,9 @@ def _diagram_css_leaf(rule: _CssRule, root_id: str, names: dict[str, str], origi
     # a binding to the keyframes that this export renames.
     if names:
         pending_nested = list(rule.children)
+        if any(not re.fullmatch(r"--[\w-]+\s*:", CSS_COMMENT_RE.sub("", child.selector).strip())
+               for child in rule.children):
+            pending_nested.append(rule)
         while pending_nested:
             nested = pending_nested.pop()
             # Braces in a custom property's value carry tokens, not CSS rules.
@@ -889,8 +893,8 @@ def _diagram_css_leaf(rule: _CssRule, root_id: str, names: dict[str, str], origi
             # Scan direct declarations once; the last prefix segment is the
             # next child selector, not a declaration. Descendants are queued.
             segments: list[str] = []
-            cursor = nested.start
-            for child in nested.children:
+            cursor = nested.children[0].end + 1 if nested is rule else nested.start
+            for child in (nested.children[1:] if nested is rule else nested.children):
                 segments.extend(_css_segments(nested.css[cursor:child.start - 1], ";")[:-1])
                 cursor = child.end + 1
             segments.extend(_css_segments(nested.css[cursor:nested.end], ";"))
