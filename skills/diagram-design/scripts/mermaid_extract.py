@@ -253,7 +253,7 @@ def _read_bounded(path: Path) -> str:
             f"source exceeds the {MAX_SOURCE_BYTES // (1024 * 1024)} MiB limit"
         )
     try:
-        return data.decode("utf-8")
+        return data.decode("utf-8-sig")
     except UnicodeDecodeError:
         _fail(f"{path.name}: source is not valid UTF-8 text")
 
@@ -271,22 +271,28 @@ def load_blocks(path: Path) -> list[SourceBlock]:
     start: int | None = None
     fence = ""
     content: list[str] = []
+    capture = False
     for line_number, line in enumerate(lines, 1):
         if start is None:
-            match = re.match(r"^\s*(`{3,}|~{3,})\s*mermaid\s*$", line, re.I)
-            if match:
+            match = re.match(r"^\s*(`{3,}|~{3,})(.*)$", line)
+            if (match and not (match.group(1)[0] == "`" and "`" in match.group(2))
+                    and (match.group(2).strip().casefold() == "mermaid"
+                         or re.match(r"^ {0,3}[`~]", line))):
                 start = line_number + 1
                 fence = match.group(1)
+                capture = match.group(2).strip().casefold() == "mermaid"
                 content = []
             continue
-        if re.match(rf"^\s*{re.escape(fence[0])}{{{len(fence)},}}\s*$", line):
-            blocks.append(SourceBlock(len(blocks), "\n".join(content), start))
+        if (re.match(rf"^\s*{re.escape(fence[0])}{{{len(fence)},}}\s*$", line)
+                and (capture or re.match(r"^ {0,3}[`~]", line))):
+            if capture:
+                blocks.append(SourceBlock(len(blocks), "\n".join(content), start))
             start = None
             fence = ""
             content = []
-        else:
+        elif capture:
             content.append(line)
-    if start is not None:
+    if start is not None and capture:
         _fail(f"{path.name}: unterminated mermaid fence starting at line {start - 1}")
     if not blocks:
         _fail(f"{path.name}: no fenced mermaid block found")
@@ -847,7 +853,9 @@ def _parse_flowchart(
 def _parse_sequence(
     diagram: Diagram, lines: list[tuple[int, str]], header_position: int
 ) -> None:
-    fragment_stack: list[dict[str, Any]] = []
+    # None marks a visual-only rect block: its end must not close a semantic fragment.
+    fragment_stack: list[dict[str, Any] | None] = []
+    semantic_depth = 0
     participant_re = re.compile(
         r"^(?:create\s+)?(participant|actor)\s+"
         r"(?:\"([^\"]+)\"|'([^']+)'|([\w.:-]+))"
@@ -890,25 +898,30 @@ def _parse_sequence(
                 "actor" if kind == "actor" else "lifeline",
             )
             continue
+        if (re.match(r"^rect\s+", text, re.I) and message_re.match(text) is None
+                and re.match(r"^rect\s+(?:<<--?>>|--?>>|--?>|--?\)|--?x)", text, re.I) is None):
+            fragment_stack.append(None)
+            continue
         fragment = re.match(r"^(alt|opt|loop|par|critical|break)\b\s*(.*)$", text, re.I)
         if fragment:
             entry = {
                 "kind": fragment.group(1).casefold(),
                 "label": clean_label(fragment.group(2)),
                 "line": line_number,
-                "depth": len(fragment_stack),
+                "depth": semantic_depth,
                 "regions": [],
             }
             diagram.fragments.append(entry)
             fragment_stack.append(entry)
+            semantic_depth += 1
             continue
         region = re.match(r"^(else|and|option)\b\s*(.*)$", text, re.I)
-        if region and fragment_stack:
+        if region and fragment_stack and fragment_stack[-1] is not None:
             fragment_stack[-1]["regions"].append(clean_label(region.group(2)))
             continue
         if lowered == "end":
-            if fragment_stack:
-                fragment_stack.pop()
+            if fragment_stack and fragment_stack.pop() is not None:
+                semantic_depth -= 1
             continue
         if lowered.startswith(("activate ", "deactivate ", "+", "-")):
             continue
@@ -978,11 +991,24 @@ def _parse_state(
     diagram: Diagram, lines: list[tuple[int, str]], header_position: int
 ) -> None:
     containers: list[str] = []
+    note_start: int | None = None
     descriptions: dict[str, list[str]] = {}
     pending_descriptions = diagram._state_descriptions
     for line_number, raw in lines[header_position + 1 :]:
         text = raw.strip()
         if not text:
+            continue
+        if note_start is not None:
+            if re.fullmatch(r"end\s+note", text, re.I):
+                note_start = None
+            continue
+        note = re.fullmatch(
+            r"note\s+(?:left|right)\s+of\s+[^\s:]+(?:\s*:\s*(.*))?", text, re.I
+        )
+        if note:
+            # A colon marks a single-line note; otherwise ignore its opaque body
+            # through `end note` before interpreting states, edges or braces.
+            note_start = line_number if note.group(1) is None else None
             continue
         if _discard_nonsemantic(diagram, text):
             continue
@@ -1045,6 +1071,13 @@ def _parse_state(
         plain = re.match(r"^state\s+([\w.:-]+)$", text, re.I)
         if plain:
             diagram.add_node(plain.group(1), plain.group(1), "state", parent)
+            continue
+        if text != "--" and re.fullmatch(r"[\w.:-]+", text):
+            if text not in diagram.node_map:
+                diagram.add_node(text, text, "state", parent)
+
+    if note_start is not None:
+        _fail(f"unterminated state note at line {note_start}")
 
     # Materialize each accumulated label once; later explicit aliases still win.
     for node_id, parts in pending_descriptions.items():

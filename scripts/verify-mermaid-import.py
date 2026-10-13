@@ -126,6 +126,21 @@ def check_legacy_stdout_encoding(tmp: Path) -> None:
     ok("Mermaid stdout stays lossless UTF-8 under a legacy Windows encoding")
 
 
+def check_utf8_bom(tmp: Path) -> None:
+    for suffix, source in (
+        ("mmd", "flowchart TD\nA --> B\n"),
+        ("md", "```mermaid\nflowchart TD\nA --> B\n```\n"),
+    ):
+        path = tmp / f"bom-source.{suffix}"
+        path.write_bytes(source.encode("utf-8"))
+        expected = json.loads(run_extract([str(path), "--json"]))
+        path.write_bytes(b"\xef\xbb\xbf" + source.encode("utf-8"))
+        actual = json.loads(run_extract([str(path), "--json"]))
+        if actual != expected:
+            fail(f"UTF-8 BOM changed the {suffix} extraction")
+    ok("UTF-8 BOM does not prevent Mermaid or Markdown import")
+
+
 def expect_error(args: list[str], message: str) -> None:
     process = invoke(args)
     if process.returncode != 2 or message not in process.stderr:
@@ -564,6 +579,56 @@ A --> B
     ok("frontmatter is skipped, and an unterminated block still fails specifically")
 
 
+def check_outer_markdown_fences(tmp: Path) -> None:
+    for name, opening, closing in [
+        ("backtick", "````markdown", "````"),
+        ("tilde", "~~~markdown", "~~~"),
+        ("unlabelled", "````", "````"),
+        ("longer-close", "````markdown", "`````"),
+        ("three-space-indent", "   ````markdown", "   ````"),
+    ]:
+        path = tmp / f"outer-fence-{name}.md"
+        path.write_text(opening + "\n```mermaid\npie title Literal example\n```\n" + closing
+                        + "\n\n```mermaid\nflowchart TD\nA --> B\n```\n", encoding="utf-8")
+        payload = json.loads(run_extract([str(path), "--diagram", "all", "--json"]))
+        if payload["diagrams_total"] != 1 or len(payload["diagrams"]) != 1:
+            fail(f"{name}: literal Mermaid sample was counted as a live block")
+        diagram = payload["diagrams"][0]
+        if diagram["kind"] != "flowchart" or {n["id"] for n in diagram["nodes"]} != {"A", "B"}:
+            fail(f"{name}: live flowchart was not preserved")
+    mixed = tmp / "outer-fence-live-controls.md"
+    mixed.write_text("~~~text\n```mermaid\npie title Literal\n```\n~~~\n"
+                     "``` MeRmAiD  \nflowchart LR\nC --> D\n````\n"
+                     "~~~mermaid\nflowchart TD\nE --> F\n~~~~\n", encoding="utf-8")
+    payload = json.loads(run_extract([str(mixed), "--diagram", "all", "--json"]))
+    if payload["diagrams_total"] != 2 or [d["kind"] for d in payload["diagrams"]] != ["flowchart", "flowchart"]:
+        fail("live mixed-case/whitespace and tilde fences did not retain their order")
+    if [{n["id"] for n in d["nodes"]} for d in payload["diagrams"]] != [{"C", "D"}, {"E", "F"}]:
+        fail("ordinary fence contents leaked into live diagram nodes")
+    selected = json.loads(run_extract([str(mixed), "--diagram", "1", "--json"]))
+    if {n["id"] for n in selected["diagrams"][0]["nodes"]} != {"E", "F"}:
+        fail("selection counted literal samples instead of live Mermaid blocks")
+    expect_error([str(mixed), "--diagram", "2"], "no diagram with index 2 (have 0..1)")
+    indented = tmp / "outer-fence-indented-example.md"
+    indented.write_text("    ```text\n\n```mermaid\nflowchart TD\nA --> B\n```\n", encoding="utf-8")
+    payload = json.loads(run_extract([str(indented), "--json"]))
+    if {node["id"] for node in payload["diagrams"][0]["nodes"]} != {"A", "B"}:
+        fail("indented code example hid the following live Mermaid block")
+    indented.write_text("```text\n    ```\nstill inside\n```\n\n```mermaid\nflowchart TD\nA --> B\n```\n", encoding="utf-8")
+    payload = json.loads(run_extract([str(indented), "--json"]))
+    if {node["id"] for node in payload["diagrams"][0]["nodes"]} != {"A", "B"}:
+        fail("indented closing fence ended an ordinary block early")
+    # Existing Mermaid indentation remains supported, including four spaces.
+    indented.write_text("    ```mermaid\nflowchart TD\nA --> B\n    ```\n", encoding="utf-8")
+    payload = json.loads(run_extract([str(indented), "--json"]))
+    if {node["id"] for node in payload["diagrams"][0]["nodes"]} != {"A", "B"}:
+        fail("existing indented Mermaid support changed")
+    unclosed = tmp / "outer-fence-unclosed.md"
+    unclosed.write_text("````markdown\n```mermaid\nflowchart TD\nA --> B\n```\n", encoding="utf-8")
+    expect_error([str(unclosed)], "no fenced mermaid block found")
+    ok("outer code fences keep Mermaid samples literal and preserve live block order")
+
+
 def check_markdown_and_grammars(tmp: Path) -> None:
     header = run_extract([str(README_FIXTURE)])
     if "2 diagram(s)" not in header or "[1] sequenceDiagram" not in header:
@@ -840,6 +905,60 @@ def check_adversarial(tmp: Path) -> None:
     if "&lt;img src=" not in digest_text or "&gt;" not in digest_text:
         fail("decoded HTML label was not safely encoded in Markdown output")
     ok("adversarial labels stay inert; nesting, chains, fan-out, discards work")
+
+
+def check_sequence_highlight_nesting_regression(tmp: Path) -> None:
+    cases = [
+        ("named-color-highlight", "rect lightblue\nA->>B: highlighted\nend", [], ["highlighted"]),
+        ("hex-color-highlight", "rect #ffccaa\nA->>B: highlighted\nend", [], ["highlighted"]),
+        ("variable-color-highlight", "rect var(--x)\nA->>B: highlighted\nend", [], ["highlighted"]),
+        ("highlight-inside-alt", "alt success\nrect rgb(200, 200, 200)\nrect rgba(0, 0, 255, .1)\nA->>B: highlighted\nend\nend\nelse failure\nA->>B: rejected\nend", [("alt", "success", 0, ["failure"])], ["highlighted", "rejected"]),
+        ("alt-inside-highlight", "rect rgb(200, 200, 200)\nalt success\nloop retries\nA->>B: attempt\nend\nelse failure\nA->>B: rejected\nend\nend", [("alt", "success", 0, ["failure"]), ("loop", "retries", 1, [])], ["attempt", "rejected"]),
+        ("ordinary-fragment-control", "alt success\nloop retries\nA->>B: attempt\nend\nelse failure\nA->>B: rejected\nend", [("alt", "success", 0, ["failure"]), ("loop", "retries", 1, [])], ["attempt", "rejected"]),
+    ]
+    for name, body, expected_fragments, expected_messages in cases:
+        scene = tmp / ("sequence-highlight-nesting-" + name + ".mmd")
+        scene.write_text("sequenceDiagram\nparticipant A\nparticipant B\n" + body + "\n", encoding="utf-8")
+        diagram = json.loads(run_extract([str(scene), "--json"]))["diagrams"][0]
+        actual = [(fragment["kind"], fragment["label"], fragment["depth"], fragment["regions"]) for fragment in diagram["fragments"]]
+        if actual != expected_fragments:
+            fail(f"{name}: semantic fragment nesting changed: {actual!r}")
+        if [edge["label"] for edge in diagram["edges"]] != expected_messages:
+            fail(f"{name}: messages changed while ignoring highlighting")
+        if [(node["id"], node["label"]) for node in diagram["nodes"]] != [("A", "A"), ("B", "B")]:
+            fail(f"{name}: highlighting introduced or renamed participants")
+    # Preserve an already accepted message source whose ID happens to be rect.
+    participant = tmp / "sequence-highlight-rect-participant.mmd"
+    participant.write_text("sequenceDiagram\nparticipant rect\nparticipant B\nrect ->>B: preserved\n", encoding="utf-8")
+    diagram = json.loads(run_extract([str(participant), "--json"]))["diagrams"][0]
+    if [(edge["source"], edge["target"], edge["label"]) for edge in diagram["edges"]] != [("rect", "B", "preserved")]:
+        fail("rect participant message was mistaken for visual highlighting")
+    if diagram["fragments"]:
+        fail("rect participant message introduced a semantic fragment")
+    malformed = tmp / "sequence-highlight-malformed-rect.mmd"
+    malformed.write_text("sequenceDiagram\nrect ->>: missing target\n", encoding="utf-8")
+    expect_error([str(malformed)], "malformed edge at line 2")
+    # Count actual depth-reduction work instead of relying on machine timing.
+    extractor = load_extractor_module()
+    for depth in (100, 200):
+        visits = [0]
+
+        def counted_sum(values, start=0):
+            total = start
+            for value in values:
+                visits[0] += 1
+                total += value
+            return total
+
+        extractor.sum = counted_sum
+        text = "rect rgb(0, 0, 0)\nopt nested\n" * depth + "A->>B: deepest\n" + "end\nend\n" * depth
+        diagram = extractor.Diagram(0, "sequenceDiagram", 1)
+        extractor._parse_sequence(diagram, list(enumerate(("sequenceDiagram\n" + text).splitlines(), 1)), 0)
+        if [fragment["depth"] for fragment in diagram.fragments] != list(range(depth)):
+            fail("deep highlight blocks changed semantic fragment depth")
+        if visits[0] > len(text):
+            fail(f"sequence fragment depth rescanned nested stacks: {visits[0]} visits")
+    ok("sequence highlight blocks preserve semantic fragment regions and depth")
 
 
 def check_sequence_grammar_forms(tmp: Path) -> None:
@@ -1203,12 +1322,79 @@ def check_standalone_er_regression(tmp: Path) -> None:
     ok("standalone ER entity declarations, including Unicode names, become tables")
 
 
+def check_standalone_state_regression(tmp: Path) -> None:
+    path = tmp / "supported-form.mmd"
+    path.write_text('stateDiagram-v2\nDisconnected\n[*] --> Active\n', encoding="utf-8")
+    payload = json.loads(run_extract([str(path), "--json"]))["diagrams"][0]
+    nodes = {node["id"]: node for node in payload["nodes"]}
+    if "Disconnected" not in nodes or nodes["Disconnected"]["shape"] != "state":
+        fail("Standalone bare state was discarded")
+    concurrent = tmp / "concurrency.mmd"
+    concurrent.write_text('stateDiagram-v2\nstate Active {\nA --> B\n--\nC --> D\n}\n', encoding="utf-8")
+    payload = json.loads(run_extract([str(concurrent), "--json"]))["diagrams"][0]
+    if "--" in {node["id"] for node in payload["nodes"]}:
+        fail("The documented concurrency separator became a phantom state")
+
+    # Note bodies are annotation text, even when they resemble diagram syntax.
+    for side in ("left", "right"):
+        note = tmp / f"state-note-{side}.mmd"
+        note.write_text(
+            "stateDiagram-v2\nstate Group {\nstate Idle\n"
+            f"note {side} of Idle\nDisconnected\nstate Phantom\n"
+            "Ghost --> Imaginary\n}\nIdle: false description\nend note\n"
+            "Active\n}\nOutside\n",
+            encoding="utf-8",
+        )
+        payload = json.loads(run_extract([str(note), "--json"]))["diagrams"][0]
+        nodes = {node["id"]: node for node in payload["nodes"]}
+        if set(nodes) != {"Group", "Idle", "Active", "Outside"} or payload["edges"]:
+            fail(f"A {side} state note body became diagram structure")
+        if nodes["Idle"]["label"] != "Idle" or nodes["Active"]["parent"] != "Group":
+            fail(f"A {side} state note body altered labels or container membership")
+        if nodes["Outside"]["parent"] is not None:
+            fail("Parsing did not resume after the note and composite state")
+
+    notes = tmp / "state-notes-adjacent-inline.mmd"
+    notes.write_text(
+        "stateDiagram-v2\nstate Idle\nnote left of Idle\nGhost\nend note\n"
+        "note right of Idle\nPhantom\nend note\n"
+        "note left of Idle: inline annotation\n"
+        "note right of Idle: inline annotation\nActive\nnote\nend\nnotebook\n",
+        encoding="utf-8",
+    )
+    payload = json.loads(run_extract([str(notes), "--json"]))["diagrams"][0]
+    if {node["id"] for node in payload["nodes"]} != {"Idle", "Active", "note", "end", "notebook"}:
+        fail("State note boundaries swallowed real states or retained annotation bodies")
+
+    for side in ("left", "right"):
+        unterminated = tmp / f"state-note-unterminated-{side}.mmd"
+        unterminated.write_text(
+            f"stateDiagram-v2\nstate Idle\nnote {side} of Idle\n"
+            "Annotation\nActive\n",
+            encoding="utf-8",
+        )
+        expect_error([str(unterminated), "--json"], "unterminated state note at line 3")
+
+    special = tmp / "state-special-bare.mmd"
+    special.write_text(
+        "stateDiagram-v2\nstate Decision <<choice>>\nDecision\n"
+        "state Fork <<fork>>\nFork\nstate Join <<join>>\nJoin\n",
+        encoding="utf-8",
+    )
+    payload = json.loads(run_extract([str(special), "--json"]))["diagrams"][0]
+    shapes = {node["id"]: node["shape"] for node in payload["nodes"]}
+    if shapes != {"Decision": "choice", "Fork": "fork", "Join": "join"}:
+        fail("A repeated bare declaration replaced a special state shape")
+    ok("bare states retain shapes and exclude multiline state note bodies")
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="diagram-design-mermaid-") as directory:
         tmp = Path(directory)
         check_unicode_state_regression(tmp)
         check_unicode_er_regression(tmp)
         check_standalone_er_regression(tmp)
+        check_standalone_state_regression(tmp)
         check_files()
         expect_error([str(FLOW), "--diagram", "²"], "--diagram must be an index")
         check_flowchart()
@@ -1217,12 +1403,15 @@ def main() -> int:
         check_entity_label_codes(tmp)
         check_shape_and_edge_vocabulary(tmp)
         check_frontmatter(tmp)
+        check_outer_markdown_fences(tmp)
         check_markdown_and_grammars(tmp)
         check_state_descriptions(tmp)
         check_named_composite_states(tmp)
         check_selection_before_parse(tmp)
+        check_utf8_bom(tmp)
         check_legacy_stdout_encoding(tmp)
         check_sequence_grammar_forms(tmp)
+        check_sequence_highlight_nesting_regression(tmp)
         check_adversarial(tmp)
         check_errors_and_limits(tmp)
         check_docs_and_wiring()
