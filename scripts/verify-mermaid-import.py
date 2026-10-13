@@ -585,6 +585,7 @@ def check_outer_markdown_fences(tmp: Path) -> None:
         ("tilde", "~~~markdown", "~~~"),
         ("unlabelled", "````", "````"),
         ("longer-close", "````markdown", "`````"),
+        ("three-space-indent", "   ````markdown", "   ````"),
     ]:
         path = tmp / f"outer-fence-{name}.md"
         path.write_text(opening + "\n```mermaid\npie title Literal example\n```\n" + closing
@@ -608,6 +609,16 @@ def check_outer_markdown_fences(tmp: Path) -> None:
     if {n["id"] for n in selected["diagrams"][0]["nodes"]} != {"E", "F"}:
         fail("selection counted literal samples instead of live Mermaid blocks")
     expect_error([str(mixed), "--diagram", "2"], "no diagram with index 2 (have 0..1)")
+    indented = tmp / "outer-fence-indented-example.md"
+    indented.write_text("    ```text\n\n```mermaid\nflowchart TD\nA --> B\n```\n", encoding="utf-8")
+    payload = json.loads(run_extract([str(indented), "--json"]))
+    if {node["id"] for node in payload["diagrams"][0]["nodes"]} != {"A", "B"}:
+        fail("indented code example hid the following live Mermaid block")
+    # Existing Mermaid indentation remains supported, including four spaces.
+    indented.write_text("    ```mermaid\nflowchart TD\nA --> B\n    ```\n", encoding="utf-8")
+    payload = json.loads(run_extract([str(indented), "--json"]))
+    if {node["id"] for node in payload["diagrams"][0]["nodes"]} != {"A", "B"}:
+        fail("existing indented Mermaid support changed")
     unclosed = tmp / "outer-fence-unclosed.md"
     unclosed.write_text("````markdown\n```mermaid\nflowchart TD\nA --> B\n```\n", encoding="utf-8")
     expect_error([str(unclosed)], "no fenced mermaid block found")

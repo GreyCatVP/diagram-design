@@ -275,7 +275,9 @@ def load_blocks(path: Path) -> list[SourceBlock]:
     for line_number, line in enumerate(lines, 1):
         if start is None:
             match = re.match(r"^\s*(`{3,}|~{3,})(.*)$", line)
-            if match and not (match.group(1)[0] == "`" and "`" in match.group(2)):
+            if (match and not (match.group(1)[0] == "`" and "`" in match.group(2))
+                    and (match.group(2).strip().casefold() == "mermaid"
+                         or re.match(r"^ {0,3}[`~]", line))):
                 start = line_number + 1
                 fence = match.group(1)
                 capture = match.group(2).strip().casefold() == "mermaid"
