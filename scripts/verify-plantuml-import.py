@@ -714,6 +714,27 @@ def check_kind_uses_arrow_parser(tmp: Path) -> None:
     ok("kind detection reads arrows with the same parser as the edge parsers")
 
 
+def check_quoted_note_targets(tmp: Path) -> None:
+    """A colon inside a quoted note target is part of the name, not the body separator."""
+    diagram = extract_json(
+        write_puml(
+            tmp,
+            "note-quoted-colon.puml",
+            'participant "A:B" as A\nparticipant C\nA -> C : x\nnote over "A:B": text\n'
+            'note over "A:B", C: both\nnote right of "A:B"\n  multi: line\nend note',
+        )
+    )
+    placements = [(item["text"], item["participants"]) for item in diagram["note_details"]]
+    if placements != [("text", ["A"]), ("both", ["A", "C"]), ("multi: line", ["A"])]:
+        fail(f"a colon in a quoted note target split the note: {placements}")
+    diagram = extract_json(
+        write_puml(tmp, "class-note-quoted.puml", 'class "Svc:Main" as S\nnote right of "Svc:Main" : hi: there')
+    )
+    if [(item["text"], item["participants"]) for item in diagram["note_details"]] != [("hi: there", ["S"])]:
+        fail(f"a colon in a quoted class note target split the note: {diagram['note_details']}")
+    ok("note bodies split at the first colon outside quotes")
+
+
 def check_multi_diagram() -> None:
     payload = json.loads(run_extract([str(MULTI), "--diagram", "1", "--json"]))
     if payload["diagrams_total"] != 2:
@@ -1075,6 +1096,7 @@ def main() -> int:
         check_inline_block_comments(tmp)
         check_quoted_name_cardinality(tmp)
         check_kind_uses_arrow_parser(tmp)
+        check_quoted_note_targets(tmp)
         check_adversarial(tmp)
         check_errors_and_limits(tmp)
         check_legacy_stdout_encoding(tmp)

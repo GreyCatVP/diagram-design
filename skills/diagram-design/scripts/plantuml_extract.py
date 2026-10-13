@@ -741,11 +741,28 @@ COLOR_TOKEN_RE = re.compile(r"^#{1,2}(?:\[[^\]]*\])?[\w:;.#-]*$")
 # A participant or class reference: one quoted string, or one bare name with
 # no whitespace, quotes, arrow heads, colons, brackets, or commas.
 ENDPOINT_RE = re.compile(r'^(?:"[^"]+"|[^\s"\'<>:\[\]{}|,#][^\s"\'<>:\[\]{}|,]*)$')
-SEQ_NOTE_RE = re.compile(
-    r"^note\s+(?P<position>left|right|over|across|top|bottom)\b(?P<rest>[^:]*?)"
-    r"\s*(?::\s*(?P<body>.*))?$",
-    re.I,
+NOTE_HEAD_RE = re.compile(
+    r"^note\s+(?P<position>left|right|over|across|top|bottom)\b(?P<rest>.*)$", re.I
 )
+
+
+def _parse_note(text: str) -> tuple[str, str, str | None] | None:
+    """Return (position, targets, body) for a note; body is None for a block.
+
+    The body starts at the first colon outside double quotes, so a quoted
+    target such as `"A:B"` stays whole.
+    """
+    head = NOTE_HEAD_RE.match(text)
+    if not head:
+        return None
+    rest = head.group("rest")
+    in_quote = False
+    for index, character in enumerate(rest):
+        if character == '"':
+            in_quote = not in_quote
+        elif character == ":" and not in_quote:
+            return head.group("position").casefold(), rest[:index].strip(), rest[index + 1 :].strip()
+    return head.group("position").casefold(), rest.strip(), None
 
 
 def _strip_trailing_colors(text: str) -> str:
@@ -1247,10 +1264,9 @@ def _parse_sequence(diagram: Diagram, lines: list[tuple[int, str]]) -> None:
                 diagram.add_node(target, label, "lifeline")
             diagram.add_activation(target, action)
             continue
-        note = SEQ_NOTE_RE.match(text)
+        note = _parse_note(text)
         if note:
-            position = note.group("position").casefold()
-            rest = note.group("rest").strip()
+            position, rest, note_body = note
             of_prefix = re.match(r"^of\b\s*(.*)$", rest, re.I)
             if of_prefix:
                 rest = of_prefix.group(1)
@@ -1273,8 +1289,8 @@ def _parse_sequence(diagram: Diagram, lines: list[tuple[int, str]]) -> None:
                 "message": message,
                 "line": line_number,
             }
-            if note.group("body") is not None:
-                note_lines = [note.group("body")]
+            if note_body is not None:
+                note_lines = [note_body]
                 close_note()
             else:
                 note_lines = []
@@ -1403,15 +1419,16 @@ def _parse_class(diagram: Diagram, lines: list[tuple[int, str]]) -> None:
                 current = node
                 current_line = line_number
             continue
-        note = re.match(
-            r"^note\s+(?:left|right|top|bottom)(?:\s+of)?\s+([^:]+?)(?:\s*:\s*(.*))?$",
-            text,
-            re.I,
-        )
+        note = _parse_note(text)
         if note:
-            raw_target = _strip_trailing_colors(note.group(1))
-            body = note.group(2)
-            if body is None or not ENDPOINT_RE.match(raw_target):
+            position, rest, body = note
+            of_prefix = re.match(r"^of\b\s*(.*)$", rest, re.I)
+            raw_target = _strip_trailing_colors(of_prefix.group(1) if of_prefix else rest)
+            if (
+                body is None
+                or position in {"over", "across"}
+                or not ENDPOINT_RE.match(raw_target)
+            ):
                 _fail(f"malformed statement at line {line_number}")
             target_token = clean_label(raw_target) or raw_target
             target = diagram.resolve(target_token, scope())
@@ -1419,7 +1436,6 @@ def _parse_class(diagram: Diagram, lines: list[tuple[int, str]]) -> None:
                 diagram.add_node(target, target_token, "class")
             cleaned = clean_label(body)
             if cleaned:
-                position = text.split()[1].casefold()
                 _record_note(
                     diagram,
                     {
