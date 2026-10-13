@@ -699,6 +699,21 @@ def check_quoted_name_cardinality(tmp: Path) -> None:
     ok("cardinality is read next to the arrow, so quoted class names stay names")
 
 
+def check_kind_uses_arrow_parser(tmp: Path) -> None:
+    """Every arrow the parsers accept also decides the kind on its own."""
+    for name, body, kind, count in (
+        ("kind-seq-color.puml", "A -[#red]> B : hi", "sequence", 1),
+        ("kind-seq-color-dashed.puml", "A -[#blue]-> B : hi", "sequence", 1),
+        ("kind-class-color.puml", "Base <|-[#red]- Child", "class", 1),
+        ("kind-class-dotted.puml", "Whole *.. Part", "class", 1),
+        ("kind-class-hint.puml", "Base <|-up- Child", "class", 1),
+    ):
+        diagram = extract_json(write_puml(tmp, name, body))
+        if diagram["kind"] != kind or len(diagram["edges"]) != count:
+            fail(f"{body!r} was detected as {diagram['kind']} with {len(diagram['edges'])} edges")
+    ok("kind detection reads arrows with the same parser as the edge parsers")
+
+
 def check_multi_diagram() -> None:
     payload = json.loads(run_extract([str(MULTI), "--diagram", "1", "--json"]))
     if payload["diagrams_total"] != 2:
@@ -1059,6 +1074,7 @@ def main() -> int:
         check_together_is_layout_only(tmp)
         check_inline_block_comments(tmp)
         check_quoted_name_cardinality(tmp)
+        check_kind_uses_arrow_parser(tmp)
         check_adversarial(tmp)
         check_errors_and_limits(tmp)
         check_legacy_stdout_encoding(tmp)

@@ -687,9 +687,13 @@ def _detect_kind(lines: list[tuple[int, str]]) -> str:
             has_class = True
         if SEQ_DECL_RE.match(text):
             has_seq_decl = True
-        if CLASS_REL_RE.search(text):
+        # The edge parsers' own arrow scanner decides, so any arrow they accept
+        # (`-[#red]>`, `<|-up-`, `*..`) also counts here.
+        class_split = _scan_arrow(text, "class")
+        if class_split and _is_structural_link(class_split[1]):
             has_class_rel = True
-        if SEQ_ARROW_RE.search(text) and ":" in text:
+        seq_split = _scan_arrow(text, "sequence")
+        if seq_split and _partition_unquoted(seq_split[2], ":")[1].strip():
             has_seq_msg = True
         hint = _unsupported_body_kind(text)
         if hint and unsupported is None:
@@ -898,6 +902,13 @@ def _scan_arrow(text: str, kind: str) -> tuple[str, re.Match[str], str] | None:
                 continue  # a headless link needs `--` or `..` set apart from names
         return text[:index].strip(), match, text[match.end() :].strip()
     return None
+
+
+def _is_structural_link(match: re.Match[str]) -> bool:
+    """True for an inheritance, composition, or aggregation head, which only
+    a class diagram draws (a plain `-->` is shared with sequence messages)."""
+    heads = {match.group("left") or "", match.group("right") or ""}
+    return bool(heads & {"<|", "|>", "^", "*", "o"})
 
 
 def _partition_unquoted(text: str, separator: str) -> tuple[str, str]:
