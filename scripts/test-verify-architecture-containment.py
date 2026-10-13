@@ -448,6 +448,43 @@ class ContractTests(unittest.TestCase):
                 else:
                     self.clean(source)
 
+    def test_comments_do_not_fabricate_dash_keywords_units_or_priority(self):
+        for style in (
+            "stroke-dasharray:no/**/ne!important;stroke-dasharray:4,4",
+            "stroke-dasharray:in/**/herit!important;stroke-dasharray:4,4",
+            "stroke-dasharray:none!im/**/portant;stroke-dasharray:4,4",
+            "stroke-dasharray:4/**/4!important;stroke-dasharray:none",
+        ):
+            with self.subTest(style=style, scope="admin"):
+                self.clean(GOOD.replace('stroke-dasharray="4,4"', f'style="{style}"', 1))
+            with self.subTest(style=style, scope="traffic"):
+                self.rejects(GOOD.replace(
+                    'data-scope-id="hub" data-scope-kind="traffic"',
+                    f'data-scope-id="hub" data-scope-kind="traffic" style="{style}"', 1,
+                ), "traffic box must use a solid stroke")
+        for style in (
+            "stroke-dasharray:4/**/px!important;stroke-dasharray:none",
+            "stroke-dasharray:none!/**/important;stroke-dasharray:4,4",
+        ):
+            with self.subTest(style=style, scope="admin"):
+                self.rejects(GOOD.replace('stroke-dasharray="4,4"', f'style="{style}"', 1),
+                             "admin band must use a dashed stroke")
+            with self.subTest(style=style, scope="traffic"):
+                self.clean(GOOD.replace(
+                    'data-scope-id="hub" data-scope-kind="traffic"',
+                    f'data-scope-id="hub" data-scope-kind="traffic" style="{style}"', 1,
+                ))
+
+    def test_comment_scanning_preserves_quoted_strings_escapes_and_rule_bodies(self):
+        source = r'label:"escaped\"/*literal;{}*/";stroke-dasharray:4/**/4!important;stroke-dasharray:none'
+        values = checker.declarations(source)
+        self.assertEqual(values["label"], r'"escaped\"/*literal;{}*/"')
+        self.assertEqual(values["stroke-dasharray"], "4 4")
+        rules = checker.css_rules('rect/**/.bounds {' + source + '}')
+        self.assertEqual(rules, [("rect.bounds", values)])
+        self.assertEqual(checker.declarations("stroke-dasharray:4,4;/* unterminated"),
+                         {"stroke-dasharray": "4,4"})
+
     def test_dasharray_resolves_style_and_inheritance(self):
         self.rejects(GOOD.replace(' stroke-dasharray="4,4"', ' stroke-dasharray="4,4" style="stroke-dasharray: none"', 1),
                      "admin band must use a dashed stroke")

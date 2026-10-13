@@ -167,10 +167,49 @@ def identity_ok(raw: str) -> bool:
     return bool(raw) and ID_RE.fullmatch(raw) is not None
 
 
+def css_without_comments(text: str, *, replacement: str = " ", mask: bool = False) -> str:
+    """Remove actual comments without joining tokens or touching strings.
+
+    A width-preserving mask lets the rule scanner find delimiters while keeping
+    indices into the original declaration body, where comment boundaries matter.
+    """
+    output, quote, index = [], "", 0
+    while index < len(text):
+        char = text[index]
+        if char == "\\":
+            output.append(text[index:index + 2])
+            index += 2
+            continue
+        if quote:
+            output.append(char)
+            if char == quote:
+                quote = ""
+        elif char in "\"'":
+            quote = char
+            output.append(char)
+        elif text.startswith("/*", index):
+            close = text.find("*/", index + 2)
+            end = len(text) if close < 0 else close + 2
+            output.append(" " * (end - index) if mask else replacement)
+            index = end
+            continue
+        else:
+            output.append(char)
+        index += 1
+    return "".join(output)
+
+
 def split_top(text: str, separators: str) -> list[str]:
     """Split on separators outside quotes, brackets and parentheses."""
     parts, depth, quote, start = [], 0, "", 0
+    escaped = False
     for index, char in enumerate(text):
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\":
+            escaped = True
+            continue
         if quote:
             if char == quote:
                 quote = ""
@@ -222,7 +261,7 @@ def declarations(text: str) -> dict[str, str]:
     """Resolve declarations by importance, then by their order in the block."""
     result = {}
     important = set()
-    for part in split_top(re.sub(r"/\*.*?\*/", "", text, flags=re.S), ";"):
+    for part in split_top(css_without_comments(text), ";"):
         name, colon, value = part.partition(":")
         name = name.strip().lower()
         if colon and name and not name.startswith("--"):
@@ -246,11 +285,15 @@ GROUP_AT_RULES = {"media", "supports", "layer", "container", "scope", "document"
 def css_rules(text: str) -> list[tuple[str, dict[str, str]]]:
     """Return (selector list, declarations) for every style rule, recursing into
     conditional group at-rules and skipping @keyframes, @font-face and the like."""
-    text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+    original = text
+    text = css_without_comments(text, mask=True)
     rules: list[tuple[str, dict[str, str]]] = []
     index, start, quote = 0, 0, ""
     while index < len(text):
         char = text[index]
+        if char == "\\":
+            index += 2
+            continue
         if quote:
             if char == quote:
                 quote = ""
@@ -262,6 +305,9 @@ def css_rules(text: str) -> list[tuple[str, dict[str, str]]]:
             depth, close, inner_quote = 1, index + 1, ""
             while close < len(text) and depth:
                 inner = text[close]
+                if inner == "\\":
+                    close += 2
+                    continue
                 if inner_quote:
                     if inner == inner_quote:
                         inner_quote = ""
@@ -272,7 +318,8 @@ def css_rules(text: str) -> list[tuple[str, dict[str, str]]]:
                 elif inner == "}":
                     depth -= 1
                 close += 1
-            prelude, body = text[start:index].strip(), text[index + 1:close - 1]
+            prelude = css_without_comments(original[start:index], replacement="").strip()
+            body = original[index + 1:close - 1]
             if prelude.startswith("@"):
                 name = prelude[1:].split(None, 1)[0].lower() if len(prelude) > 1 else ""
                 if name in GROUP_AT_RULES:
