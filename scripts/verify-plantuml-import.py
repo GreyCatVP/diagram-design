@@ -628,6 +628,51 @@ def check_command_word_messages(tmp: Path) -> None:
     ok("messages and links named after styling commands survive; the commands are still discarded")
 
 
+def check_activation_keyword_colors(tmp: Path) -> None:
+    """`activate A #red` activates A; the color never becomes a participant."""
+    diagram = extract_json(
+        write_puml(tmp, "activate-color.puml", "participant A\nactivate A #red\nA -> A : x\ndeactivate A\ndestroy A")
+    )
+    timeline = [(item["participant"], item["action"]) for item in diagram["activations"]]
+    if [node["id"] for node in diagram["nodes"]] != ["A"] or timeline != [("A", "activate"), ("A", "deactivate"), ("A", "destroy")]:
+        fail(f"activation color became a participant: {[node['id'] for node in diagram['nodes']]} {timeline}")
+    expect_error(
+        [str(write_puml(tmp, "activate-two.puml", "participant A\nactivate A B\nA -> A : x"))],
+        "malformed statement at line 3",
+    )
+    ok("activate/deactivate drop a color and refuse extra names")
+
+
+def check_together_is_layout_only(tmp: Path) -> None:
+    """`together { }` groups classes for layout; it is not a package."""
+    diagram = extract_json(
+        write_puml(
+            tmp,
+            "together.puml",
+            "together {\n  class A\n  class B\n}\npackage p {\n  together {\n    class C\n  }\n}\nA --> B\nB --> p.C",
+        )
+    )
+    nodes = [(node["id"], node["parent"]) for node in diagram["nodes"]]
+    if nodes != [("A", None), ("B", None), ("p", None), ("p.C", "p")]:
+        fail(f"together became a package: {nodes}")
+    ok("together blocks add no container and do not qualify class ids")
+
+
+def check_inline_block_comments(tmp: Path) -> None:
+    """A `/' ... '/` comment inside a line is not label text, and one opened mid-line hides what follows."""
+    diagram = extract_json(
+        write_puml(
+            tmp,
+            "inline-comment.puml",
+            "A -> B : x /' hidden '/\nA -> B : y /' opens\nC -> D : hidden\n'/ B -> A : z",
+        )
+    )
+    edges = [(edge["source"], edge["target"], edge["label"]) for edge in diagram["edges"]]
+    if edges != [("A", "B", "x"), ("A", "B", "y"), ("B", "A", "z")]:
+        fail(f"inline block comment leaked into the diagram: {edges}")
+    ok("inline and mid-line block comments are removed like whole-line ones")
+
+
 def check_multi_diagram() -> None:
     payload = json.loads(run_extract([str(MULTI), "--diagram", "1", "--json"]))
     if payload["diagrams_total"] != 2:
@@ -984,6 +1029,9 @@ def main() -> int:
         check_activation_shortcuts(tmp)
         check_whole_arrows(tmp)
         check_command_word_messages(tmp)
+        check_activation_keyword_colors(tmp)
+        check_together_is_layout_only(tmp)
+        check_inline_block_comments(tmp)
         check_adversarial(tmp)
         check_errors_and_limits(tmp)
         check_legacy_stdout_encoding(tmp)

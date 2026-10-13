@@ -489,11 +489,11 @@ def _split_uml_regions(
                 body = []
             continue
         if comment_start is not None:
-            if "'/" in raw:
+            if not _strip_block_comments(raw, True)[1]:
                 comment_start = None
             body.append(raw)
             continue
-        if stripped.startswith("/'") and "'/" not in stripped[2:]:
+        if not stripped.startswith("'") and _strip_block_comments(raw, False)[1]:
             comment_start = base_line + offset
             body.append(raw)
             continue
@@ -563,25 +563,41 @@ def load_blocks(path: Path) -> list[SourceBlock]:
     return collected
 
 
+def _strip_block_comments(raw: str, in_block: bool) -> tuple[str, bool]:
+    """Remove ``/' ... '/`` spans from one line, wherever they start.
+
+    Returns the visible text and whether a block comment is still open at
+    the end of the line, so a comment opened mid-line hides what follows.
+    """
+    visible: list[str] = []
+    index = 0
+    while index <= len(raw):
+        if in_block:
+            close = raw.find("'/", index)
+            if close == -1:
+                break
+            index = close + 2
+            in_block = False
+            continue
+        opening = raw.find("/'", index)
+        if opening == -1:
+            visible.append(raw[index:])
+            break
+        visible.append(raw[index:opening])
+        index = opening + 2
+        in_block = True
+    return "".join(visible), in_block
+
+
 def _blank_comments(lines: list[str]) -> list[str]:
     prepared: list[str] = []
     in_block = False
     for raw in lines:
-        if in_block:
-            if "'/" in raw:
-                in_block = False
+        if not in_block and raw.strip().startswith("'"):
             prepared.append("")
             continue
-        stripped = raw.strip()
-        if stripped.startswith("/'"):
-            if "'/" not in stripped[2:]:
-                in_block = True
-            prepared.append("")
-            continue
-        if stripped.startswith("'"):
-            prepared.append("")
-            continue
-        prepared.append(raw.rstrip())
+        visible, in_block = _strip_block_comments(raw, in_block)
+        prepared.append(visible.rstrip())
     if in_block:
         _fail("unterminated block comment")
     return prepared
@@ -1199,12 +1215,17 @@ def _parse_sequence(diagram: Diagram, lines: list[tuple[int, str]]) -> None:
         first = lowered.split(maxsplit=1)[0]
         if first in UNSUPPORTED_SEQUENCE:
             _fail(f"unsupported sequence construct: {first}")
-        activate = re.match(r"^(activate|deactivate)\s+(.+)$", text, re.I)
+        activate = re.match(r"^(activate|deactivate|destroy)\s+(.+)$", text, re.I)
         if activate:
             action = activate.group(1).casefold()
-            target = diagram.resolve(clean_label(activate.group(2)))
+            # `activate A #red` colors the bar; the color is not a name.
+            name = _strip_trailing_colors(activate.group(2))
+            if not ENDPOINT_RE.match(name):
+                _fail(f"malformed statement at line {line_number}")
+            label = clean_label(name) or name
+            target = diagram.resolve(label)
             if target not in diagram.node_map:
-                diagram.add_node(target, target, "lifeline")
+                diagram.add_node(target, label, "lifeline")
             diagram.add_activation(target, action)
             continue
         note = SEQ_NOTE_RE.match(text)
@@ -1290,8 +1311,12 @@ def _parse_sequence(diagram: Diagram, lines: list[tuple[int, str]]) -> None:
 def _parse_class(diagram: Diagram, lines: list[tuple[int, str]]) -> None:
     current: Node | None = None
     current_line = 0
-    packages: list[str] = []
-    package_lines: list[int] = []
+    # Open `{` blocks: a package id, or None for a layout-only `together`.
+    blocks: list[tuple[str | None, int]] = []
+
+    def scope() -> list[str]:
+        return [block for block, _line in blocks if block is not None]
+
     skin = _SkinBlocks()
     for line_number, raw in lines:
         text = raw.strip()
@@ -1315,9 +1340,8 @@ def _parse_class(diagram: Diagram, lines: list[tuple[int, str]]) -> None:
             diagram.title = clean_label(title.group(1))
             continue
         if text == "}":
-            if packages:
-                packages.pop()
-                package_lines.pop()
+            if blocks:
+                blocks.pop()
                 continue
             _fail(f"malformed statement at line {line_number}")
         package = re.match(r"^(package|namespace|together)\b\s*(.*)$", text, re.I)
@@ -1326,21 +1350,29 @@ def _parse_class(diagram: Diagram, lines: list[tuple[int, str]]) -> None:
             opens = rest.endswith("{")
             if opens:
                 rest = rest[:-1].strip()
+            if package.group(1).casefold() == "together":
+                # A layout hint that keeps classes near each other: no
+                # container, and the classes keep their enclosing ids.
+                if rest or not opens:
+                    _fail(f"malformed statement at line {line_number}")
+                blocks.append((None, line_number))
+                continue
             display, remainder = _quoted_or_token(rest or package.group(1))
-            name = display or f"group{len(packages) + 1}"
+            enclosing = scope()
+            name = display or f"group{len(enclosing) + 1}"
             if remainder.lower().startswith("as "):
                 name = remainder.split(None, 1)[1].strip() or name
-            parent = packages[-1] if packages else None
+            parent = enclosing[-1] if enclosing else None
             node_id = f"{parent}.{name}" if parent else name
             diagram.add_node(node_id, clean_label(display) or name, "container", parent, True)
             if opens:
-                packages.append(node_id)
-                package_lines.append(line_number)
+                blocks.append((node_id, line_number))
             continue
         header = _parse_classifier_header(text, line_number)
         if header:
             name, label, shape, stereotype, opens, members = header
-            parent = packages[-1] if packages else None
+            enclosing = scope()
+            parent = enclosing[-1] if enclosing else None
             node_id = f"{parent}.{name}" if parent and "." not in name else name
             node = diagram.add_node(node_id, label, shape, parent, stereotype=stereotype)
             node.fields.extend(clean_label(member) for member in members)
@@ -1363,7 +1395,7 @@ def _parse_class(diagram: Diagram, lines: list[tuple[int, str]]) -> None:
             if body is None or not ENDPOINT_RE.match(raw_target):
                 _fail(f"malformed statement at line {line_number}")
             target_token = clean_label(raw_target) or raw_target
-            target = diagram.resolve(target_token, packages)
+            target = diagram.resolve(target_token, scope())
             if target not in diagram.node_map:
                 diagram.add_node(target, target_token, "class")
             cleaned = clean_label(body)
@@ -1397,8 +1429,8 @@ def _parse_class(diagram: Diagram, lines: list[tuple[int, str]]) -> None:
             if reverse:
                 source_name, target_name = target_name, source_name
                 left_card, right_card = right_card, left_card
-            source = diagram.resolve(source_name, packages)
-            target = diagram.resolve(target_name, packages)
+            source = diagram.resolve(source_name, scope())
+            target = diagram.resolve(target_name, scope())
             if source not in diagram.node_map:
                 diagram.add_node(source, source_name, "class")
             if target not in diagram.node_map:
@@ -1427,8 +1459,8 @@ def _parse_class(diagram: Diagram, lines: list[tuple[int, str]]) -> None:
         _fail(f"malformed statement at line {line_number}")
     if current is not None:
         _fail(f"unterminated class body at line {current_line}")
-    if packages:
-        _fail(f"unterminated package at line {package_lines[-1]}")
+    if blocks:
+        _fail(f"unterminated package at line {blocks[-1][1]}")
     skin.check_closed()
 
 
