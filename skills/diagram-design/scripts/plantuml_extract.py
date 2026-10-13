@@ -801,7 +801,7 @@ def _quoted_or_token(text: str) -> tuple[str, str]:
     return match.group(1), match.group(2).strip()
 
 
-COLOR_TOKEN_RE = re.compile(r"^#{1,2}(?:\[[^\]]*\])?[\w:;.#-]*$")
+COLOR_TOKEN_RE = re.compile(r"^#{1,2}(?:\[[^\]]*\])?[\w:;.#/\\|-]*$")
 # A participant or class reference: one quoted string, or one bare name with
 # no whitespace, quotes, arrow heads, colons, brackets, or commas.
 _BARE_NAME = r'[^\s"\'<>:\[\]{}|,#][^\s"\'<>:\[\]{}|,]*'
@@ -865,6 +865,10 @@ def _strip_trailing_colors(text: str) -> str:
     return " ".join(tokens)
 
 
+STEREOTYPE_AT = re.compile(r"<<\s*(?:\(\s*[^)]*\)\s*)?(?P<name>[^<>]*?)\s*>>")
+DECLARED_NAME_AT = re.compile(r'"(?P<quoted>[^"]*)"|(?P<bare>[^\s"<>{}#]+)')
+
+
 def _parse_declaration_tail(
     rest: str,
     line_number: int,
@@ -872,60 +876,75 @@ def _parse_declaration_tail(
     allow_order: bool = False,
     allow_generic: bool = False,
 ) -> tuple[str, str, str, list[str]]:
-    """Parse ``name [as alias] [<<stereo>>] [#color] ...`` fully.
+    """The one declaration tokenizer: participants, classifiers, and packages.
 
-    Returns (node_id, label, stereotype, leftover) where leftover holds an
-    inline ``{ ... }`` body or an opening ``{``. Anything else left over is a
-    malformed statement, so a tail never becomes a node id.
+    Reads, in order: a name (bare or quoted), a generic for classifiers, an
+    optional `as` alias (one bare or quoted token), then styling tokens:
+    `#color` / `#line:...` / `##[style]color`, `<<stereotype>>`, `order N`
+    where allowed, and a final `{` (or an inline `{ ... }` body). Anything
+    else is a malformed statement, so styling never becomes part of an id.
+
+    Returns (node_id, label, stereotype, body) where body is `["{"]` for an
+    opening brace, `["{}", members...]` for an inline body, or `[]`.
     """
-    stereotype = ""
-    stereo = re.search(r"<<\s*(?:\(\s*[^)]*\)\s*)?([^>]*?)\s*>>", rest)
-    if stereo:
-        stereotype = clean_label(stereo.group(1))
-        rest = (rest[: stereo.start()] + " " + rest[stereo.end() :]).strip()
-    body: list[str] = []
-    search_from = rest.find(rest[0], 1) + 1 if rest[:1] in "\"'" else 0
-    brace = rest.find("{", search_from) if search_from or rest[:1] not in "\"'" else -1
-    if brace != -1:
-        tail = rest[brace:].strip()
-        rest = rest[:brace].strip()
-        if tail == "{":
-            body = ["{"]
-        elif tail.endswith("}") and tail.count("{") == 1 and tail.count("}") == 1:
-            inner = tail[1:-1].strip()
-            body = ["{}"] + ([inner] if inner else [])
-        else:
-            _fail(f"malformed statement at line {line_number}")
-    if not rest:
+    def malformed() -> NoReturn:
         _fail(f"malformed statement at line {line_number}")
-    display, remainder = _quoted_or_token(rest)
-    quoted_display = rest[:1] in "\"'"
+
+    text = rest.strip()
+    name = DECLARED_NAME_AT.match(text)
+    if not name or not (name.group("quoted") or name.group("bare")):
+        malformed()
+    quoted_display = name.group("quoted") is not None
+    display = name.group("quoted") if quoted_display else name.group("bare")
+    position = name.end()
     generic = ""
-    if allow_generic and not quoted_display and remainder.startswith("<"):
-        generic, remainder = _split_generic(remainder, line_number)
-    node_id = display
-    label = display
-    as_match = re.match(r"^as\s+(.*)$", remainder, re.I)
-    if as_match:
-        alias_text = as_match.group(1).strip()
-        alias, remainder = _quoted_or_token(alias_text)
-        if not alias:
-            _fail(f"malformed statement at line {line_number}")
-        if alias_text[:1] in "\"'" and not quoted_display:
-            node_id, label = display, alias
+    generic_at = len(text) - len(text[position:].lstrip())
+    if allow_generic and not quoted_display and text.startswith("<", generic_at) and not text.startswith("<<", generic_at):
+        generic, remainder = _split_generic(text[generic_at:], line_number)
+        position = len(text) - len(remainder)
+    node_id, label = display, display
+    alias_match = re.compile(r"\s+as\s+", re.I).match(text, position)
+    if alias_match:
+        alias = DECLARED_NAME_AT.match(text, alias_match.end())
+        if not alias or not (alias.group("quoted") or alias.group("bare")):
+            malformed()
+        if alias.group("quoted") is not None and not quoted_display:
+            node_id, label = display, alias.group("quoted")  # `L as "Long Name"`
         else:
-            node_id = alias
-    tokens = remainder.split()
-    index = 0
-    while index < len(tokens):
-        token = tokens[index]
-        if COLOR_TOKEN_RE.match(token):
-            index += 1
+            node_id = alias.group("quoted") if alias.group("quoted") is not None else alias.group("bare")
+        position = alias.end()
+    stereotypes: list[str] = []
+    body: list[str] = []
+    while True:
+        while position < len(text) and text[position].isspace():
+            position += 1
+        if position >= len(text):
+            break
+        stereo = STEREOTYPE_AT.match(text, position)
+        if stereo:
+            stereotypes.append(clean_label(stereo.group("name")))
+            position = stereo.end()
             continue
-        if allow_order and token.casefold() == "order" and index + 1 < len(tokens) and re.match(r"^-?\d+$", tokens[index + 1]):
-            index += 2
+        if text[position] == "{":
+            tail = text[position:]
+            if tail == "{":
+                body = ["{"]
+            elif tail.endswith("}") and tail.count("{") == 1 and tail.count("}") == 1:
+                inner = tail[1:-1].strip()
+                body = ["{}"] + ([inner] if inner else [])
+            else:
+                malformed()
+            break
+        token = re.compile(r"[^\s{]+").match(text, position)
+        if token and COLOR_TOKEN_RE.match(token.group(0)):
+            position = token.end()
             continue
-        _fail(f"malformed statement at line {line_number}")
+        order = re.compile(r"order\s+-?\d+(?=\s|\{|$)", re.I).match(text, position)
+        if allow_order and order:
+            position = order.end()
+            continue
+        malformed()
+    stereotype = ", ".join(item for item in stereotypes if item)
     # The generic is kept verbatim: markup cleanup would read `<T>` as a tag.
     return node_id, (clean_label(label) or node_id) + generic, stereotype, body
 
@@ -1534,14 +1553,15 @@ def _parse_class(diagram: Diagram, lines: list[tuple[int, str]]) -> None:
                     _fail(f"malformed statement at line {line_number}")
                 blocks.append((None, line_number))
                 continue
-            display, remainder = _quoted_or_token(rest or package.group(1))
+            # Same tokenizer as participants and classes: one name, one alias,
+            # then color and stereotype, and nothing else.
+            name, label, stereotype, body = _parse_declaration_tail(rest, line_number)
+            if body not in ([], ["{}"]):
+                _fail(f"malformed statement at line {line_number}")  # `package p { class A }`
             enclosing = scope()
-            name = display or f"group{len(enclosing) + 1}"
-            if remainder.lower().startswith("as "):
-                name = remainder.split(None, 1)[1].strip() or name
             parent = enclosing[-1] if enclosing else None
             node_id = f"{parent}.{name}" if parent else name
-            diagram.add_node(node_id, clean_label(display) or name, "container", parent, True)
+            diagram.add_node(node_id, label, "container", parent, True, stereotype=stereotype)
             if opens:
                 blocks.append((node_id, line_number))
             continue

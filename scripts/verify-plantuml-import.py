@@ -888,6 +888,61 @@ def check_detection_matches_parsers(tmp: Path) -> None:
     ok(f"kind detection and the parsers agree on every line of {compared} diagrams")
 
 
+def check_declaration_styling(tmp: Path) -> None:
+    """Every declaration kind reads name, alias, color, and stereotype the same way."""
+    diagram = extract_json(
+        write_puml(
+            tmp,
+            "decl-sequence.puml",
+            'participant "Pay API" as pay #orange\nactor User <<human>>\n'
+            'database "Ledger DB" as db <<store>> #line:red;line.dashed\nqueue Q ##[dashed]blue <<bus>> order 3\n'
+            "User -> pay : buy\npay -> db : write\npay -> Q : emit",
+        )
+    )
+    nodes = [(n["id"], n["label"], n["shape"], n["stereotype"]) for n in diagram["nodes"]]
+    if nodes != [
+        ("pay", "Pay API", "lifeline", ""),
+        ("User", "User", "actor", "human"),
+        ("db", "Ledger DB", "lifeline", "store"),
+        ("Q", "Q", "lifeline", "bus"),
+    ]:
+        fail(f"participant styling leaked into names: {nodes}")
+    diagram = extract_json(
+        write_puml(
+            tmp,
+            "decl-class.puml",
+            'package "Billing" as billing #orange {\n  class User #pink\n}\n'
+            "namespace core <<Folder>> #EEE {\n  interface Store <<port>> #line:blue\n}\n"
+            'abstract class "Base Account" as Base <<entity>> #pink {\n  +id\n}\n'
+            "enum Kind <<code>>\nbilling.User --> Session\nbilling.User --> core.Store\nBase --> Kind",
+        )
+    )
+    nodes = [(n["id"], n["label"], n["shape"], n["parent"], n["stereotype"]) for n in diagram["nodes"]]
+    expected = [
+        ("billing", "Billing", "container", None, ""),
+        ("billing.User", "User", "class", "billing", ""),
+        ("core", "core", "container", None, "Folder"),
+        ("core.Store", "Store", "interface", "core", "port"),
+        ("Base", "Base Account", "abstract", None, "entity"),
+        ("Kind", "Kind", "enum", None, "code"),
+        ("Session", "Session", "class", None, ""),
+    ]
+    if nodes != expected:
+        fail(f"class or package styling leaked into names: {nodes}")
+    pairs = [(e["source"], e["target"]) for e in diagram["edges"]]
+    if pairs != [("billing.User", "Session"), ("billing.User", "core.Store"), ("Base", "Kind")]:
+        fail(f"a styled package redirected its links: {pairs}")
+    for name, body, line in (
+        ("decl-p-junk.puml", "participant A #red extra\nA -> A : x", 2),
+        ("decl-c-junk.puml", "class A <<x>> extra\nclass B\nA --> B", 2),
+        ("decl-pkg-junk.puml", "package p as q extra {\n  class A\n}", 2),
+        ("decl-pkg-two-alias.puml", 'package "P" as p q {\n  class A\n}', 2),
+        ("decl-ns-junk.puml", "namespace n #red junk {\n  class A\n}", 2),
+    ):
+        expect_error([str(write_puml(tmp, name, body))], f"malformed statement at line {line}")
+    ok("declarations read one name and alias, drop color and keep stereotype, and reject leftovers")
+
+
 def check_multi_diagram() -> None:
     payload = json.loads(run_extract([str(MULTI), "--diagram", "1", "--json"]))
     if payload["diagrams_total"] != 2:
@@ -1255,6 +1310,7 @@ def main() -> int:
         check_keyword_named_endpoints(tmp)
         check_fences_follow_markdown(tmp)
         check_command_named_kind(tmp)
+        check_declaration_styling(tmp)
         check_adversarial(tmp)
         check_errors_and_limits(tmp)
         check_legacy_stdout_encoding(tmp)
