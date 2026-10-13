@@ -828,6 +828,10 @@ def _diagram_css_leaf(rule: _CssRule, root_id: str, names: dict[str, str], origi
         pending_nested = list(rule.children)
         while pending_nested:
             nested = pending_nested.pop()
+            # Braces in a custom property's value carry tokens, not CSS rules.
+            # Do not treat their token subtree as nested animation declarations.
+            if re.fullmatch(r"--[\w-]+\s*:", CSS_COMMENT_RE.sub("", nested.selector).strip()):
+                continue
             pending_nested.extend(nested.children)
             # Scan direct declarations once; the last prefix segment is the
             # next child selector, not a declaration. Descendants are queued.

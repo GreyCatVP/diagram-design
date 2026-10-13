@@ -670,6 +670,23 @@ class ExportSvgStandaloneTests(unittest.TestCase):
             self.assertIn('unsupported nested CSS animation declaration', errors.getvalue())
             self.assertNotIn('Traceback', errors.getvalue())
 
+    def test_custom_property_value_blocks_are_not_nested_animation_rules(self) -> None:
+        for value in ('{animation:pulse 1s;}', '{ .nested {animation-name:pulse;} }'):
+            with self.subTest(value=value):
+                html = '<style>@keyframes pulse {to {opacity:1}} .paint {'
+                html += '--unused:' + value + ';fill:red;animation:pulse 1s;}</style>'
+                html += '<svg viewBox="0 0 40 40"><rect class="paint"/></svg>'
+                result = self.mod.export_svg_document(html, Path("custom-block.html"))
+                css = embedded_css(result)
+                self.assertIn('--unused:' + value, css)
+                self.assertIn('animation:custom-block-root-pulse 1s', css)
+                ET.fromstring(result)
+        html = '<style>@keyframes pulse {to {opacity:1}} .paint {'
+        html += '--unused:{animation:pulse 1s;}; & {animation:pulse 1s;}}</style>'
+        html += '<svg viewBox="0 0 40 40"><rect class="paint"/></svg>'
+        with self.assertRaisesRegex(ValueError, 'unsupported nested CSS animation declaration'):
+            self.mod.export_svg_document(html, Path("custom-block.html"))
+
     def test_nested_layer_statement_does_not_hide_animation_declaration(self) -> None:
         for declaration in ('animation:pulse 1s;', '-webkit-animation-name:pulse;'):
             with self.subTest(declaration=declaration), tempfile.TemporaryDirectory() as directory:
