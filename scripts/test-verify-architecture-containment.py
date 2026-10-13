@@ -249,6 +249,42 @@ class ContractTests(unittest.TestCase):
         source = GOOD.replace("body {margin:0}", "body {margin:0} .card li { position: relative; left: 0; transform: none }", 1)
         self.clean(source)
 
+    def test_page_only_style_rules_are_clean(self):
+        # The full selector is matched against the element and its real
+        # ancestors, so rules that cannot reach a checked element pass.
+        for rule in (":root { height: 100% }",
+                     "html, body { height: 100% }",
+                     ".card rect { x: 0 }",
+                     "svg { width: 100% }",
+                     "#other rect { transform: translate(4px, 0) }",
+                     "body > rect { x: 0 }",
+                     "rect::after { transform: scale(2) }",
+                     'g[data-kind="vm"] { translate: 0 8px }'):
+            with self.subTest(rule=rule):
+                self.clean(GOOD.replace("body {margin:0}", "body {margin:0} " + rule, 1))
+
+    def test_style_rule_through_page_ancestor(self):
+        wrapped = GOOD.replace("<svg data-grammar", '<div class="card"><svg data-grammar', 1)
+        wrapped = wrapped.replace("</svg>", "</svg></div>", 1)
+        self.clean(wrapped)
+        for rule in (".card rect { x: 0 }",
+                     "body > .card rect { x: 0 }",
+                     'div.card > svg > g[data-kind="managed"] { transform: translate(0, 264px) }',
+                     "h1 + .card rect { x: 0 }",
+                     ":not(.other) rect { x: 0 }"):
+            with self.subTest(rule=rule):
+                self.rejects(wrapped.replace("body {margin:0}", "body {margin:0} " + rule, 1),
+                             "moves checked bounds")
+
+    def test_child_combinator_outside_svg_survives_implied_end_tags(self):
+        # A browser closes the <p> at <div>, so body > .card matches; the
+        # stdlib parser nests the div in the p, so the checker must not trust it.
+        source = GOOD.replace("<svg data-grammar", '<p>intro<div class="card"><svg data-grammar', 1)
+        source = source.replace("</svg>", "</svg></div>", 1)
+        self.clean(source)
+        self.rejects(source.replace("body {margin:0}", "body {margin:0} body > .card rect { x: 0 }", 1),
+                     "moves checked bounds")
+
     # Item 2: a scope or node enclosed by another scope must declare its
     # parent, and that parent must be the innermost enclosing scope.
     def test_missing_parent_on_enclosed_scope(self):

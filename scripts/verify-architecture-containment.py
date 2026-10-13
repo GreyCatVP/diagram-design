@@ -263,25 +263,172 @@ def moving_property(name: str, value: str, inline: bool) -> bool:
     return inline and (name in BOX_PROPERTIES or name.startswith(("margin-", "inset-")))
 
 
-def last_compound(selector: str) -> str:
-    return split_top(selector.strip(), " >+~\t\n")[-1].strip()
+LEGACY_PSEUDO_ELEMENTS = {"before", "after", "first-line", "first-letter"}
+ATTRIBUTE_RE = re.compile(r"""\[\s*([\w-]+)\s*(?:([~|^$*]?=)\s*("[^"]*"|'[^']*'|[^\s\]]+)\s*([iIsS])?\s*)?\]\Z""")
 
 
-def may_match(compound: str, node: Node) -> bool:
-    """Conservative: True unless the subject compound clearly cannot match node."""
-    if "::" in compound or re.search(r":(?:before|after|first-line|first-letter|marker)\b", compound, re.I):
+def balanced_end(text: str, index: int, opening: str, closing: str) -> int:
+    """Index just past the bracket that closes text[index], honouring quotes."""
+    depth, quote = 0, ""
+    for position in range(index, len(text)):
+        char = text[position]
+        if quote:
+            if char == quote:
+                quote = ""
+        elif char in "\"'":
+            quote = char
+        elif char == opening:
+            depth += 1
+        elif char == closing:
+            depth -= 1
+            if depth == 0:
+                return position + 1
+    return len(text)
+
+
+def selector_parts(selector: str) -> list[tuple[str, str]] | None:
+    """Split one complex selector into (combinator, compound) pairs, left to
+    right; the first combinator is empty. None when it cannot be parsed."""
+    parts: list[tuple[str, str]] = []
+    combinator, current, index = "", "", 0
+    text = selector.strip()
+    while index < len(text):
+        char = text[index]
+        if char in "([":
+            close = balanced_end(text, index, char, ")" if char == "(" else "]")
+            current += text[index:close]
+            index = close
+            continue
+        if char in "\"'":
+            return None
+        if char.isspace() or char in ">+~":
+            if current:
+                parts.append((combinator, current))
+                current, combinator = "", " "
+            if char in ">+~":
+                if combinator not in ("", " "):
+                    return None
+                combinator = char
+            index += 1
+            continue
+        current += char
+        index += 1
+    if not current:
+        return None
+    parts.append((combinator, current))
+    return parts
+
+
+def match_attribute(token: str, node: Node) -> bool | None:
+    match = ATTRIBUTE_RE.match(token)
+    if not match:
+        return None
+    name, operator, raw, flag = match.groups()
+    value = node.attrs.get(name.lower())
+    if value is None:
         return False
-    if "(" in compound:
+    if not operator:
         return True
-    tag = re.match(r"[A-Za-z][\w-]*|\*", compound)
-    if tag and tag.group(0) != "*" and tag.group(0).lower() != node.tag:
+    expected = raw[1:-1] if raw[:1] in "\"'" else raw
+    if flag and flag.lower() == "i":
+        value, expected = value.lower(), expected.lower()
+    if operator == "=":
+        return value == expected
+    if operator == "~=":
+        return expected in value.split()
+    if operator == "|=":
+        return value == expected or value.startswith(expected + "-")
+    if operator == "^=":
+        return bool(expected) and value.startswith(expected)
+    if operator == "$=":
+        return bool(expected) and value.endswith(expected)
+    return bool(expected) and expected in value
+
+
+def match_compound(compound: str, node: Node) -> bool | None:
+    """True or False when every part can be evaluated; None (may match) when a
+    part such as :not() or :hover cannot. Any definite failure wins."""
+    if "\\" in compound or "|" in compound.split("[")[0]:
+        return None
+    results: list[bool | None] = []
+    index = 0
+    head = re.match(r"\*|[A-Za-z][\w-]*", compound)
+    if head:
+        results.append(head.group(0) == "*" or head.group(0).lower() == node.tag)
+        index = head.end()
+    while index < len(compound):
+        char = compound[index]
+        if char in ".#":
+            name = re.match(r"[\w-]+", compound[index + 1:])
+            if not name:
+                return None if False not in results else False
+            value = name.group(0)
+            if char == ".":
+                results.append(value in node.attrs.get("class", "").split())
+            else:
+                results.append(node.attrs.get("id") == value)
+            index += 1 + len(value)
+        elif char == "[":
+            close = balanced_end(compound, index, "[", "]")
+            results.append(match_attribute(compound[index:close], node))
+            index = close
+        elif char == ":":
+            element = compound.startswith("::", index)
+            name = re.match(r"[\w-]+", compound[index + (2 if element else 1):])
+            if not name:
+                return None if False not in results else False
+            label = name.group(0).lower()
+            index += (2 if element else 1) + len(name.group(0))
+            if index < len(compound) and compound[index] == "(":
+                index = balanced_end(compound, index, "(", ")")
+            if element or label in LEGACY_PSEUDO_ELEMENTS:
+                results.append(False)  # pseudo-elements never box SVG graphics
+            elif label == "root":
+                results.append(node.parent is not None and node.parent.tag == "document")
+            else:
+                results.append(None)
+        else:
+            return None if False not in results else False
+    if False in results:
         return False
-    classes = set(node.attrs.get("class", "").split())
-    if any(name not in classes for name in re.findall(r"\.([\w-]+)", compound)):
+    return True if all(result is True for result in results) else None
+
+
+def selector_may_match(parts: list[tuple[str, str]], index: int, node: Node | None, element: Node) -> bool:
+    """Right-to-left match of parts[:index + 1] ending at node. node is None for
+    a sibling we do not evaluate; element then supplies the shared parent."""
+    if node is not None and match_compound(parts[index][1], node) is False:
         return False
-    if any(name != node.attrs.get("id") for name in re.findall(r"#([\w-]+)", compound)):
-        return False
-    return all(name.lower() in node.attrs for name in re.findall(r"\[\s*([\w:-]+)", compound))
+    if index == 0:
+        return True
+    combinator = parts[index][0]
+    anchor = node if node is not None else element
+    if combinator in "+~":
+        # Sibling selectors are honoured conservatively: the sibling compound
+        # is assumed to match and the rest is checked against the shared parent.
+        return selector_may_match(parts, index - 1, None, anchor)
+    candidates: list[Node] = []
+    current = anchor.parent
+    while current is not None and current.tag != "document":
+        candidates.append(current)
+        if combinator == ">" and in_svg(current):
+            break
+        current = current.parent
+    return any(selector_may_match(parts, index - 1, candidate, candidate) for candidate in candidates)
+
+
+def in_svg(node: Node) -> bool:
+    """SVG nesting is checked for malformation, so a parent inside the SVG is
+    exact. HTML around it may rely on implied end tags, so a child combinator
+    that reaches outside the SVG is treated as a descendant combinator."""
+    return node.tag == "svg" or any(item.tag == "svg" for item in node.ancestors())
+
+
+def rule_may_match(selector: str, node: Node) -> bool:
+    parts = selector_parts(selector)
+    if parts is None:
+        return True
+    return selector_may_match(parts, len(parts) - 1, node, node)
 
 
 def dash_value(raw: str) -> bool | None:
@@ -627,8 +774,7 @@ def check_moved_geometry(scanner: Scanner, root: Node, checked: list[Node], fail
             if not moving:
                 continue
             for selector in split_top(selector_list, ","):
-                compound = last_compound(selector)
-                if compound and any(may_match(compound, node) for node in affected):
+                if selector.strip() and any(rule_may_match(selector, node) for node in affected):
                     effect = ("overrides the checked stroke-dasharray" if moving == ["stroke-dasharray"]
                               else MOVES)
                     fail(style, f'<style> rule "{selector.strip()}" sets {", ".join(moving)} on a checked '
