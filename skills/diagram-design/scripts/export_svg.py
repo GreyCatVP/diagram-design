@@ -59,7 +59,18 @@ SVG_TYPE_PREFIX_RE = re.compile(r"^svg(?![\w-])", re.IGNORECASE)
 # `stroke="currentColor"` reads `color`, and text without its own font rule
 # reads `font-family`.
 BODY_INHERITED_RE = re.compile(r"(?:^|;)\s*(color|font-family)\s*:\s*([^;]+)", re.IGNORECASE)
-CSS_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
+# Strings and escapes consume their comment-looking text before comments do.
+CSS_COMMENT_OR_LITERAL_RE = re.compile(
+    r'''"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|\\[\s\S]|/\*.*?\*/''',
+    re.DOTALL,
+)
+
+
+def strip_css_comments(css: str) -> str:
+    """Remove CSS comments while preserving quoted and escaped literals."""
+    return CSS_COMMENT_OR_LITERAL_RE.sub(
+        lambda token: "" if token.group(0).startswith("/*") else token.group(0), css
+    )
 
 # HTML-only attribute syntax that strict XML rejects: a valueless attribute
 # (`<g data-motion-item>`) or an unquoted value (`data-step=1`).
@@ -636,7 +647,7 @@ def diagram_css_from_html(html: str, root_id: str, original_root_id: str = "") -
             block = CDATA_SECTION_RE.sub(lambda match: match.group(1), block)
         # A comment before a rule would otherwise become part of its selector
         # (`/* Tokens */ :root` is not recognised as `:root`).
-        block = CSS_COMMENT_RE.sub("", block)
+        block = strip_css_comments(block)
         for match in RULE_RE.finditer(block):
             selector = match.group(1).strip()
             if original_root_id:
@@ -889,7 +900,7 @@ def namespace_defs_ids(svg: str, prefix: str) -> str:
 
 def _decoded_css_property_text(style: str) -> str:
     """Read opacity spellings conservatively without changing carried CSS."""
-    style = CSS_COMMENT_RE.sub("", html_entities.unescape(style))
+    style = strip_css_comments(html_entities.unescape(style))
 
     def escape(match: re.Match[str]) -> str:
         hexadecimal, literal = match.groups()
@@ -1003,7 +1014,7 @@ def normalize_rgba_presentation_attrs(svg: str) -> str:
                 re.search(rf"(?:^|[;{{])\s*{prop}\s*:", _decoded_css_property_text(rule.group(2)), re.I)
                 and _css_paint_may_target_descendants(rule.group(1), [element] + children)
                 for style in STYLE_BLOCK_RE.findall(svg)
-                for rule in RULE_RE.finditer(CSS_COMMENT_RE.sub("", style))
+                for rule in RULE_RE.finditer(strip_css_comments(style))
             )
             if inline_paint or descendant_paint or stylesheet_paint or opacity_name in css_opacity or opacity_counts[opacity_name] > int(opacity_name in values):
                 continue
@@ -1035,7 +1046,7 @@ def has_diagram_stylesheet(svg: str) -> bool:
     """True when a <style> block contains CSS rules beyond the fonts @import."""
     for block in STYLE_BLOCK_RE.findall(svg):
         stripped = re.sub(r"@import\b[^;]*;", "", block, flags=re.IGNORECASE)
-        stripped = re.sub(r"/\*.*?\*/", "", stripped, flags=re.DOTALL)
+        stripped = strip_css_comments(stripped)
         if RULE_RE.search(stripped):
             return True
     return False
