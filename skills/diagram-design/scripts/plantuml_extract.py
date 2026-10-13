@@ -382,15 +382,40 @@ class SourceBlock:
     error: str | None = None
 
 
+# Markup that PlantUML Creole or HTML would interpret. Only these tags are
+# stripped, so `Box<T>`, `List<Order>`, and `Map<K, V>` keep their type
+# parameters. Single-letter tags match lowercase only so a type parameter
+# such as `<B>` or `<A, B>` stays text.
+_MARKUP_TAGS = (
+    "abbr|applet|audio|back|base|big|blockquote|body|br|button|canvas|center|"
+    "code|color|del|div|em|embed|font|form|frame|frameset|h[1-6]|head|hr|html|"
+    "iframe|img|input|ins|kbd|label|li|link|mark|math|meta|noscript|object|ol|"
+    "option|plain|pre|script|select|size|small|source|span|strike|strong|style|"
+    "sub|sup|svg|table|td|template|textarea|th|title|tr|tt|ul|video|wbr|xmp"
+)
+MARKUP_TAG_RE = re.compile(
+    r"</?(?:(?i:" + _MARKUP_TAGS + r")|[abipqsuw])(?=[\s/>:=])[^<>]*>"
+    r"|<[$&][^<>]*>"
+)
+
+
 def clean_label(value: str) -> str:
-    """Flatten PlantUML / Creole / HTML label markup without interpreting it."""
+    """Flatten PlantUML / Creole / HTML label markup without interpreting it.
+
+    Entities are decoded before tags are stripped, and stripping repeats until
+    nothing changes, so `&lt;script&gt;` or a split tag cannot reassemble a
+    tag in the output. Angle-bracket text that is not markup is kept.
+    """
     text = value.strip()
     if len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
         text = text[1:-1]
     text = text.replace("\\n", "\n")
-    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
-    text = re.sub(r"<[^>]+>", "", text)
     text = html.unescape(text)
+    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
+    previous = None
+    while previous != text:
+        previous = text
+        text = MARKUP_TAG_RE.sub("", text)
     text = re.sub(r"\*\*(.*?)\*\*", r"\1", text)
     text = re.sub(r"__(.*?)__", r"\1", text)
     text = re.sub(r"//(.*?)//", r"\1", text)
@@ -708,12 +733,10 @@ def _parse_declaration_tail(
     display, remainder = _quoted_or_token(rest)
     quoted_display = rest[:1] in "\"'"
     generic = ""
-    if allow_generic and not quoted_display:
-        generic_match = re.match(r"^(<[^<>]*>)\s*(.*)$", remainder)
-        if generic_match:
-            generic, remainder = generic_match.group(1), generic_match.group(2).strip()
+    if allow_generic and not quoted_display and remainder.startswith("<"):
+        generic, remainder = _split_generic(remainder, line_number)
     node_id = display
-    label = display + generic
+    label = display
     as_match = re.match(r"^as\s+(.*)$", remainder, re.I)
     if as_match:
         alias_text = as_match.group(1).strip()
@@ -735,7 +758,21 @@ def _parse_declaration_tail(
             index += 2
             continue
         _fail(f"malformed statement at line {line_number}")
-    return node_id, clean_label(label) or node_id, stereotype, body
+    # The generic is kept verbatim: markup cleanup would read `<T>` as a tag.
+    return node_id, (clean_label(label) or node_id) + generic, stereotype, body
+
+
+def _split_generic(text: str, line_number: int) -> tuple[str, str]:
+    """Split a balanced ``<...>`` type parameter list from the front of *text*."""
+    depth = 0
+    for index, character in enumerate(text):
+        if character == "<":
+            depth += 1
+        elif character == ">":
+            depth -= 1
+            if depth == 0:
+                return text[: index + 1], text[index + 1 :].strip()
+    _fail(f"malformed statement at line {line_number}")
 
 
 def _parse_classifier_header(

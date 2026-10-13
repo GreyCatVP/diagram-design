@@ -405,6 +405,39 @@ def check_unselected_comment_isolated(tmp: Path) -> None:
     ok("an unclosed block comment fails only its own block")
 
 
+def check_generics_survive(tmp: Path) -> None:
+    """Type parameters are content, not markup, in classes, members, and messages."""
+    source = write_puml(
+        tmp,
+        "generics.puml",
+        "class Box<T>\nclass Ref<a>\nclass Map<K, V> {\n  - entries: List<Entry<K, V>>\n  + get(key: K): Optional<V>\n}\n"
+        "Box --> Map\nRef --> Box",
+    )
+    diagram = extract_json(source)
+    nodes = {node["id"]: node for node in diagram["nodes"]}
+    labels = [nodes.get(key, {}).get("label") for key in ("Box", "Ref", "Map")]
+    if labels != ["Box<T>", "Ref<a>", "Map<K, V>"]:
+        fail(f"generic class parameters were erased: {diagram['nodes']}")
+    if nodes["Map"]["fields"] != ["- entries: List<Entry<K, V>>", "+ get(key: K): Optional<V>"]:
+        fail(f"generic member types were erased: {nodes['Map']['fields']}")
+    digest = run_extract([str(source)])
+    if r"| Box | Box&lt;T&gt; | class |" not in digest:
+        fail(f"digest dropped or failed to escape the generic parameter: {digest!r}")
+    diagram = extract_json(
+        write_puml(
+            tmp,
+            "generic-message.puml",
+            "A -> B : load(): List<Order>\n"
+            "note over A: <SCRIPT>x</SCRIPT> &lt;script&gt;y <b>bold</b> <color:red>red</color>",
+        )
+    )
+    if diagram["edges"][0]["label"] != "load(): List<Order>":
+        fail(f"generic text in a message label was erased: {diagram['edges'][0]}")
+    if "<script" in json.dumps(diagram).casefold() or "x y bold red" not in diagram["notes"][0]:
+        fail(f"markup cleanup let a script tag through or lost text: {diagram['notes']}")
+    ok("generic parameters survive in labels, members, messages, and the digest")
+
+
 def check_multi_diagram() -> None:
     payload = json.loads(run_extract([str(MULTI), "--diagram", "1", "--json"]))
     if payload["diagrams_total"] != 2:
@@ -755,6 +788,7 @@ def main() -> int:
         check_kind_detection_skips_bodies(tmp)
         check_digest_edges_use_ids(tmp)
         check_unselected_comment_isolated(tmp)
+        check_generics_survive(tmp)
         check_adversarial(tmp)
         check_errors_and_limits(tmp)
         check_legacy_stdout_encoding(tmp)
