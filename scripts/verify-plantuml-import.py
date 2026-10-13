@@ -685,12 +685,12 @@ def check_quoted_name_cardinality(tmp: Path) -> None:
         write_puml(
             tmp,
             "quoted-card.puml",
-            'class "My A" as MA\nclass "My B" as MB\n"My A" "1" --> "many" "My B"',
+            'class "My A"\nclass "My B"\n"My A" "1" --> "many" "My B"',
         )
     )
     edge = diagram["edges"][0]
     got = (edge["source"], edge["target"], edge["source_cardinality"], edge["target_cardinality"])
-    if [node["id"] for node in diagram["nodes"]] != ["MA", "MB"] or got != ("MA", "MB", "1", "many"):
+    if [node["id"] for node in diagram["nodes"]] != ["My A", "My B"] or got != ("My A", "My B", "1", "many"):
         fail(f"a quoted class name swapped places with its cardinality: {got}")
     expect_error(
         [str(write_puml(tmp, "card-outside.puml", 'class A\nclass B\n"1" A --> B'))],
@@ -720,19 +720,53 @@ def check_quoted_note_targets(tmp: Path) -> None:
         write_puml(
             tmp,
             "note-quoted-colon.puml",
-            'participant "A:B" as A\nparticipant C\nA -> C : x\nnote over "A:B": text\n'
+            'participant "A:B"\nparticipant C\n"A:B" -> C : x\nnote over "A:B": text\n'
             'note over "A:B", C: both\nnote right of "A:B"\n  multi: line\nend note',
         )
     )
     placements = [(item["text"], item["participants"]) for item in diagram["note_details"]]
-    if placements != [("text", ["A"]), ("both", ["A", "C"]), ("multi: line", ["A"])]:
+    if placements != [("text", ["A:B"]), ("both", ["A:B", "C"]), ("multi: line", ["A:B"])]:
         fail(f"a colon in a quoted note target split the note: {placements}")
     diagram = extract_json(
-        write_puml(tmp, "class-note-quoted.puml", 'class "Svc:Main" as S\nnote right of "Svc:Main" : hi: there')
+        write_puml(tmp, "class-note-quoted.puml", 'class "Svc:Main"\nnote right of "Svc:Main" : hi: there')
     )
-    if [(item["text"], item["participants"]) for item in diagram["note_details"]] != [("hi: there", ["S"])]:
+    if [(item["text"], item["participants"]) for item in diagram["note_details"]] != [("hi: there", ["Svc:Main"])]:
         fail(f"a colon in a quoted class note target split the note: {diagram['note_details']}")
     ok("note bodies split at the first colon outside quotes")
+
+
+def check_endpoint_codes(tmp: Path) -> None:
+    """Endpoints resolve by their raw PlantUML code; cleanup only shapes the label.
+
+    PlantUML looks a participant or class up by code: a bare name, or the text
+    inside quotes. A display name given with `as` is a label, not a second code.
+    """
+    diagram = extract_json(
+        write_puml(
+            tmp,
+            "endpoint-codes.puml",
+            'participant "A" as X\nparticipant A\nX -> "A" : by code\n"**A**" -> X : formatted\n'
+            '"Long" as L -> X : inline long\nX -> M as "Mid" : inline code\nL -> "Long" : quoted code\n'
+            "C <- D : reverse",
+        )
+    )
+    nodes = [(node["id"], node["label"]) for node in diagram["nodes"]]
+    expected_nodes = [
+        ("X", "A"), ("A", "A"), ("**A**", "A"), ("L", "Long"), ("M", "Mid"), ("Long", "Long"), ("C", "C"), ("D", "D"),
+    ]
+    if nodes != expected_nodes:
+        fail(f"sequence endpoints resolved by cleaned or display text: {nodes}")
+    pairs = [(edge["source"], edge["target"]) for edge in diagram["edges"]]
+    if pairs != [("X", "A"), ("**A**", "X"), ("L", "X"), ("X", "M"), ("L", "Long"), ("D", "C")]:
+        fail(f"sequence messages connected the wrong participants: {pairs}")
+    diagram = extract_json(
+        write_puml(tmp, "class-codes.puml", 'class "A" as X\nclass A\nX --> "A"\n"**A**" --> X')
+    )
+    nodes = [(node["id"], node["label"]) for node in diagram["nodes"]]
+    pairs = [(edge["source"], edge["target"]) for edge in diagram["edges"]]
+    if nodes != [("X", "A"), ("A", "A"), ("**A**", "A")] or pairs != [("X", "A"), ("**A**", "X")]:
+        fail(f"class relationships resolved by cleaned or display text: {nodes} {pairs}")
+    ok("endpoints resolve by raw code, inline `as` declarations work, labels are cleaned separately")
 
 
 def check_multi_diagram() -> None:
@@ -1097,6 +1131,7 @@ def main() -> int:
         check_quoted_name_cardinality(tmp)
         check_kind_uses_arrow_parser(tmp)
         check_quoted_note_targets(tmp)
+        check_endpoint_codes(tmp)
         check_adversarial(tmp)
         check_errors_and_limits(tmp)
         check_legacy_stdout_encoding(tmp)

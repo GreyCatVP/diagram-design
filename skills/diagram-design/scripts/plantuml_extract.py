@@ -740,7 +740,36 @@ def _quoted_or_token(text: str) -> tuple[str, str]:
 COLOR_TOKEN_RE = re.compile(r"^#{1,2}(?:\[[^\]]*\])?[\w:;.#-]*$")
 # A participant or class reference: one quoted string, or one bare name with
 # no whitespace, quotes, arrow heads, colons, brackets, or commas.
-ENDPOINT_RE = re.compile(r'^(?:"[^"]+"|[^\s"\'<>:\[\]{}|,#][^\s"\'<>:\[\]{}|,]*)$')
+_BARE_NAME = r'[^\s"\'<>:\[\]{}|,#][^\s"\'<>:\[\]{}|,]*'
+ENDPOINT_RE = re.compile(rf'^(?:"[^"]+"|{_BARE_NAME})$')
+# An arrow end may declare a participant inline: `"Long Name" as L` or
+# `L as "Long Name"` (code L, display "Long Name").
+INLINE_DECLARATION_RE = re.compile(
+    rf'^(?:"(?P<long>[^"]+)"\s*as\s+(?P<long_code>{_BARE_NAME})'
+    rf'|(?P<code>{_BARE_NAME})\s+as\s*"(?P<code_long>[^"]+)")$',
+    re.I,
+)
+
+
+def _endpoint_code(token: str, *, allow_as: bool = False) -> tuple[str, str] | None:
+    """Return (code, display) for a reference, or None when it is not one name.
+
+    PlantUML looks participants and classes up by code: a bare name, or the
+    text inside quotes, exactly as written. Markup cleanup applies to the
+    display label only, so `"**A**"` is its own participant, not `A`.
+    """
+    text = token.strip()
+    if allow_as:
+        inline = INLINE_DECLARATION_RE.match(text)
+        if inline:
+            if inline.group("long") is not None:
+                return inline.group("long_code"), inline.group("long")
+            return inline.group("code"), inline.group("code_long")
+    if not ENDPOINT_RE.match(text):
+        return None
+    if text.startswith('"'):
+        return text[1:-1], text[1:-1]
+    return text, text
 NOTE_HEAD_RE = re.compile(
     r"^note\s+(?P<position>left|right|over|across|top|bottom)\b(?P<rest>.*)$", re.I
 )
@@ -1152,16 +1181,20 @@ def _parse_sequence(diagram: Diagram, lines: list[tuple[int, str]]) -> None:
             return []
         resolved_ids: list[str] = []
         for token in _split_unquoted(text, ","):
-            name = token.strip()
-            if not ENDPOINT_RE.match(name):
-                _fail(f"malformed statement at line {line_number}")
-            label = clean_label(name) or name
-            node_id = diagram.resolve(label)
-            if node_id not in diagram.node_map:
-                diagram.add_node(node_id, label, "lifeline")
+            node_id = lifeline(token, f"malformed statement at line {line_number}")
             if node_id not in resolved_ids:
                 resolved_ids.append(node_id)
         return resolved_ids
+
+    def lifeline(token: str, error: str, *, allow_as: bool = False) -> str:
+        """Get or create the participant a reference names, by its code."""
+        parsed = _endpoint_code(token, allow_as=allow_as)
+        if parsed is None:
+            _fail(error)
+        code, display = parsed
+        if code not in diagram.node_map:
+            diagram.add_node(code, clean_label(display) or code, "lifeline")
+        return code
 
     for line_number, raw in lines:
         text = raw.strip()
@@ -1186,8 +1219,6 @@ def _parse_sequence(diagram: Diagram, lines: list[tuple[int, str]]) -> None:
         if participant:
             node_id, label, shape, stereotype = participant
             diagram.add_node(node_id, label, shape, stereotype=stereotype)
-            if node_id != label:
-                diagram.alias(label, node_id)
             continue
         divider = re.match(r"^==+\s*(.*?)\s*==+$", text)
         if divider:
@@ -1255,13 +1286,10 @@ def _parse_sequence(diagram: Diagram, lines: list[tuple[int, str]]) -> None:
         if activate:
             action = activate.group(1).casefold()
             # `activate A #red` colors the bar; the color is not a name.
-            name = _strip_trailing_colors(activate.group(2))
-            if not ENDPOINT_RE.match(name):
-                _fail(f"malformed statement at line {line_number}")
-            label = clean_label(name) or name
-            target = diagram.resolve(label)
-            if target not in diagram.node_map:
-                diagram.add_node(target, label, "lifeline")
+            target = lifeline(
+                _strip_trailing_colors(activate.group(2)),
+                f"malformed statement at line {line_number}",
+            )
             diagram.add_activation(target, action)
             continue
         note = _parse_note(text)
@@ -1305,21 +1333,15 @@ def _parse_sequence(diagram: Diagram, lines: list[tuple[int, str]]) -> None:
             right, actions = _activation_shortcut(right)
             if left in {"[", "?"} or right in {"]", "?"}:
                 _fail(f"unsupported sequence construct: boundary message at line {line_number}")
-            # Both ends must be one whole name. Shortcuts follow the second
-            # participant only, so `A ++ -> B` fails here too.
-            if not ENDPOINT_RE.match(left) or not ENDPOINT_RE.match(right):
-                _fail(f"malformed edge at line {line_number}")
-            source_name = clean_label(left) or left
-            target_name = clean_label(right) or right
+            # Both ends must be one whole name (or an inline `as` declaration).
+            # Shortcuts follow the second participant only, so `A ++ -> B`
+            # fails here too. Participants are created in source order.
+            edge_error = f"malformed edge at line {line_number}"
+            source = lifeline(left, edge_error, allow_as=True)
+            target = lifeline(right, edge_error, allow_as=True)
             style, arrowhead, reverse, bidirectional = _sequence_arrow(arrow)
             if reverse:
-                source_name, target_name = target_name, source_name
-            source = diagram.resolve(source_name)
-            target = diagram.resolve(target_name)
-            if source not in diagram.node_map:
-                diagram.add_node(source, source_name, "lifeline")
-            if target not in diagram.node_map:
-                diagram.add_node(target, target_name, "lifeline")
+                source, target = target, source
             diagram.add_edge(
                 source,
                 target,
@@ -1351,6 +1373,17 @@ def _parse_class(diagram: Diagram, lines: list[tuple[int, str]]) -> None:
 
     def scope() -> list[str]:
         return [block for block, _line in blocks if block is not None]
+
+    def class_ref(token: str, error: str) -> str:
+        """Get or create the class a reference names, by its code."""
+        parsed = _endpoint_code(token)
+        if parsed is None:
+            _fail(error)
+        code, display = parsed
+        node_id = diagram.resolve(code, scope())
+        if node_id not in diagram.node_map:
+            diagram.add_node(node_id, clean_label(display) or node_id, "class")
+        return node_id
 
     skin = _SkinBlocks()
     for line_number, raw in lines:
@@ -1413,8 +1446,6 @@ def _parse_class(diagram: Diagram, lines: list[tuple[int, str]]) -> None:
             node.fields.extend(clean_label(member) for member in members)
             if node_id != name:
                 diagram.bare_name(name, node_id)
-            if label not in (name, node_id):
-                diagram.alias(label, node_id)
             if opens:
                 current = node
                 current_line = line_number
@@ -1424,16 +1455,9 @@ def _parse_class(diagram: Diagram, lines: list[tuple[int, str]]) -> None:
             position, rest, body = note
             of_prefix = re.match(r"^of\b\s*(.*)$", rest, re.I)
             raw_target = _strip_trailing_colors(of_prefix.group(1) if of_prefix else rest)
-            if (
-                body is None
-                or position in {"over", "across"}
-                or not ENDPOINT_RE.match(raw_target)
-            ):
+            if body is None or position in {"over", "across"}:
                 _fail(f"malformed statement at line {line_number}")
-            target_token = clean_label(raw_target) or raw_target
-            target = diagram.resolve(target_token, scope())
-            if target not in diagram.node_map:
-                diagram.add_node(target, target_token, "class")
+            target = class_ref(raw_target, f"malformed statement at line {line_number}")
             cleaned = clean_label(body)
             if cleaned:
                 _record_note(
@@ -1454,22 +1478,15 @@ def _parse_class(diagram: Diagram, lines: list[tuple[int, str]]) -> None:
             right, label = _partition_unquoted(right, ":")
             left_name, left_card = _split_cardinality(left, before_arrow=True)
             right_name, right_card = _split_cardinality(right, before_arrow=False)
-            if not ENDPOINT_RE.match(left_name) or not ENDPOINT_RE.match(right_name):
-                _fail(f"malformed edge at line {line_number}")
-            source_name = clean_label(left_name) or left_name
-            target_name = clean_label(right_name) or right_name
+            edge_error = f"malformed edge at line {line_number}"
+            source = class_ref(left_name, edge_error)
+            target = class_ref(right_name, edge_error)
             arrowhead, style, reverse, bidirectional, undirected, hidden = _class_relationship(
                 arrow, line_number
             )
             if reverse:
-                source_name, target_name = target_name, source_name
+                source, target = target, source
                 left_card, right_card = right_card, left_card
-            source = diagram.resolve(source_name, scope())
-            target = diagram.resolve(target_name, scope())
-            if source not in diagram.node_map:
-                diagram.add_node(source, source_name, "class")
-            if target not in diagram.node_map:
-                diagram.add_node(target, target_name, "class")
             if hidden:
                 # `-[hidden]-` is a layout hint with no drawn link.
                 diagram.discarded["skin"] += 1
