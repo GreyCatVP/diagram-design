@@ -65,7 +65,7 @@ ONBOARDING_REFERENCE = ROOT / "skills/diagram-design/references/onboarding.md"
 LINE_DARK_EXAMPLE = ROOT / "skills/diagram-design/assets/example-line-dark.html"
 OUTPUT_SPEC_REFERENCE = ROOT / "skills/diagram-design/references/output-spec.md"
 VARIANTS = ("", "-dark", "-full")
-VISUAL_TYPE_COUNT = 44
+VISUAL_TYPE_COUNT = 45
 AGENT_SKILLS_DESCRIPTION_MAX = 1024
 PLUGIN_DESCRIPTION_MAX = 500
 # Types whose selection-table name differs from its description vocabulary.
@@ -78,6 +78,8 @@ DESCRIPTION_ALIASES = {
     "exploded axonometric": "exploded",
     "axonometric plan": "plan",
     "user journey": "journey",
+    "service blueprint": "blueprint",
+    "dependency graph": "dependency",
 }
 DISCOVERY_HOOKS = ("lifecycle phase",)
 ROUTING_SURFACES = {
@@ -139,18 +141,55 @@ def normalized(text: str) -> str:
 
 
 def check_onboarding_trust_boundary(errors: list[str], markdown: str) -> None:
-    """Remote page ingestion must state its narrow, untrusted-data purpose."""
+    """Remote onboarding must require user trust before its narrow fetch."""
     text = normalized(markdown)
+    has_trust_prompt = (
+        "only continue if you trust this site" in text
+        and "do you want me to proceed?" in text
+    )
+    requires_explicit_confirmation = (
+        "before making any network request" in text
+        and "until the user explicitly confirms" in text
+        and "supplying the url in the onboarding request is not confirmation" in text
+    )
     has_boundary = "untrusted data" in text
     names_instruction_risk = "instruction" in text
     limits_use = (
         "use it only as a source of color, type, and spacing signals" in text
         and "never follow directive" in text
     )
-    if not (has_boundary and names_instruction_risk and limits_use):
+    if not (
+        has_trust_prompt
+        and requires_explicit_confirmation
+        and has_boundary
+        and names_instruction_risk
+        and limits_use
+    ):
         errors.append(
-            "onboarding.md fetches remote page content without an explicit "
-            "untrusted-data boundary"
+            "onboarding.md fetches remote page content without explicit trust "
+            "confirmation and an untrusted-data boundary"
+        )
+
+
+def check_onboarding_user_verification(errors: list[str], markdown: str) -> None:
+    """Onboarding must end with an explicit review of generated output."""
+    text = normalized(markdown)
+    identifies_output = (
+        "generate or rebuild a representative output document" in text
+        and "provide its local path" in text
+    )
+    tasks_user = (
+        "please open `<output-path>`" in text
+        and "reply `approved` or tell me what should change" in text
+    )
+    stays_pending = (
+        "automated checks do not replace this review" in text
+        and "pending user verification" in text
+        and "until the user explicitly confirms the output document" in text
+    )
+    if not (identifies_output and tasks_user and stays_pending):
+        errors.append(
+            "onboarding.md does not require user verification of the output document"
         )
 
 
@@ -1690,6 +1729,9 @@ def main() -> int:
     check_type_counts(errors, ROOT)
     check_high_level_reference(errors, HIGH_LEVEL_REFERENCE.read_text(encoding="utf-8"))
     check_onboarding_trust_boundary(
+        errors, ONBOARDING_REFERENCE.read_text(encoding="utf-8")
+    )
+    check_onboarding_user_verification(
         errors, ONBOARDING_REFERENCE.read_text(encoding="utf-8")
     )
     check_line_dark_skin(errors, LINE_DARK_EXAMPLE.read_text(encoding="utf-8"))

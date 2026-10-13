@@ -50,9 +50,10 @@ Source read and output write failures return exit 2 with an error diagnostic. Th
    - Make comments valid XML. Inside each `<!-- ... -->` outside CDATA, turn every `--` into `- -` and add a space after a body that ends in `-`. Refuse a comment that a browser closes before the next `-->` (`<!-->`, `<!--->`, or one containing `--!>`): the markup after it is live, and rewriting the comment would hide it.
    - Set `id="<slug>-root"` on the opening `<svg>` tag, where `<slug>` is the source basename without extension (e.g. `example-loop.html` → `example-loop`). This ID scopes carried CSS so several inlined figures do not leak rules into each other. When replacing an existing SVG root ID, retarget whole CSS ID tokens for that root in the carried CSS, including escaped identifier spellings; compound selectors such as `.diagram#original` remain bound to the root without adding another ancestor. Descendant IDs and quoted selector values remain unchanged; an unescaped dot belongs to a class selector, not to the ID token.
 4. **Carry page CSS into the SVG.** Class-styled diagrams (the loop family, process, medallion, data-flow, and others) declare fills and type in the page `<style>` block — `.station`, `.hub`, `.node-name`, and so on. Extracting the bare `<svg>` without those rules yields black boxes. Copy the page's diagram rules into a `<style>` inside `<defs>`, then:
-   - Strip CSS comments first, so a comment in front of a rule does not become part of its selector.
+   - Unwrap CDATA sections in SVG stylesheet text before parsing rules, then strip CSS comments, so neither XML delimiters nor a comment becomes part of a selector. Keep CDATA content as raw text rather than XML-decoding it; the carried copy is XML-escaped below. The original embedded stylesheet stays in the SVG. CDATA-looking text in an HTML stylesheet remains literal, including inside SVG `foreignObject`, `desc`, or `title` elements. A nested `<svg>` inside HTML switches back to SVG stylesheet handling.
    - Re-scope `:root { … }` custom properties onto `#<slug>-root` so the figure keeps its own tokens.
    - Start selectors that begin at the `<svg>` element at the root instead: `svg .zone` becomes `#<slug>-root .zone` and `svg text` becomes `#<slug>-root text`. The exported root element is the `<svg>` itself, so `#<slug>-root svg .zone` would match nothing.
+   - Split selector lists only at top-level commas. Preserve quoted and escaped attribute values, function arguments, and meaningful whitespace while scoping.
    - Prefix every other kept selector with `#<slug>-root ` (e.g. `.station` → `#example-loop-root .station`).
    - **Drop** page chrome: `*`, `html`, `body`, `main`, `h1`/`h2`/`h3`, `p`, `.frame`, `.eyebrow`, `.summary`, `.card(s)`, `.footer`, `.header`, and the bare `svg { min-width: … }` layout rule. Only the bare `svg` selector is layout; `svg .zone` and `svg text` are diagram rules (see above). Those must not follow a fragment.
    - Carry `color` and `font-family` from the dropped `body` rule onto `#<slug>-root`. SVG content inherits both: `stroke="currentColor"` reads `color`, and text without its own font rule reads `font-family`.
@@ -67,10 +68,41 @@ Source read and output write failures return exit 2 with an error diagnostic. Th
      </defs>
      ```
 6. **Namespace `<defs>` IDs.** Prefix every referenceable defs ID — on `marker`, `pattern`, `linearGradient`, `radialGradient`, `filter`, `clipPath`, `mask`, `symbol`, and reusable graphics (`g`, `path`, `rect`, `circle`, `ellipse`, `line`, `polyline`, `polygon`, `text`, `image`, and `use`) — with `<slug>-`, and rewrite matching `url(#…)` and `href="#…"` / `xlink:href="#…"` references. Compare ID and fragment values after XML character-reference decoding, so equivalent named and numeric references stay connected. Retarget ID selectors in embedded style rules while leaving declaration colors and unrelated IDs unchanged. Preserve URL quotes and match fragment IDs case-sensitively (the CSS `url` keyword remains case-insensitive). Rewrite **longest-id-first** so `arrow-accent` is not clipped by a shorter `arrow` rule. Quoted local URLs (`url("#arrow")`, `url('#arrow')`, including XML-escaped quotes in attributes) follow the same rewrite as unquoted URLs. Unrelated fragment IDs and non-local URLs remain unchanged. Example: `id="arrow"` in `example-loop.html` becomes `id="example-loop-arrow"` with `marker-end="url(#example-loop-arrow)"`.
-7. Normalize colors for strict SVG 1.1 consumers. This design system's tokens are authored as `rgba(...)` (see `style-guide.md`) and render correctly wherever colors are read as CSS — browsers, Figma, Illustrator. PowerPoint's SVG importer does not: it treats `rgba(...)` and `transparent` as unrecognized and paints them **opaque black**, turning a barely-there tint into a solid block that swallows the label inside it. The transform is lossless (every replacement renders identically to the original in a browser), so apply it to presentation attributes before writing the file:
+7. Normalize colors for strict SVG 1.1 consumers. This design system's tokens are authored as `rgba(...)` (see `style-guide.md`) and render correctly wherever colors are read as CSS — browsers, Figma, Illustrator. PowerPoint's SVG importer does not: it treats `rgba(...)` and `transparent` as unrecognized and paints them **opaque black**, turning a barely-there tint into a solid block that swallows the label inside it. Normalize presentation paint only when its alpha can be preserved: combine a local presentation opacity, but retain RGBA when a CSS or inherited opacity, or a paint override on the element or its children, makes splitting unsafe. An unrelated simple CSS rule does not prevent normalization. Apply this full recipe before writing the file:
 
    ```python
    import re
+   import math
+   import html as html_entities
+   import xml.etree.ElementTree as ET
+   from typing import Callable
+
+
+   CSS_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
+
+
+   XML_OPAQUE_OPEN_RE = re.compile(r"<!--|<!\[CDATA\[")
+
+
+   START_TAG_RE = re.compile(
+       r"<([A-Za-z][\w:.-]*)"
+       r"((?:\s+[^\s\"'<>/=]+(?:\s*=\s*(?:\"[^\"]*\"|'[^']*'|[^\s\"'=<>`]+))?)*)"
+       r"(\s*/?)>"
+   )
+
+
+   TAG_ATTR_RE = re.compile(
+       r"(\s+)([^\s\"'<>/=]+)(?:(\s*=\s*)(\"[^\"]*\"|'[^']*'|[^\s\"'=<>`]+))?"
+   )
+
+
+   STYLE_BLOCK_RE = re.compile(r"<style\b[^>]*>(.*?)</style\s*>", re.IGNORECASE | re.DOTALL)
+
+
+   CSS_RULE_ATOM = r'''(?:/\*(?:[^*]|\*(?!/))*\*/|\\[\s\S]|"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|/(?!\*)|[^{}"'\\/])'''
+
+
+   RULE_RE = re.compile(rf"({CSS_RULE_ATOM}+)\{{({CSS_RULE_ATOM}*)\}}", re.DOTALL)
 
 
    RGBA_ATTR_RE = re.compile(
@@ -78,22 +110,164 @@ Source read and output write failures return exit 2 with an error diagnostic. Th
    )
 
 
-   TRANSPARENT_ATTR_RE = re.compile(r'(fill|stroke)="transparent"')
+   def _rewrite_start_tags(svg: str, transform: Callable[[re.Match[str]], str]) -> str:
+       """Transform actual start tags, preserving comments and CDATA sections."""
+       out: list[str] = []
+       pos = 0
+       while True:
+           opener = XML_OPAQUE_OPEN_RE.search(svg, pos)
+           text_end = opener.start() if opener else len(svg)
+           out.append(START_TAG_RE.sub(transform, svg[pos:text_end]))
+           if opener is None:
+               break
+           closer = "-->" if opener.group(0) == "<!--" else "]]>"
+           close_at = svg.find(closer, opener.end())
+           stop = len(svg) if close_at == -1 else close_at + len(closer)
+           out.append(svg[opener.start() : stop])
+           pos = stop
+           if close_at == -1:
+               break
+       return "".join(out)
+
+
+   def _decoded_css_property_text(style: str) -> str:
+       """Read opacity spellings conservatively without changing carried CSS."""
+       style = CSS_COMMENT_RE.sub("", html_entities.unescape(style))
+
+       def escape(match: re.Match[str]) -> str:
+           hexadecimal, literal = match.groups()
+           if hexadecimal is not None:
+               value = int(hexadecimal, 16)
+               return chr(value) if 0 < value <= 0x10FFFF and not 0xD800 <= value <= 0xDFFF else "\ufffd"
+           return "" if literal in "\r\n\f" else literal
+
+       return re.sub(r"\\(?:([0-9a-fA-F]{1,6})(?:\r\n|[ \t\r\n\f])?|([\s\S]))", escape, style)
+
+
+   def _css_paint_may_target_descendants(selector: str, children: list[ET.Element]) -> bool:
+       """Exclude provably unrelated simple selectors; preserve unknown CSS cascades."""
+       for branch in selector.split(","):
+           terminal = re.split(r"[\s>+~]+", branch.strip())[-1]
+           # Unsupported selectors remain conservative, including escaped names,
+           # attribute selectors and pseudo-classes that can affect descendant paint.
+           if not re.fullmatch(r"(?:[A-Za-z][\w-]*|\*)?(?:[.#][\w-]+)*", terminal) or not terminal:
+               return True
+           tag = re.match(r"^[A-Za-z][\w-]*", terminal)
+           classes = re.findall(r"\.([\w-]+)", terminal)
+           ids = re.findall(r"#([\w-]+)", terminal)
+           for child in children:
+               if tag and child.tag.rsplit("}", 1)[-1] != tag.group(0):
+                   continue
+               if all(name in child.get("class", "").split() for name in classes) and all(
+                   name == child.get("id") for name in ids
+               ):
+                   return True
+       return False
 
 
    def normalize_rgba_presentation_attrs(svg: str) -> str:
-       """Split rgba()/transparent presentation attrs for strict SVG 1.1 importers."""
+       """Split rgba paint and combine its alpha with existing presentation opacity."""
 
-       def repl(match: re.Match[str]) -> str:
-           prop, r, g, b, a = match.groups()
-           return '{0}="#{1:02x}{2:02x}{3:02x}" {0}-opacity="{4}"'.format(
-               prop, max(0, min(255, int(r))), max(0, min(255, int(g))),
-               max(0, min(255, int(b))), a if 0 <= float(a) <= 1 else "0" if float(a) < 0 else "1"
-           )
+       # A parent's paint and opacity may be inherited independently. Converting
+       # its color alpha into opacity would also change children overriding paint.
+       try:
+           elements = list(ET.fromstring(svg).iter())
+           descendants = {
+               index: list(element.iter())[1:]
+               for index, element in enumerate(elements) if len(element)
+           }
+       except ET.ParseError:
+           return svg  # The existing final XML validator supplies the public error.
+       opacity_counts = {"fill-opacity": 0, "stroke-opacity": 0}
+       styles = list(STYLE_BLOCK_RE.findall(svg))
 
-       svg = RGBA_ATTR_RE.sub(repl, svg)
-       svg = TRANSPARENT_ATTR_RE.sub(r'\1="none"', svg)
-       return svg
+       def collect_opacity_context(match: re.Match[str]) -> str:
+           for attr in TAG_ATTR_RE.finditer(match.group(2)):
+               key, value = attr.group(2), attr.group(4)
+               if key in opacity_counts:
+                   opacity_counts[key] += 1
+               elif key == "style" and value is not None:
+                   styles.append(value[1:-1])
+           return match.group(0)
+
+       _rewrite_start_tags(svg, collect_opacity_context)
+       css_opacity = {
+           key for key in opacity_counts
+           if any(re.search(rf"(?:^|[;{{])\s*{key}\s*:", _decoded_css_property_text(style), re.IGNORECASE)
+                  for style in styles)
+       }
+
+       position = 0
+
+       def normalize_tag(match: re.Match[str]) -> str:
+           nonlocal position
+           children = descendants.get(position, [])
+           element = elements[position]
+           position += 1
+           name, attrs, end = match.groups()
+           values = {
+               attr.group(2): attr.group(4)[1:-1]
+               for attr in TAG_ATTR_RE.finditer(attrs)
+               if attr.group(4) is not None
+           }
+           updates: dict[str, str] = {}
+           additions: list[str] = []
+           for prop in ("fill", "stroke"):
+               value = values.get(prop, "")
+               if value == "transparent":
+                   updates[prop] = "none"
+                   continue
+               rgba = RGBA_ATTR_RE.fullmatch(f'{prop}="{value}"')
+               if rgba is None:
+                   continue
+               _, r, g, b, alpha = rgba.groups()
+               opacity_name = f"{prop}-opacity"
+               # Presentation opacity may be overridden by CSS or inherited from
+               # another element. Preserve the color alpha when that cascade is
+               # unresolved instead of replacing it with opaque RGB.
+               # Converting a parent is safe when descendants inherit its paint.
+               # Preserve alpha if a descendant overrides that paint, including
+               # a conservatively detected stylesheet or inline declaration.
+               inline_paint = re.search(
+                   rf"(?:^|[;{{])\s*{prop}\s*:",
+                   _decoded_css_property_text(element.get("style", "")), re.I,
+               )
+               descendant_paint = any(
+                   prop in child.attrib
+                   or re.search(rf"(?:^|[;{{])\s*{prop}\s*:",
+                                _decoded_css_property_text(child.get("style", "")), re.I)
+                   for child in children
+               )
+               stylesheet_paint = any(
+                   re.search(rf"(?:^|[;{{])\s*{prop}\s*:", _decoded_css_property_text(rule.group(2)), re.I)
+                   and _css_paint_may_target_descendants(rule.group(1), [element] + children)
+                   for style in STYLE_BLOCK_RE.findall(svg)
+                   for rule in RULE_RE.finditer(CSS_COMMENT_RE.sub("", style))
+               )
+               if inline_paint or descendant_paint or stylesheet_paint or opacity_name in css_opacity or opacity_counts[opacity_name] > int(opacity_name in values):
+                   continue
+               opacity = alpha if 0 <= float(alpha) <= 1 else "0" if float(alpha) < 0 else "1"
+               if opacity_name in values:
+                   try:
+                       original = values[opacity_name].strip()
+                       amount = float(original.rstrip("%")) / (100 if original.endswith("%") else 1)
+                   except ValueError:
+                       continue  # Keep paint intact when the opacity cannot be resolved here.
+                   if not math.isfinite(amount):
+                       continue
+                   opacity = format(min(1, max(0, amount)) * max(0, min(1, float(alpha))), ".12g")
+                   updates[opacity_name] = opacity
+               else:
+                   additions.append(f' {opacity_name}="{opacity}"')
+               updates[prop] = "#{:02x}{:02x}{:02x}".format(*(max(0, min(255, int(c))) for c in (r, g, b)))
+
+           def replace_attr(attr: re.Match[str]) -> str:
+               space, key, _equals, _value = attr.groups()
+               return f'{space}{key}="{updates[key]}"' if key in updates else attr.group(0)
+
+           return f"<{name}{TAG_ATTR_RE.sub(replace_attr, attrs)}{''.join(additions)}{end}>"
+
+       return _rewrite_start_tags(svg, normalize_tag)
 
 
    svg = normalize_rgba_presentation_attrs(svg)
@@ -231,3 +405,5 @@ If the target aspect ratio doesn't match the `viewBox` aspect ratio, say so and 
 - Adds export buttons or `<script>` tags. Static diagrams remain script-free; an already motion-enabled source may retain the scoped controller from [`animation.md`](animation.md), but export never injects another controller.
 - Auto-emits `.svg` or `.png` alongside HTML generation. Manual on every call.
 - Embeds an HTML wrapper (cards, headers) into the SVG via `foreignObject`. Too fragile across renderers.
+
+The exporter keeps optional defs in comments namespaced so they can be uncommented later. Only referenceable defs element types have their IDs renamed; live titles and other elements retain their IDs and accessibility references.
