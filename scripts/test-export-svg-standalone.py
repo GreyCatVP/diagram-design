@@ -66,6 +66,27 @@ class ExportSvgStandaloneTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.mod = load_helper()
 
+    def test_selector_lists_preserve_quoted_and_escaped_literals(self) -> None:
+        selectors = [
+            'rect[data-label="Revenue, net"]',
+            'rect[data-label="Revenue  net"]',
+            "rect[data-label='Revenue,  net']",
+            r'rect[data-label="a\"b,  c"]',
+            r'.revenue\,net',
+            r'.revenue\2c net',
+            ':is(rect, circle):not([data-label="a,b"])',
+            ':where(rect, :is(circle, path))',
+        ]
+        for selector in selectors:
+            with self.subTest(selector=selector):
+                html = '<style>' + selector + ', .other {fill:red}</style>'
+                html += '<svg viewBox="0 0 40 40"><rect class="other"/></svg>'
+                css = embedded_css(self.mod.export_svg_document(html, Path("literal.html")))
+                self.assertIn('#literal-root ' + selector + ', #literal-root .other { fill:red }', css)
+        # Hex escape terminator plus descendant whitespace must remain distinct.
+        css = self.mod.diagram_css_from_html('<style>.\\31  rect {fill:red}</style>', 'literal-root')
+        self.assertIn('#literal-root .\\31  rect', css)
+
     def test_rgba_parent_normalizes_with_unrelated_page_paint(self) -> None:
         for prop in ("fill", "stroke"):
             for selector in (".paint", "rect.paint", "#unrelated", ".unused .paint"):
@@ -346,6 +367,11 @@ class ExportSvgStandaloneTests(unittest.TestCase):
         self.assertIn(r"#diagram-A\&\#38\;B stop { stop-color:blue; }", css)
         self.assertEqual([element.get("fill") for element in root.iter() if element.tag.endswith("}rect")],
                          ["url(#diagram-A&B)", "url(#diagram-A&#38;B)"])
+    def test_optional_defs_387_template_dots_keep_namespace(self) -> None:
+        source = ASSETS / "template.html"
+        exported = self.mod.export_svg_document(source.read_text(encoding="utf-8"), source)
+        self.assertIn('id="template-dots"', exported)
+        self.assertIn('url(#template-dots)', exported)
 
     def test_metadata_defs_382_ignores_data_id_inside_defs(self) -> None:
         markup = '<svg><defs><marker id="arrow"/><g data-id="ghost"/></defs><g data-id="arrow" data-href="#arrow"/><use href="#arrow"/></svg>'
@@ -678,6 +704,136 @@ class ExportSvgStandaloneTests(unittest.TestCase):
         self.assertEqual(root[1].text, "Keep description")
         self.assertEqual(root[2].tag, "{http://www.w3.org/2000/svg}defs")
 
+    def test_cli_carries_cdata_styles_after_root_rename(self) -> None:
+        styles = (
+            '<![CDATA[#original .paint { fill: red; }]]>',
+            '<![CDATA[/* colors */ #original .paint { fill: red; }]]>'
+            '<![CDATA[#original .outline { stroke: blue; }]]>',
+            '#original .outline { stroke: blue; }'
+            '<![CDATA[#original .paint { fill: red; }]]>',
+        )
+        for style in styles:
+            with self.subTest(style=style), tempfile.TemporaryDirectory() as tmp:
+                source = Path(tmp) / "cdata.html"
+                source.write_text(
+                    '<svg id="original" viewBox="0 0 10 10">'
+                    f'<style>{style}</style>'
+                    '<rect class="paint outline" width="5" height="5"/></svg>',
+                    encoding="utf-8",
+                )
+                self.assertEqual(self.mod.main([str(source), "--system-fonts"]), 0)
+                document = ET.fromstring(source.with_suffix(".svg").read_text(encoding="utf-8"))
+                carried = document.find(
+                    "{http://www.w3.org/2000/svg}defs/{http://www.w3.org/2000/svg}style"
+                ).text
+                self.assertIn("#cdata-root .paint { fill: red; }", carried)
+                self.assertNotIn("<![CDATA[", carried)
+                self.assertNotIn("]]>", carried)
+                if ".outline" in style:
+                    self.assertIn("#cdata-root .outline { stroke: blue; }", carried)
+
+    def test_html_style_cdata_looking_literal_is_not_unwrapped(self) -> None:
+        diagram = '<svg viewBox="0 0 10 10"><rect class="paint"/></svg>'
+        style = '<style>.paint::after { content: "<![CDATA[literal]]>"; }</style>'
+        sources = (
+            style + diagram,
+            diagram + '<div title="<svg>"></div>' + style,
+            diagram + "<div title='<svg>'></div>" + style,
+            diagram + '<div title="before > <svg> after"></div>' + style,
+            diagram + '<div data-example="<svg>">' + style + '</div>',
+            *(diagram + f'<{tag}><svg></{tag}>' + style
+              for tag in ("textarea", "title", "xmp", "iframe", "noembed", "noframes", "noscript")),
+        )
+        for html in sources:
+            with self.subTest(html=html):
+                carried = self.mod.diagram_css_from_html(html, "literal-root")
+                self.assertIn('content: "&lt;![CDATA[literal]]>"', carried)
+                with tempfile.TemporaryDirectory() as tmp:
+                    source = Path(tmp) / "literal.html"
+                    source.write_text(html, encoding="utf-8")
+                    self.assertEqual(self.mod.main([str(source), "--system-fonts"]), 2)
+                    self.assertFalse(source.with_suffix(".svg").exists())
+
+    def test_html_text_elements_do_not_supply_svg_or_styles(self) -> None:
+        diagram = '<svg id="real" viewBox="0 0 10 10"><rect/></svg>'
+        for tag in ("textarea", "title", "xmp", "iframe", "noembed", "noframes", "noscript"):
+            with self.subTest(tag=tag):
+                html = (f'<{tag} title="before > after"><svg id="fake">'
+                        '<style>.fake { fill: red; }</style></svg>'
+                        f'</{tag}>' + diagram)
+                self.assertEqual(self.mod.extract_first_svg(html), diagram)
+                self.assertEqual(self.mod.diagram_css_from_html(html, "scope-root"), "")
+
+    def test_foreign_object_textarea_does_not_change_style_namespace(self) -> None:
+        html = ('<svg><foreignObject><textarea><svg></textarea><style>'
+                '.paint::after { content: "<![CDATA[literal]]>"; }'
+                '</style></foreignObject><style><![CDATA[.paint { fill:red }]]></style></svg>')
+        carried = self.mod.diagram_css_from_html(html, "scope-root")
+        self.assertIn('content: "&lt;![CDATA[literal]]>"', carried)
+        self.assertIn("#scope-root .paint { fill:red }", carried)
+
+    def test_foreign_object_html_style_is_not_unwrapped(self) -> None:
+        html = ('<svg id="original" viewBox="0 0 10 10"><foreignObject>'
+                '<div xmlns="http://www.w3.org/1999/xhtml"><style>'
+                '#original .paint::after { content: "<![CDATA[literal]]>"; }'
+                '</style></div></foreignObject></svg>')
+        carried = self.mod.diagram_css_from_html(html, "literal-root", "original")
+        self.assertIn('content: "&lt;![CDATA[literal]]>"', carried)
+        # Preserve the existing refusal of invalid XML rather than silently
+        # changing the HTML CSS string so the document can be exported.
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "literal.html"
+            source.write_text(html, encoding="utf-8")
+            self.assertEqual(self.mod.main([str(source), "--system-fonts"]), 2)
+            self.assertFalse(source.with_suffix(".svg").exists())
+
+    def test_nested_svg_styles_inside_foreign_object_are_unwrapped(self) -> None:
+        html = ('<svg id="original" viewBox="0 0 10 10"><foreignObject>'
+                '<div xmlns="http://www.w3.org/1999/xhtml">'
+                '<svg xmlns="http://www.w3.org/2000/svg"><style>'
+                '<![CDATA[#original .paint { fill: red; }]]>'
+                '</style><rect class="paint" width="5" height="5"/></svg>'
+                '<style>.paint::after { content: "<![CDATA[literal]]>"; }</style>'
+                '</div></foreignObject><style><![CDATA[.outline { stroke: blue; }]]></style></svg>')
+        carried = self.mod.diagram_css_from_html(html, "nested-root", "original")
+        self.assertIn("#nested-root .paint { fill: red; }", carried)
+        self.assertIn('content: "&lt;![CDATA[literal]]>"', carried)
+        self.assertIn("#nested-root .outline { stroke: blue; }", carried)
+        valid_html = html.replace(
+            '<style>.paint::after { content: "<![CDATA[literal]]>"; }</style>', "")
+        exported = self.mod.export_svg_document(valid_html, Path("nested.html"), system_fonts=True)
+        document = ET.fromstring(exported)
+        carried_style = document.find(
+            "{http://www.w3.org/2000/svg}defs/{http://www.w3.org/2000/svg}style"
+        ).text
+        self.assertIn("#nested-root .paint { fill: red; }", carried_style)
+        self.assertIn("#nested-root .outline { stroke: blue; }", carried_style)
+
+    def test_svg_html_integration_points_preserve_style_literals(self) -> None:
+        for tag in ("foreignObject", "desc", "title"):
+            with self.subTest(tag=tag):
+                html = (f'<svg><{tag}><style>'
+                        '.paint::after { content: "<![CDATA[literal]]>"; }'
+                        f'</style></{tag}><style><![CDATA[.paint {{ fill:red }}]]></style></svg>')
+                carried = self.mod.diagram_css_from_html(html, "scope-root")
+                self.assertIn('content: "&lt;![CDATA[literal]]>"', carried)
+                self.assertIn("#scope-root .paint { fill:red }", carried)
+
+    def test_cli_carries_svg_styles_after_stray_closing_svg(self) -> None:
+        html = ('<div></svg></div><svg id="original" viewBox="0 0 10 10">'
+                '<style><![CDATA[#original .paint { fill: red; }]]></style>'
+                '<rect class="paint" width="5" height="5"/></svg>')
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "stray.html"
+            source.write_text(html, encoding="utf-8")
+            self.assertEqual(self.mod.main([str(source), "--system-fonts"]), 0)
+            document = ET.fromstring(source.with_suffix(".svg").read_text(encoding="utf-8"))
+            carried = document.find(
+                "{http://www.w3.org/2000/svg}defs/{http://www.w3.org/2000/svg}style"
+            ).text
+            self.assertIn("#stray-root .paint { fill: red; }", carried)
+            self.assertNotIn("&lt;![CDATA[", carried)
+
     def test_cli_writes_default_path(self) -> None:
         source = ASSETS / "example-loop.html"
         with tempfile.TemporaryDirectory() as tmp:
@@ -689,6 +845,91 @@ class ExportSvgStandaloneTests(unittest.TestCase):
             self.assertTrue(out.is_file())
             body = out.read_text(encoding="utf-8")
             self.assertIn("#example-loop-root .station", body)
+
+    def test_optional_defs_387_preserve_live_reusable_shape_ids(self) -> None:
+        svg = '<svg><defs><path id="live" d="M0 0"/></defs><g id="dots"/><!-- <defs><pattern id="dots"/><g id="optional-shape"/></defs> --><use href="#live"/></svg>'
+        result = self.mod.namespace_defs_ids(svg, "demo")
+        self.assertIn('<g id="dots"/>', result)
+        self.assertIn('<pattern id="demo-dots"/>', result)
+        self.assertIn('<g id="optional-shape"/>', result)
+        self.assertIn('<path id="demo-live"', result)
+        self.assertIn('href="#demo-live"', result)
+
+    def test_optional_defs_387_preserve_live_title_ids(self) -> None:
+        svg = '<svg aria-labelledby="name"><title id="name">Title</title><!-- <defs><marker id="name"/></defs> --></svg>'
+        self.assertEqual(self.mod.find_defs_ids(svg), ["name"])
+        result = self.mod.namespace_defs_ids(svg, "demo")
+        self.assertIn('aria-labelledby="name"><title id="name">Title</title>', result)
+        self.assertIn('<marker id="demo-name"/>', result)
+
+    def test_optional_defs_387_cdata_text_is_not_a_live_id_collision(self) -> None:
+        svg = ('<svg viewBox="0 0 10 10"><metadata><![CDATA[<g id="dots"/>]]></metadata>'
+               '<defs><!-- <pattern id="dots"><rect width="1" height="1"/></pattern> --></defs>'
+               '<rect width="10" height="10" fill="url(#dots)"/></svg>')
+        result = self.mod.export_svg_document(svg, Path("cdata-pattern.html"))
+        self.assertIn('<![CDATA[<g id="dots"/>]]>', result)
+        self.assertIn('<pattern id="cdata-pattern-dots">', result)
+        root = ET.fromstring(result)
+        rect = root.find("{http://www.w3.org/2000/svg}rect")
+        self.assertEqual(rect.get("fill"), "url(#cdata-pattern-dots)")
+        restored = ET.fromstring(result.replace('<!--', '').replace('-->', ''))
+        pattern = restored.find('.//{http://www.w3.org/2000/svg}pattern')
+        self.assertEqual(pattern.get('id'), 'cdata-pattern-dots')
+
+    def test_optional_defs_387_opaque_delimiters_keep_real_id_ownership(self) -> None:
+        for metadata in ('<![CDATA[<!-- literal]]>', '<!-- <![CDATA[ literal -->'):
+            with self.subTest(metadata=metadata):
+                svg = '<svg viewBox="0 0 10 10"><metadata>' + metadata + '</metadata>'
+                svg += '<symbol id="dots"><rect width="1" height="1"/></symbol>'
+                svg += '<defs><!-- <pattern id="dots"/> --></defs><use href="#dots"/></svg>'
+                result = self.mod.export_svg_document(svg, Path("opaque-collision.html"))
+                root = ET.fromstring(result)
+                self.assertEqual(root.find('{http://www.w3.org/2000/svg}symbol').get('id'), 'dots')
+                self.assertEqual(root.find('{http://www.w3.org/2000/svg}use').get('href'), '#dots')
+                self.assertIn('<pattern id="opaque-collision-dots"/>', result)
+
+    def test_optional_defs_387_live_collision_survives_actual_export(self) -> None:
+        svg = ('<svg viewBox="0 0 10 10"><defs><!-- <pattern id="dot"/> --></defs>'
+               '<symbol id="dot"><rect width="5" height="5" fill="red"/></symbol>'
+               '<use href="#dot"/></svg>')
+        result = self.mod.export_svg_document(svg, Path("b.html"))
+        root = ET.fromstring(result)
+        symbol = root.find("{http://www.w3.org/2000/svg}symbol")
+        use = root.find("{http://www.w3.org/2000/svg}use")
+        self.assertEqual(symbol.get("id"), "dot")
+        self.assertEqual(use.get("href"), "#dot")
+        self.assertIn('<pattern id="b-dot"/>', result)
+
+    def test_optional_defs_387_collision_preserves_live_css_and_xlink(self) -> None:
+        svg = ('<svg viewBox="0 0 10 10" xmlns:xlink="http://www.w3.org/1999/xlink">'
+               '<defs><!-- <pattern id="dot"/><use href="#dot" fill="url(#dot)"/> --></defs>'
+               '<symbol id="dot"><rect width="5" height="5"/></symbol>'
+               '<use xlink:href="#dot" fill="url(#dot)" style="stroke:url(#dot)"/>'
+               '<style>#dot {fill:url(#dot)}</style></svg>')
+        result = self.mod.export_svg_document(svg, Path("b.html"))
+        root = ET.fromstring(result)
+        use = root.find("{http://www.w3.org/2000/svg}use")
+        self.assertEqual(use.get("{http://www.w3.org/1999/xlink}href"), "#dot")
+        self.assertEqual(use.get("fill"), "url(#dot)")
+        self.assertEqual(use.get("style"), "stroke:url(#dot)")
+        self.assertIn('#dot {fill:url(#dot)}', result)
+        self.assertIn('<pattern id="b-dot"/><use href="#b-dot" fill="url(#b-dot)"/>', result)
+
+    def test_optional_defs_387_comments_only_namespace_traditional_defs(self) -> None:
+        traditional = ('marker', 'pattern', 'linearGradient', 'radialGradient',
+                       'filter', 'clipPath', 'mask', 'symbol')
+        optional = ''.join(f'<{tag} id="{tag}"/>' for tag in traditional)
+        svg = ('<svg><defs><path id="live" d="M0 0"/></defs><!-- <defs>'
+               + optional + '<path id="commented-path"/><g id="commented-group"/>'
+               '</defs> --><use href="#live"/></svg>')
+        result = self.mod.namespace_defs_ids(svg, "b")
+        for tag in traditional:
+            with self.subTest(tag=tag):
+                self.assertIn(f'<{tag} id="b-{tag}"/>', result)
+        self.assertIn('<path id="commented-path"/>', result)
+        self.assertIn('<g id="commented-group"/>', result)
+        self.assertIn('<path id="b-live"', result)
+        self.assertIn('href="#b-live"', result)
 
     def test_rgba_presentation_attrs_still_split(self) -> None:
         html = """<!DOCTYPE html><html><body>
@@ -705,6 +946,23 @@ class ExportSvgStandaloneTests(unittest.TestCase):
         self.assertIn('fill="#2d3142" fill-opacity="0.10"', svg)
         self.assertIn('stroke="none"', svg)
         self.assertIn('id="rgba-demo-dots"', svg)
+
+    def test_escaped_selector_keeps_parent_alpha_from_overriding_child_paint(self) -> None:
+        for selector in (r'.revenue\,net\31 foo', r'.revenue\2c net\31 foo'):
+            with self.subTest(selector=selector):
+                html = '<style>' + selector + ' {fill:blue}</style>'
+                html += '<svg viewBox="0 0 10 10"><g fill="rgba(255,0,0,0.5)">'
+                html += '<rect class="revenue,net1foo" width="10" height="10"/></g></svg>'
+                result = self.mod.export_svg_document(html, Path("escaped-paint.html"))
+                group = ET.fromstring(result).find('.//{http://www.w3.org/2000/svg}g')
+                self.assertEqual(group.get('fill'), 'rgba(255,0,0,0.5)')
+                self.assertIsNone(group.get('fill-opacity'))
+        html = '<style>.other {fill:blue}</style>'
+        html += '<svg viewBox="0 0 10 10"><g fill="rgba(255,0,0,0.5)">'
+        html += '<rect class="paint" width="10" height="10"/></g></svg>'
+        group = ET.fromstring(self.mod.export_svg_document(html, Path("ordinary-paint.html"))).find('.//{http://www.w3.org/2000/svg}g')
+        self.assertEqual(group.get('fill'), '#ff0000')
+        self.assertEqual(group.get('fill-opacity'), '0.5')
 
     def test_rgba_combines_existing_presentation_opacity(self) -> None:
         for prop in ("fill", "stroke"):

@@ -182,6 +182,8 @@ def load_scene_data(path: Path) -> dict[str, Any]:
                 f"invalid geometry: {token} is not finite"
             ),
         )
+    except RecursionError:
+        _fail(f"{path.name}: Excalidraw JSON nesting exceeds the parser limit")
     except (UnicodeDecodeError, ValueError):
         _fail(f"{path.name}: not valid Excalidraw JSON")
     if not isinstance(document, dict) or document.get("type") != "excalidraw":
