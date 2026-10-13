@@ -847,7 +847,9 @@ def _parse_flowchart(
 def _parse_sequence(
     diagram: Diagram, lines: list[tuple[int, str]], header_position: int
 ) -> None:
-    fragment_stack: list[dict[str, Any]] = []
+    # None marks a visual-only rect block: its end must not close a semantic fragment.
+    fragment_stack: list[dict[str, Any] | None] = []
+    semantic_depth = 0
     participant_re = re.compile(
         r"^(?:create\s+)?(participant|actor)\s+"
         r"(?:\"([^\"]+)\"|'([^']+)'|([\w.:-]+))"
@@ -890,25 +892,30 @@ def _parse_sequence(
                 "actor" if kind == "actor" else "lifeline",
             )
             continue
+        if (re.match(r"^rect\s+", text, re.I) and message_re.match(text) is None
+                and re.match(r"^rect\s+(?:<<--?>>|--?>>|--?>|--?\)|--?x)", text, re.I) is None):
+            fragment_stack.append(None)
+            continue
         fragment = re.match(r"^(alt|opt|loop|par|critical|break)\b\s*(.*)$", text, re.I)
         if fragment:
             entry = {
                 "kind": fragment.group(1).casefold(),
                 "label": clean_label(fragment.group(2)),
                 "line": line_number,
-                "depth": len(fragment_stack),
+                "depth": semantic_depth,
                 "regions": [],
             }
             diagram.fragments.append(entry)
             fragment_stack.append(entry)
+            semantic_depth += 1
             continue
         region = re.match(r"^(else|and|option)\b\s*(.*)$", text, re.I)
-        if region and fragment_stack:
+        if region and fragment_stack and fragment_stack[-1] is not None:
             fragment_stack[-1]["regions"].append(clean_label(region.group(2)))
             continue
         if lowered == "end":
-            if fragment_stack:
-                fragment_stack.pop()
+            if fragment_stack and fragment_stack.pop() is not None:
+                semantic_depth -= 1
             continue
         if lowered.startswith(("activate ", "deactivate ", "+", "-")):
             continue

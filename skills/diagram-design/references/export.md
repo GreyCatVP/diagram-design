@@ -412,3 +412,4 @@ The exporter preserves `@font-face` and scopes ordinary rules within block at-ru
 CSS grouping rules are scanned once and preserved without recursively rescanning nested bodies. Exports deeper than 1,024 nested CSS blocks fail with a clear diagnostic (CLI exit 2) before writing output.
 
 `@scope` groups containing ordinary paint rules are refused with a clear exit-2 diagnostic before output is written; definition-only scopes retain their keyframes and font faces. `@layer` order statements remain in source order with their layer blocks, including inside grouping rules, so cascade priority is preserved.
+The exporter keeps optional defs in comments namespaced so they can be uncommented later. Only referenceable defs element types have their IDs renamed; live titles and other elements retain their IDs and accessibility references.

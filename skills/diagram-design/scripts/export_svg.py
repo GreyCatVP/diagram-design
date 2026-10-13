@@ -1090,10 +1090,35 @@ def namespace_defs_ids(svg: str, prefix: str) -> str:
     Only tags, comments and <style> blocks are rewritten; visible text keeps
     its wording. ID selectors in <style> rules follow the renamed IDs.
     """
-    ids = find_defs_ids(svg)
+    # Match opaque regions in one pass: a comment opener inside CDATA is text.
+    live_svg = re.sub(r"<!\[CDATA\[.*?\]\]>|<!--.*?-->", "", svg, flags=re.DOTALL)
+    commented_defs_tags = {"marker", "pattern", "lineargradient", "radialgradient", "filter", "clippath", "mask", "symbol"}
+
+    def markup_ids(markup: str, allowed: set[str] | None = None) -> set[str]:
+        found: set[str] = set()
+        for tag in START_TAG_RE.finditer(markup):
+            if allowed is not None and tag.group(1).lower() not in allowed:
+                continue
+            for attribute in TAG_ATTR_RE.finditer(tag.group(2)):
+                _, name, _, quoted = attribute.groups()
+                if name == "id" and quoted is not None and quoted[0] in "\"'":
+                    found.add(decode_xml_references(quoted[1:-1]))
+        return found
+
+    live_defs_tags = {kind.lower() for kind in DEFS_ID_TAGS}
+    live_ids = set().union(*(markup_ids(block, live_defs_tags)
+        for block in re.findall(r"<defs\b[^>]*>(.*?)</defs>", live_svg, re.IGNORECASE | re.DOTALL)))
+    commented_ids = set().union(*(markup_ids(comment, commented_defs_tags)
+        for comment in re.findall(r"<!--.*?-->", svg, re.DOTALL)))
+    # An optional commented definition must not redirect references to a live
+    # element whose ID is left unchanged, even if both happen to use one name.
+    unrenamed_live_ids = markup_ids(live_svg) - live_ids
+    live_reference_ids = live_ids | (commented_ids - unrenamed_live_ids)
+    ids = live_ids | commented_ids
     if not ids:
         return svg
     replacements = {old: html_entities.escape(f"{prefix}-{old}", quote=True) for old in ids}
+    live_replacements = {old: replacements[old] for old in live_reference_ids}
     url_ref = re.compile(
         r"(?i:url)\(\s*(?P<quote>[\"']|&quot;|&apos;|)\s*#\s*"
         r"(?P<ident>.*?)\s*(?P=quote)\s*\)", re.DOTALL,
@@ -1106,29 +1131,35 @@ def namespace_defs_ids(svg: str, prefix: str) -> str:
     def rewrite_raw_url(match: re.Match[str]) -> str:
         # CSS text with XML references already resolved (or CDATA, which has
         # none): compare and write the ID unescaped; the caller escapes.
-        if match.group("ident") not in ids:
+        if match.group("ident") not in live_reference_ids:
             return match.group(0)
         return f"url({match.group('quote')}#{prefix}-{match.group('ident')}{match.group('quote')})"
 
-    def rewrite_url(match: re.Match[str]) -> str:
-        new = replacements.get(decode_xml_references(match.group("ident")))
+    def rewrite_url(match: re.Match[str], commented: bool = False) -> str:
+        mapping = replacements if commented else live_replacements
+        new = mapping.get(decode_xml_references(match.group("ident")))
         if new is None:
             return match.group(0)
         return f"url({match.group('quote')}#{new}{match.group('quote')})"
 
-    def rewrite_tag(tag: re.Match[str]) -> str:
+    def rewrite_tag(tag: re.Match[str], commented: bool = False) -> str:
+        mapping = replacements if commented else live_replacements
+
         def attribute(match: re.Match[str]) -> str:
             space, name, equals, quoted = match.groups()
             if quoted is None or quoted[0] not in "\"'":
                 return match.group(0)
             raw = quoted[1:-1]
             value = decode_xml_references(raw)
-            if name == "id" and value in replacements:
+            if name == "id" and value in replacements and (
+                tag.group(1).lower() in commented_defs_tags if commented
+                else value in live_ids and tag.group(1).lower() in live_defs_tags
+            ):
                 raw = replacements[value]
-            elif name.lower() in {"href", "xlink:href"} and value.startswith("#") and value[1:] in replacements:
-                raw = "#" + replacements[value[1:]]
+            elif name.lower() in {"href", "xlink:href"} and value.startswith("#") and value[1:] in mapping:
+                raw = "#" + mapping[value[1:]]
             else:
-                raw = url_ref.sub(rewrite_url, raw)
+                raw = url_ref.sub(lambda reference: rewrite_url(reference, commented), raw)
             return space + name + equals + quoted[0] + raw + quoted[-1]
 
         name, attrs, end = tag.groups()
@@ -1141,7 +1172,7 @@ def namespace_defs_ids(svg: str, prefix: str) -> str:
     def rewrite_comment_token(match: re.Match[str]) -> str:
         token = match.group(0)
         tag = START_TAG_RE.fullmatch(token)
-        return rewrite_tag(tag) if tag is not None else rewrite_url(url_ref.fullmatch(token))
+        return rewrite_tag(tag, commented=True) if tag is not None else rewrite_url(url_ref.fullmatch(token), commented=True)
 
     def retarget_style_selectors(region: str) -> str:
         # IDs are already decoded once, so CSS selectors compare against the
@@ -1151,7 +1182,7 @@ def namespace_defs_ids(svg: str, prefix: str) -> str:
             return url_ref.sub(rewrite_url, region)
 
         def retarget(css: str) -> str:
-            for old in sorted(ids, key=len, reverse=True):
+            for old in sorted(live_reference_ids, key=len, reverse=True):
                 escaped_new = "".join(
                     char if char.isalnum() or char in "_-" or ord(char) >= 128
                     else f"\\{ord(char):x} " if ord(char) < 32 or ord(char) == 127
