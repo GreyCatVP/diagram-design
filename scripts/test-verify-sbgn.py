@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -218,6 +219,29 @@ class ContractTests(unittest.TestCase):
                 self.assertIn('data-kind="macromolecule"', source)
                 self.assertIn('data-kind="process"', source)
                 self.assertIn('data-kind="compartment"', source)
+
+    def test_shipped_compartment_label_uses_soft_token(self):
+        # The compartment name is a boundary label, so it takes the skin's
+        # opaque soft role (style-guide.md), not ink at 40% opacity.
+        soft = {"": "#5a6580", "-dark": "#949eb2", "-full": "#5a6580"}
+        for suffix, color in soft.items():
+            path = ROOT / f"skills/diagram-design/assets/example-sbgn{suffix}.html"
+            with self.subTest(variant=suffix):
+                source = path.read_text(encoding="utf-8")
+                labels = re.findall(r"<text\b([^>]*)>\s*CYTOSOL\s*</text>", source)
+                self.assertEqual(len(labels), 1, "expected one CYTOSOL compartment label")
+                fill = re.search(r'\bfill="([^"]*)"', labels[0])
+                self.assertIsNotNone(fill, "compartment label has no fill")
+                self.assertEqual(fill.group(1).lower(), color)
+                self.assertNotRegex(labels[0], r"\b(?:fill-)?opacity=")
+
+    def test_shipped_text_is_opaque(self):
+        for suffix in ("", "-dark", "-full"):
+            path = ROOT / f"skills/diagram-design/assets/example-sbgn{suffix}.html"
+            with self.subTest(variant=suffix):
+                source = path.read_text(encoding="utf-8")
+                for attrs in re.findall(r"<text\b([^>]*)>", source):
+                    self.assertNotRegex(attrs, r'fill="rgba\(', f"translucent text: {attrs.strip()}")
 
     def test_cli_discovery_and_failures(self):
         env = {**os.environ, "PYTHONIOENCODING": "utf-8"}

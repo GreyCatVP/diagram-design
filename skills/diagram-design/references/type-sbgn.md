@@ -38,7 +38,7 @@ Authoring-only: the model arrives as text in the prompt. This type does not impo
 <g data-kind="macromolecule" data-entity-id="bcar" data-compartment="cyt">
   <rect data-role="bounds" x="80" y="80" width="144" height="64" rx="16" fill="#f5f5f5"/>
   <rect x="80" y="80" width="144" height="64" rx="16"
-        fill="rgba(235,108,54,0.08)" stroke="#eb6c36" stroke-width="1"/>
+        fill="rgba(191,69,32,0.08)" stroke="#bf4520" stroke-width="1"/>
   <text x="152" y="108" …>B-carotene</text>
 </g>
 

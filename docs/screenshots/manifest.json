@@ -420,8 +420,8 @@
       "slug": "sbgn",
       "source": "skills/diagram-design/assets/example-sbgn.html",
       "screenshot": "docs/screenshots/sbgn.png",
-      "source_sha256": "30027a71ec443f1c4bcb26225a7d18d7c4116eb3eb07e4ac016ce3f6c9300e66",
-      "screenshot_sha256": "1224d6a976afd4228ac97ed380a46f05792045ab3a09c80afc4d7eb8aa993d7b",
+      "source_sha256": "40789028998363a1018a5bb06ef1cd012c5c40b6becd371cc507b685bfa8d519",
+      "screenshot_sha256": "69a9a1f904e09ffe1d4b80a591cd1353d3e1ce6b3d019e9c333046f595fac961",
       "width": 2400,
       "height": 1442
     }

@@ -306,11 +306,11 @@
     {
       "thumb": "sbgn.webp",
       "source": "docs/screenshots/sbgn.png",
-      "source_sha256": "1224d6a976afd4228ac97ed380a46f05792045ab3a09c80afc4d7eb8aa993d7b",
+      "source_sha256": "69a9a1f904e09ffe1d4b80a591cd1353d3e1ce6b3d019e9c333046f595fac961",
       "width": 600,
       "height": 360,
       "quality": 82,
-      "thumb_sha256": "9fd2521bb396944fe29d530c815eb46e610f76473ebcd75e9951db60cbbfcb5c"
+      "thumb_sha256": "d51ae3f00704566c3d7d9d7caae7af19f267b970cc15336283ceb1a18353c693"
     },
     {
       "thumb": "scatter.webp",
