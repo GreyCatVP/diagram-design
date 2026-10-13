@@ -631,6 +631,8 @@ def _css_rule_tree(css: str) -> list[_CssRule]:
             if re.match(r"@layer\b", selector, re.IGNORECASE):
                 rule = _CssRule(css, starts[-1], index)
                 rule.statement = True
+                # Statement terminators occupy the same end position as a closing brace.
+                rule.end = index
                 (stack[-1].children if stack else roots).append(rule)
                 nodes.append(rule)
             starts[-1] = index + 1

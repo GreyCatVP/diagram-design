@@ -670,6 +670,23 @@ class ExportSvgStandaloneTests(unittest.TestCase):
             self.assertIn('unsupported nested CSS animation declaration', errors.getvalue())
             self.assertNotIn('Traceback', errors.getvalue())
 
+    def test_nested_layer_statement_does_not_hide_animation_declaration(self) -> None:
+        for declaration in ('animation:pulse 1s;', '-webkit-animation-name:pulse;'):
+            with self.subTest(declaration=declaration), tempfile.TemporaryDirectory() as directory:
+                source = Path(directory) / 'layer-gap.html'
+                output = Path(directory) / 'layer-gap.svg'
+                source.write_text(
+                    '<style>@keyframes pulse {to{opacity:1}} .paint {&{@layer first,second;'
+                    + declaration + '}}</style><svg viewBox="0 0 10 10"><rect class="paint"/></svg>',
+                    encoding='utf-8',
+                )
+                errors = io.StringIO()
+                with contextlib.redirect_stderr(errors):
+                    self.assertEqual(self.mod.main([str(source), str(output)]), 2)
+                self.assertFalse(output.exists())
+                self.assertIn('unsupported nested CSS animation declaration', errors.getvalue())
+                self.assertNotIn('Traceback', errors.getvalue())
+
     def test_keyframes_and_bindings_are_scoped_together(self) -> None:
         html = '<style>@keyframes pulse {from {fill:#ff0000} to {fill:#ff0000}}'
         html += '@-webkit-keyframes other {to {opacity:1}}'
