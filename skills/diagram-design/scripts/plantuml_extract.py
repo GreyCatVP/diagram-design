@@ -88,23 +88,31 @@ CLASS_DECL_RE = re.compile(
 SEQ_DECL_RE = re.compile(r"^\s*(?:participant|actor)\b", re.I)
 CLASS_REL_RE = re.compile(r"<\|--|-\|>|\*--|o--|<\|\.\.|\.\.\|>")
 SEQ_ARROW_RE = re.compile(r"(->>|<<-|<->|-->|<--|<-|->)")
-CLASS_ARROWS = (
-    "<|--",
-    "--|>",
-    "<|..",
-    "..|>",
-    "*--",
-    "--*",
-    "o--",
-    "--o",
-    "-->",
-    "<--",
-    "..>",
-    "<..",
-    "--",
-    "..",
+# One whole arrow, matched at a candidate position. Sequence arrows are a
+# dash run with an optional `[#color]` style and `<`/`<<` or `>`/`>>` heads,
+# plus an `x` (lost) or `o` (circle) decoration after the head.
+SEQ_ARROW_AT = re.compile(
+    r"(?P<left><<?)?(?P<body1>-+)(?P<style>\[[^\[\]]*\])?(?P<body2>-*)(?P<right>>>?)?"
+    r"(?P<decoration>[ox](?=[\s:]|$))?"
 )
-SEQ_ARROWS = ("->>", "<<-", "<->", "-->", "<--", "<-", "->")
+# Class arrows are a `-` or `.` run with an optional `[style]` or direction
+# hint (`-up->`) and a head on either end.
+CLASS_ARROW_AT = re.compile(
+    r"(?P<left><\|(?=[-.])|[<*o#x}+^](?=[-.]))?"
+    r"(?P<body1>(?P<char>[-.])(?P=char)*)"
+    r"(?P<style>\[[^\[\]]*\]|(?:up|down|left|right|do|le|ri|u|d|l|r)(?=[-.]))?"
+    r"(?P<body2>(?P=char)*)"
+    r"(?P<right>\|>|[>*o#x{+^])?"
+)
+CLASS_HEADS = {
+    "<|": "inheritance",
+    "|>": "inheritance",
+    "^": "inheritance",
+    "*": "composition",
+    "o": "aggregation",
+    "<": "plain",
+    ">": "plain",
+}
 LIFELINE_KINDS = {
     "participant": "lifeline",
     "actor": "actor",
@@ -596,10 +604,10 @@ def _unsupported_body_kind(text: str) -> str | None:
     """Return a named unsupported kind when the body is clearly not sequence/class."""
     if text.startswith("[*]"):
         return "state"
-    if re.match(r"^state\b", text, re.I) and not _find_arrow(text, SEQ_ARROWS):
+    if re.match(r"^state\b", text, re.I) and not _scan_arrow(text, "sequence"):
         return "state"
     match = re.match(r"^(component|usecase)\b", text, re.I)
-    if match and not _find_arrow(text, SEQ_ARROWS):
+    if match and not _scan_arrow(text, "sequence"):
         return match.group(1).casefold()
     return None
 
@@ -841,35 +849,49 @@ def _parse_participant(text: str, line_number: int = 0) -> tuple[str, str, str, 
     return node_id, label, LIFELINE_KINDS[kind], stereotype
 
 
-def _find_arrow(text: str, arrows: tuple[str, ...]) -> tuple[str, str, str] | None:
-    """Split *text* around the first relationship arrow that is not inside quotes."""
-    in_quote: str | None = None
-    escaped = False
-    index = 0
-    length = len(text)
-    while index < length:
-        character = text[index]
-        if in_quote:
-            if escaped:
-                escaped = False
-            elif character == "\\":
-                escaped = True
-            elif character == in_quote:
-                in_quote = None
-            index += 1
+def _scan_arrow(text: str, kind: str) -> tuple[str, re.Match[str], str] | None:
+    """Split *text* around its first whole arrow outside double quotes.
+
+    The arrow is matched in full (``--->``, ``-[#red]->``, ``-up->``), so no
+    part of it is left behind on either side to become a node name. Returns
+    (left, match, right) or None when the text has no arrow.
+    """
+    pattern = SEQ_ARROW_AT if kind == "sequence" else CLASS_ARROW_AT
+    in_quote = False
+    for index, character in enumerate(text):
+        if character == '"':
+            in_quote = not in_quote
             continue
-        if character in "\"'":
-            in_quote = character
-            index += 1
+        if in_quote or character not in "<-.*o#x}+^":
             continue
-        for arrow in arrows:
-            if text.startswith(arrow, index):
-                left = text[:index].strip()
-                right = text[index + len(arrow) :].strip()
-                if left and right:
-                    return left, arrow, right
-        index += 1
+        match = pattern.match(text, index)
+        if not match:
+            continue
+        left_head, right_head = match.group("left"), match.group("right")
+        before = text[index - 1] if index else " "
+        if kind == "sequence":
+            if not (left_head or right_head):
+                continue
+        else:
+            if left_head in {"o", "x"} and not (before.isspace() or before == '"'):
+                continue  # the `o` ends a name such as `Foo--Bar`
+            body = len(match.group("body1")) + len(match.group("body2"))
+            if not (left_head or right_head) and (
+                body < 2 or not (before.isspace() or before == '"')
+            ):
+                continue  # a headless link needs `--` or `..` set apart from names
+        return text[:index].strip(), match, text[match.end() :].strip()
     return None
+
+
+def _partition_unquoted(text: str, separator: str) -> tuple[str, str]:
+    in_quote = False
+    for index, character in enumerate(text):
+        if character == '"':
+            in_quote = not in_quote
+        elif character == separator and not in_quote:
+            return text[:index], text[index + 1 :]
+    return text, ""
 
 
 def _split_cardinality(side: str) -> tuple[str, str]:
@@ -884,33 +906,58 @@ def _split_cardinality(side: str) -> tuple[str, str]:
     return text, ""
 
 
-def _relationship_kind(arrow: str) -> tuple[str, str, bool, bool, bool]:
-    """Return (arrowhead, style, reverse, bidirectional, undirected)."""
-    dashed = ".." in arrow
+def _class_relationship(
+    match: re.Match[str], line_number: int
+) -> tuple[str, str, bool, bool, bool, bool]:
+    """Return (arrowhead, style, reverse, bidirectional, undirected, hidden).
+
+    The source of an edge is the child for inheritance, the whole (diamond
+    side) for composition and aggregation, and the tail for an association.
+    """
+    style_hint = (match.group("style") or "").casefold()
+    dashed = match.group("char") == "." or "dashed" in style_hint or "dotted" in style_hint
     style = "dashed" if dashed else "solid"
-    if arrow in ("<|--", "--|>", "<|..", "..|>"):
-        return "inheritance", style, arrow in ("<|--", "<|.."), False, False
-    if arrow in ("*--", "--*"):
-        return "composition", style, arrow == "--*", False, False
-    if arrow in ("o--", "--o"):
-        return "aggregation", style, arrow == "--o", False, False
-    if arrow in ("-->", "<--", "..>", "<.."):
-        return "association", style, arrow in ("<--", "<.."), False, False
-    return "association", style, False, False, True
+    hidden = "hidden" in style_hint
+    left = CLASS_HEADS.get(match.group("left") or "", "" if not match.group("left") else None)
+    right = CLASS_HEADS.get(match.group("right") or "", "" if not match.group("right") else None)
+    if left is None or right is None:
+        _fail(f"unsupported relationship arrow `{match.group(0)}` at line {line_number}")
+    if not left and not right:
+        return "association", style, False, False, True, hidden
+    if left == "plain" and right == "plain":
+        return "association", style, False, True, False, hidden
+    if left and right:
+        # A diamond with a navigability arrow keeps the diamond's meaning.
+        if left in {"composition", "aggregation"} and right == "plain":
+            return left, style, False, False, False, hidden
+        if right in {"composition", "aggregation"} and left == "plain":
+            return right, style, True, False, False, hidden
+        _fail(f"unsupported relationship arrow `{match.group(0)}` at line {line_number}")
+    head = left or right
+    if head == "plain":
+        return "association", style, bool(left), False, False, hidden
+    if head == "inheritance":
+        return "inheritance", style, bool(left), False, False, hidden
+    # Composition and aggregation: the diamond side is the source.
+    return head, style, bool(right), False, False, hidden
 
 
-def _seq_arrow_style(arrow: str) -> tuple[str, str, bool, bool]:
-    reverse = arrow in ("<--", "<<-", "<-")
-    bidirectional = arrow == "<->"
-    dashed = arrow in ("-->", "<--")
-    async_arrow = arrow in ("->>", "<<-")
-    if async_arrow:
+def _sequence_arrow(match: re.Match[str]) -> tuple[str, str, bool, bool]:
+    """Return (style, arrowhead, reverse, bidirectional) for a sequence arrow."""
+    left, right = match.group("left"), match.group("right")
+    style_hint = (match.group("style") or "").casefold()
+    dashes = len(match.group("body1")) + len(match.group("body2"))
+    dashed = dashes >= 2 or "dashed" in style_hint or "dotted" in style_hint
+    decoration = match.group("decoration")
+    if decoration == "x":
+        arrowhead = "lost"
+    elif decoration == "o":
+        arrowhead = "circle"
+    elif left == "<<" or right == ">>":
         arrowhead = "async"
-    elif arrow in ("->", "-->", "<--", "<-", "<->"):
-        arrowhead = "arrow"
     else:
         arrowhead = "arrow"
-    return ("dashed" if dashed else "solid"), arrowhead, reverse, bidirectional
+    return ("dashed" if dashed else "solid"), arrowhead, bool(left and not right), bool(left and right)
 
 
 ACTIVATION_SHORTCUT_RE = re.compile(
@@ -946,7 +993,7 @@ def _is_skin(text: str) -> bool:
     if not match:
         return False
     # `Scale -> Client : x` or `Show <|-- Base` uses the word as a name.
-    split = _find_arrow(text, SEQ_ARROWS + CLASS_ARROWS)
+    split = _scan_arrow(text, "sequence") or _scan_arrow(text, "class")
     if split:
         left, _cardinality = _split_cardinality(split[0])
         if left.strip().casefold() == match.group(0).casefold():
@@ -1195,19 +1242,20 @@ def _parse_sequence(diagram: Diagram, lines: list[tuple[int, str]]) -> None:
             continue
         if lowered.startswith("note "):
             _fail(f"malformed statement at line {line_number}")
-        split = _find_arrow(text, SEQ_ARROWS)
+        split = _scan_arrow(text, "sequence")
         if split:
             left, arrow, right = split
-            message = ""
-            if ":" in right:
-                right, _sep, message = right.partition(":")
+            right, message = _partition_unquoted(right, ":")
             right, actions = _activation_shortcut(right)
-            if left.endswith(tuple(SHORTCUT_ACTIONS)):
-                # Shortcuts follow the second participant; `A ++ -> B` is not PlantUML.
+            if left in {"[", "?"} or right in {"]", "?"}:
+                _fail(f"unsupported sequence construct: boundary message at line {line_number}")
+            # Both ends must be one whole name. Shortcuts follow the second
+            # participant only, so `A ++ -> B` fails here too.
+            if not ENDPOINT_RE.match(left) or not ENDPOINT_RE.match(right):
                 _fail(f"malformed edge at line {line_number}")
             source_name = clean_label(left) or left
             target_name = clean_label(right) or right
-            style, arrowhead, reverse, bidirectional = _seq_arrow_style(arrow)
+            style, arrowhead, reverse, bidirectional = _sequence_arrow(arrow)
             if reverse:
                 source_name, target_name = target_name, source_name
             source = diagram.resolve(source_name)
@@ -1333,17 +1381,19 @@ def _parse_class(diagram: Diagram, lines: list[tuple[int, str]]) -> None:
                     cleaned,
                 )
             continue
-        split = _find_arrow(text, CLASS_ARROWS)
+        split = _scan_arrow(text, "class")
         if split:
             left, arrow, right = split
-            label = ""
-            if ":" in right:
-                right, _sep, label = right.partition(":")
+            right, label = _partition_unquoted(right, ":")
             left_name, left_card = _split_cardinality(left)
             right_name, right_card = _split_cardinality(right.strip())
+            if not ENDPOINT_RE.match(left_name) or not ENDPOINT_RE.match(right_name):
+                _fail(f"malformed edge at line {line_number}")
             source_name = clean_label(left_name) or left_name
             target_name = clean_label(right_name) or right_name
-            arrowhead, style, reverse, bidirectional, undirected = _relationship_kind(arrow)
+            arrowhead, style, reverse, bidirectional, undirected, hidden = _class_relationship(
+                arrow, line_number
+            )
             if reverse:
                 source_name, target_name = target_name, source_name
                 left_card, right_card = right_card, left_card
@@ -1353,6 +1403,10 @@ def _parse_class(diagram: Diagram, lines: list[tuple[int, str]]) -> None:
                 diagram.add_node(source, source_name, "class")
             if target not in diagram.node_map:
                 diagram.add_node(target, target_name, "class")
+            if hidden:
+                # `-[hidden]-` is a layout hint with no drawn link.
+                diagram.discarded["skin"] += 1
+                continue
             diagram.add_edge(
                 source,
                 target,

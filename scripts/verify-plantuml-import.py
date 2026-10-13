@@ -535,6 +535,77 @@ def check_activation_shortcuts(tmp: Path) -> None:
     ok("activation shortcuts follow the message's sender and receiver on reverse arrows")
 
 
+def check_whole_arrows(tmp: Path) -> None:
+    """Arrows parse whole; fragments never become participant or class names."""
+    diagram = extract_json(
+        write_puml(
+            tmp,
+            "seq-arrows.puml",
+            "participant A\nparticipant B\nA ---> B : long\nA -[#red]> B : colored\n"
+            "A -[#blue]-> B : colored dashed\nA ->> B : async\nA <-> B : both\nA ->x B : lost\n"
+            "B <-- A : back\nA->B: tight",
+        )
+    )
+    if [node["id"] for node in diagram["nodes"]] != ["A", "B"]:
+        fail(f"sequence arrow fragments became participants: {[node['id'] for node in diagram['nodes']]}")
+    shapes = [
+        (edge["source"], edge["target"], edge["style"], edge["arrowhead"], edge["bidirectional"])
+        for edge in diagram["edges"]
+    ]
+    expected = [
+        ("A", "B", "dashed", "arrow", False),
+        ("A", "B", "solid", "arrow", False),
+        ("A", "B", "dashed", "arrow", False),
+        ("A", "B", "solid", "async", False),
+        ("A", "B", "solid", "arrow", True),
+        ("A", "B", "solid", "lost", False),
+        ("A", "B", "dashed", "arrow", False),
+        ("A", "B", "solid", "arrow", False),
+    ]
+    if shapes != expected:
+        fail(f"sequence arrows parsed wrongly: {shapes}")
+    for name, body, message in (
+        ("seq-chain.puml", "participant A\nA -> B -> C : chain", "malformed edge at line 3"),
+        ("seq-space.puml", "participant A\nA -> B C : x", "malformed edge at line 3"),
+        ("seq-quoted-tail.puml", 'participant A\nA "1" -> B : x', "malformed edge at line 3"),
+        ("seq-boundary.puml", "participant A\n[-> A : start", "unsupported sequence construct: boundary message at line 3"),
+    ):
+        expect_error([str(write_puml(tmp, name, body))], message)
+
+    diagram = extract_json(
+        write_puml(
+            tmp,
+            "class-arrows.puml",
+            "class A\nclass B\nA ---> B\nA -up-> B\nA -[#red]-> B\nA .> B\n"
+            'A "1" *--> "many" B\nA -[hidden]- B\nB <|... A\nA --o B',
+        )
+    )
+    if [node["id"] for node in diagram["nodes"]] != ["A", "B"]:
+        fail(f"class arrow fragments became classes: {[node['id'] for node in diagram['nodes']]}")
+    shapes = [
+        (edge["source"], edge["target"], edge["style"], edge["arrowhead"])
+        for edge in diagram["edges"]
+    ]
+    expected = [
+        ("A", "B", "solid", "association"),
+        ("A", "B", "solid", "association"),
+        ("A", "B", "solid", "association"),
+        ("A", "B", "dashed", "association"),
+        ("A", "B", "solid", "composition"),
+        ("A", "B", "dashed", "inheritance"),
+        ("B", "A", "solid", "aggregation"),
+    ]
+    if shapes != expected or diagram["discarded"]["skin"] != 1:
+        fail(f"class arrows parsed wrongly: {shapes} {diagram['discarded']}")
+    for name, body, message in (
+        ("class-chain.puml", "class A\nA --> B --> C", "malformed edge at line 3"),
+        ("class-space.puml", "class A\nA --> B C", "malformed edge at line 3"),
+        ("class-head.puml", "class A\nA x-- B", "unsupported relationship arrow `x--` at line 3"),
+    ):
+        expect_error([str(write_puml(tmp, name, body))], message)
+    ok("arrows parse whole (long, styled, directed, decorated) and malformed ones fail by line")
+
+
 def check_multi_diagram() -> None:
     payload = json.loads(run_extract([str(MULTI), "--diagram", "1", "--json"]))
     if payload["diagrams_total"] != 2:
@@ -889,6 +960,7 @@ def main() -> int:
         check_cardinality_ends(tmp)
         check_note_placement(tmp)
         check_activation_shortcuts(tmp)
+        check_whole_arrows(tmp)
         check_adversarial(tmp)
         check_errors_and_limits(tmp)
         check_legacy_stdout_encoding(tmp)
