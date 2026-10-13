@@ -189,6 +189,27 @@ MARK_TAGS = ("circle",)                       # the element this contract binds
 # === PARSING =================================================================
 
 
+# Quoted CSS data is not a declaration: `--note: "a;transform:b"` moves nothing (#431).
+# A quote opens a string only where the browser tokenizes one, so a comment, an
+# unquoted url() and an escaped character are consumed first and kept as written. A
+# string that never closes on its line is kept as well, so the checker still fails
+# closed on it. Every other character of a string becomes a space and its newlines
+# stay, so each offset and line number still points into the CSS as written.
+CSS_STRING_RE = re.compile(
+    r"""/\*.*?(?:\*/|\Z)|url\(\s*[^"'\s)][^)]*\)|\\[\s\S]"""
+    r"""|(?P<string>"(?:\\[\s\S]|[^"\\\n])*"|'(?:\\[\s\S]|[^'\\\n])*')""",
+    re.DOTALL | re.IGNORECASE,
+)
+
+
+def blank_css_strings(css: str) -> str:
+    """CSS with the contents of every quoted string blanked, same length and lines."""
+    return CSS_STRING_RE.sub(
+        lambda found: re.sub(r"[^\n]", " ", found.group()) if found.group("string") else found.group(),
+        css,
+    )
+
+
 class Element:
     """One start tag this checker cares about, as the browser tokenized it."""
 
@@ -377,7 +398,7 @@ def css_moves_mark(css: str):
     that counts newlines up to the property names the right line.
     """
     stripped = CSS_COMMENT_RE.sub(
-        lambda found: re.sub(r"[^\n]", " ", found.group()), css)
+        lambda found: re.sub(r"[^\n]", " ", found.group()), blank_css_strings(css))
     return CSS_MOVES_MARK_RE.search(stripped)
 
 

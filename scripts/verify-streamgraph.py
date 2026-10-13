@@ -182,6 +182,27 @@ BODY_TAGS = ("text", "title", "desc", "style")  # elements whose character data 
 # === PARSING =================================================================
 
 
+# Quoted CSS data is not a declaration: `--note: "a;transform:b"` moves nothing (#431).
+# A quote opens a string only where the browser tokenizes one, so a comment, an
+# unquoted url() and an escaped character are consumed first and kept as written. A
+# string that never closes on its line is kept as well, so the checker still fails
+# closed on it. Every other character of a string becomes a space and its newlines
+# stay, so each offset and line number still points into the CSS as written.
+CSS_STRING_RE = re.compile(
+    r"""/\*.*?(?:\*/|\Z)|url\(\s*[^"'\s)][^)]*\)|\\[\s\S]"""
+    r"""|(?P<string>"(?:\\[\s\S]|[^"\\\n])*"|'(?:\\[\s\S]|[^'\\\n])*')""",
+    re.DOTALL | re.IGNORECASE,
+)
+
+
+def blank_css_strings(css: str) -> str:
+    """CSS with the contents of every quoted string blanked, same length and lines."""
+    return CSS_STRING_RE.sub(
+        lambda found: re.sub(r"[^\n]", " ", found.group()) if found.group("string") else found.group(),
+        css,
+    )
+
+
 class Element:
     """One start tag this checker cares about, as the browser tokenized it."""
 
@@ -365,7 +386,7 @@ def transform_carrier(attrs: dict):
         return "transform=%r" % attrs["transform"]
     style = attrs.get("style")
     if style is not None:
-        found = CSS_MOVES_MARK_RE.search(strip_css_comments(style))
+        found = CSS_MOVES_MARK_RE.search(strip_css_comments(blank_css_strings(style)))
         if found is not None:
             return "style=%r (the %s property)" % (style, found.group("prop").lower())
     return None
@@ -632,7 +653,7 @@ def check_transforms(doc: _Scanner, findings: list, name: str) -> None:
         # Comments become whitespace before the search (a `/**/` prefix is
         # not a declaration boundary the regex knows), with newlines kept so
         # the reported line is the declaration's line in the source.
-        body = strip_css_comments(element.body)
+        body = strip_css_comments(blank_css_strings(element.body))
         found = CSS_MOVES_MARK_RE.search(body)
         if found:
             findings.append(

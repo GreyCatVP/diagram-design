@@ -101,6 +101,27 @@ GEOMETRY_TOLERANCE = 2.0
 WCAG_NON_TEXT = 3.0
 
 
+# Quoted CSS data is not a declaration: `--note: "a;transform:b"` moves nothing (#431).
+# A quote opens a string only where the browser tokenizes one, so a comment, an
+# unquoted url() and an escaped character are consumed first and kept as written. A
+# string that never closes on its line is kept as well, so the checker still fails
+# closed on it. Every other character of a string becomes a space and its newlines
+# stay, so each offset and line number still points into the CSS as written.
+CSS_STRING_RE = re.compile(
+    r"""/\*.*?(?:\*/|\Z)|url\(\s*[^"'\s)][^)]*\)|\\[\s\S]"""
+    r"""|(?P<string>"(?:\\[\s\S]|[^"\\\n])*"|'(?:\\[\s\S]|[^'\\\n])*')""",
+    re.DOTALL | re.IGNORECASE,
+)
+
+
+def blank_css_strings(css: str) -> str:
+    """CSS with the contents of every quoted string blanked, same length and lines."""
+    return CSS_STRING_RE.sub(
+        lambda found: re.sub(r"[^\n]", " ", found.group()) if found.group("string") else found.group(),
+        css,
+    )
+
+
 def attrs_of(tag_attrs: str) -> dict[str, str]:
     return {
         m.group("name").lower(): m.group("dq") if m.group("dq") is not None else m.group("sq")
@@ -123,7 +144,7 @@ def transform_carrier(attrs: dict[str, str]) -> str | None:
         return f"transform={attrs['transform']!r}"
     style = attrs.get("style")
     if style is not None:
-        found = CSS_MOVES_MARK_RE.search(style)
+        found = CSS_MOVES_MARK_RE.search(blank_css_strings(style))
         if found is not None:
             return f"style={style!r} (the {found.group('prop').lower()} property)"
     return None
@@ -466,7 +487,7 @@ def check_transforms(source: str, errors: list[str]) -> None:
         for token in (match.group(1) or match.group(2) or "").split()
     }
     for match in STYLE_RE.finditer(source):
-        found = CSS_MOVES_MARK_RE.search(match.group("body"))
+        found = CSS_MOVES_MARK_RE.search(blank_css_strings(match.group("body")))
         if found is not None:
             errors.append(
                 f"CSS {found.group('prop').lower()!r} declaration can move verified "
