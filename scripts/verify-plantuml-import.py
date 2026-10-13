@@ -377,6 +377,34 @@ def check_digest_edges_use_ids(tmp: Path) -> None:
     ok("digest edges and summaries name endpoints by id, with the label alongside")
 
 
+def check_unselected_comment_isolated(tmp: Path) -> None:
+    """An unclosed block comment fails only the block that contains it."""
+    source = tmp / "unselected-comment.puml"
+    source.write_text(
+        "@startuml\nAlice -> Bob : one\n@enduml\n\n"
+        "@startuml\nCarol -> Dan : two\n/'\nnever closed\n@enduml\n",
+        encoding="utf-8",
+    )
+    for args in ([str(source)], [str(source), "--diagram", "0"]):
+        digest = run_extract(args)
+        if "[1] unparsed: unterminated block comment at line 7" not in digest:
+            fail(f"unselected block with an open comment was not listed as unparsed: {digest!r}")
+        if "## Diagram 0" not in digest:
+            fail("selected block was not emitted past an open comment elsewhere")
+    expect_error([str(source), "--diagram", "1"], "unterminated block comment at line 7")
+    expect_error([str(source), "--diagram", "all"], "unterminated block comment at line 7")
+    fenced = tmp / "unselected-comment.md"
+    fenced.write_text(
+        "```plantuml\n@startuml\nAlice -> Bob : one\n@enduml\n```\n\n"
+        "```plantuml\n@startuml\nCarol -> Dan : two\n/'\n@enduml\n```\n",
+        encoding="utf-8",
+    )
+    if "## Diagram 0" not in run_extract([str(fenced), "--diagram", "0"]):
+        fail("fenced block 0 was blocked by an open comment in fenced block 1")
+    expect_error([str(fenced), "--diagram", "1"], "unterminated block comment at line 10")
+    ok("an unclosed block comment fails only its own block")
+
+
 def check_multi_diagram() -> None:
     payload = json.loads(run_extract([str(MULTI), "--diagram", "1", "--json"]))
     if payload["diagrams_total"] != 2:
@@ -726,6 +754,7 @@ def main() -> int:
         check_review_regressions(tmp)
         check_kind_detection_skips_bodies(tmp)
         check_digest_edges_use_ids(tmp)
+        check_unselected_comment_isolated(tmp)
         check_adversarial(tmp)
         check_errors_and_limits(tmp)
         check_legacy_stdout_encoding(tmp)

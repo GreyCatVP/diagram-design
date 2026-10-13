@@ -377,6 +377,9 @@ class SourceBlock:
     text: str
     source_line: int
     start_kind: str = "uml"
+    # A failure found while splitting the file (an unclosed block comment).
+    # It belongs to this block alone and is raised only when it is selected.
+    error: str | None = None
 
 
 def clean_label(value: str) -> str:
@@ -411,13 +414,17 @@ def _read_bounded(path: Path) -> str:
         _fail(f"{path.name}: source is not valid UTF-8 text")
 
 
-def _split_uml_regions(text: str, base_line: int) -> list[tuple[int, str, str]]:
-    """Return (start_line, body, start_kind) for each @start/@end region.
+def _split_uml_regions(
+    text: str, base_line: int
+) -> list[tuple[int, str, str, str | None]]:
+    """Return (start_line, body, start_kind, error) for each @start/@end region.
 
     Block comments are tracked inside a region, so an ``@enduml`` line inside
-    ``/' ... '/`` does not close the diagram early.
+    ``/' ... '/`` does not close the diagram early. An unclosed comment is
+    recorded as that region's error instead of stopping the whole file, so
+    other blocks stay selectable.
     """
-    regions: list[tuple[int, str, str]] = []
+    regions: list[tuple[int, str, str, str | None]] = []
     lines = text.splitlines()
     start: int | None = None
     kind = "uml"
@@ -443,15 +450,18 @@ def _split_uml_regions(text: str, base_line: int) -> list[tuple[int, str, str]]:
             body.append(raw)
             continue
         if closed:
-            regions.append((start, "\n".join(body), kind))
+            regions.append((start, "\n".join(body), kind, None))
             start = None
             body = []
             continue
         body.append(raw)
-    if comment_start is not None:
-        _fail(f"unterminated block comment at line {comment_start}")
     if start is not None:
-        regions.append((start, "\n".join(body), kind))
+        error = (
+            f"unterminated block comment at line {comment_start}"
+            if comment_start is not None
+            else None
+        )
+        regions.append((start, "\n".join(body), kind, error))
     return regions
 
 
@@ -462,15 +472,15 @@ def load_blocks(path: Path) -> list[SourceBlock]:
     source = _read_bounded(path)
     collected: list[SourceBlock] = []
 
-    def add(start_line: int, text: str, start_kind: str) -> None:
-        collected.append(SourceBlock(len(collected), text, start_line, start_kind))
+    def add(start_line: int, text: str, start_kind: str, error: str | None = None) -> None:
+        collected.append(SourceBlock(len(collected), text, start_line, start_kind, error))
 
     if suffix in PLANTUML_SUFFIXES:
         regions = _split_uml_regions(source, 1)
         if not regions:
             _fail(f"{path.name}: no @startuml block found")
-        for start_line, text, kind in regions:
-            add(start_line, text, kind)
+        for start_line, text, kind, error in regions:
+            add(start_line, text, kind, error)
         return collected
 
     lines = source.splitlines()
@@ -489,8 +499,8 @@ def load_blocks(path: Path) -> list[SourceBlock]:
             block_text = "\n".join(content)
             regions = _split_uml_regions(block_text, start)
             if regions:
-                for start_line, text, kind in regions:
-                    add(start_line, text, kind)
+                for start_line, text, kind, error in regions:
+                    add(start_line, text, kind, error)
             else:
                 add(start, block_text, "uml")
             start = None
@@ -1224,6 +1234,8 @@ def _parse_class(diagram: Diagram, lines: list[tuple[int, str]]) -> None:
 
 
 def parse_block(block: SourceBlock) -> Diagram:
+    if block.error:
+        _fail(block.error)
     if block.start_kind != "uml":
         token = block.start_kind
         if token in UNSUPPORTED_STARTS or token != "uml":
