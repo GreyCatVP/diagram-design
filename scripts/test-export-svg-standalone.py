@@ -603,6 +603,32 @@ class ExportSvgStandaloneTests(unittest.TestCase):
         self.assertIn('aria-labelledby="name"><title id="name">Title</title>', result)
         self.assertIn('<marker id="demo-name"/>', result)
 
+    def test_optional_defs_387_cdata_text_is_not_a_live_id_collision(self) -> None:
+        svg = ('<svg viewBox="0 0 10 10"><metadata><![CDATA[<g id="dots"/>]]></metadata>'
+               '<defs><!-- <pattern id="dots"><rect width="1" height="1"/></pattern> --></defs>'
+               '<rect width="10" height="10" fill="url(#dots)"/></svg>')
+        result = self.mod.export_svg_document(svg, Path("cdata-pattern.html"))
+        self.assertIn('<![CDATA[<g id="dots"/>]]>', result)
+        self.assertIn('<pattern id="cdata-pattern-dots">', result)
+        root = ET.fromstring(result)
+        rect = root.find("{http://www.w3.org/2000/svg}rect")
+        self.assertEqual(rect.get("fill"), "url(#cdata-pattern-dots)")
+        restored = ET.fromstring(result.replace('<!--', '').replace('-->', ''))
+        pattern = restored.find('.//{http://www.w3.org/2000/svg}pattern')
+        self.assertEqual(pattern.get('id'), 'cdata-pattern-dots')
+
+    def test_optional_defs_387_opaque_delimiters_keep_real_id_ownership(self) -> None:
+        for metadata in ('<![CDATA[<!-- literal]]>', '<!-- <![CDATA[ literal -->'):
+            with self.subTest(metadata=metadata):
+                svg = '<svg viewBox="0 0 10 10"><metadata>' + metadata + '</metadata>'
+                svg += '<symbol id="dots"><rect width="1" height="1"/></symbol>'
+                svg += '<defs><!-- <pattern id="dots"/> --></defs><use href="#dots"/></svg>'
+                result = self.mod.export_svg_document(svg, Path("opaque-collision.html"))
+                root = ET.fromstring(result)
+                self.assertEqual(root.find('{http://www.w3.org/2000/svg}symbol').get('id'), 'dots')
+                self.assertEqual(root.find('{http://www.w3.org/2000/svg}use').get('href'), '#dots')
+                self.assertIn('<pattern id="opaque-collision-dots"/>', result)
+
     def test_optional_defs_387_live_collision_survives_actual_export(self) -> None:
         svg = ('<svg viewBox="0 0 10 10"><defs><!-- <pattern id="dot"/> --></defs>'
                '<symbol id="dot"><rect width="5" height="5" fill="red"/></symbol>'

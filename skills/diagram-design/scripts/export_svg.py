@@ -653,7 +653,8 @@ def namespace_defs_ids(svg: str, prefix: str) -> str:
     Only tags, comments and <style> blocks are rewritten; visible text keeps
     its wording. ID selectors in <style> rules follow the renamed IDs.
     """
-    live_svg = re.sub(r"<!--.*?-->", "", svg, flags=re.DOTALL)
+    # Match opaque regions in one pass: a comment opener inside CDATA is text.
+    live_svg = re.sub(r"<!\[CDATA\[.*?\]\]>|<!--.*?-->", "", svg, flags=re.DOTALL)
     commented_defs_tags = {"marker", "pattern", "lineargradient", "radialgradient", "filter", "clippath", "mask", "symbol"}
 
     def markup_ids(markup: str, allowed: set[str] | None = None) -> set[str]:
