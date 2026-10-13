@@ -892,7 +892,8 @@ def _parse_sequence(
                 "actor" if kind == "actor" else "lifeline",
             )
             continue
-        if re.match(r"^rect\s+", text, re.I) and message_re.match(text) is None:
+        if (re.match(r"^rect\s+", text, re.I) and message_re.match(text) is None
+                and re.search(r"<<--?>>|--?>>|--?>|--?\)|--?x", text) is None):
             fragment_stack.append(None)
             continue
         fragment = re.match(r"^(alt|opt|loop|par|critical|break)\b\s*(.*)$", text, re.I)

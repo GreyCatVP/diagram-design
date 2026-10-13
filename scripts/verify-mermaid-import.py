@@ -859,6 +859,8 @@ def check_adversarial(tmp: Path) -> None:
 
 def check_sequence_highlight_nesting_regression(tmp: Path) -> None:
     cases = [
+        ("named-color-highlight", "rect lightblue\nA->>B: highlighted\nend", [], ["highlighted"]),
+        ("hex-color-highlight", "rect #ffccaa\nA->>B: highlighted\nend", [], ["highlighted"]),
         ("highlight-inside-alt", "alt success\nrect rgb(200, 200, 200)\nrect rgba(0, 0, 255, .1)\nA->>B: highlighted\nend\nend\nelse failure\nA->>B: rejected\nend", [("alt", "success", 0, ["failure"])], ["highlighted", "rejected"]),
         ("alt-inside-highlight", "rect rgb(200, 200, 200)\nalt success\nloop retries\nA->>B: attempt\nend\nelse failure\nA->>B: rejected\nend\nend", [("alt", "success", 0, ["failure"]), ("loop", "retries", 1, [])], ["attempt", "rejected"]),
         ("ordinary-fragment-control", "alt success\nloop retries\nA->>B: attempt\nend\nelse failure\nA->>B: rejected\nend", [("alt", "success", 0, ["failure"]), ("loop", "retries", 1, [])], ["attempt", "rejected"]),
@@ -882,6 +884,9 @@ def check_sequence_highlight_nesting_regression(tmp: Path) -> None:
         fail("rect participant message was mistaken for visual highlighting")
     if diagram["fragments"]:
         fail("rect participant message introduced a semantic fragment")
+    malformed = tmp / "sequence-highlight-malformed-rect.mmd"
+    malformed.write_text("sequenceDiagram\nrect ->>: missing target\n", encoding="utf-8")
+    expect_error([str(malformed)], "malformed edge at line 2")
     # Count actual depth-reduction work instead of relying on machine timing.
     extractor = load_extractor_module()
     for depth in (100, 200):
