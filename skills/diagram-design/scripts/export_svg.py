@@ -101,6 +101,11 @@ STYLE_BLOCK_RE = re.compile(r"<style\b[^>]*>(.*?)</style\s*>", re.IGNORECASE | r
 SVG_TAG_RE = re.compile(
     r"<svg(?=[\s/>])(?:[^>\"']|\"[^\"]*\"|'[^']*')*>|</svg\s*>", re.IGNORECASE
 )
+# SVG roots and HTML integration points determine the namespace of a style.
+SVG_STYLE_CONTEXT_RE = re.compile(
+    r"<(?P<close>/)?(?P<tag>svg|foreignObject|desc|title)(?=[\s/>])"
+    r"(?:[^>\"']|\"[^\"]*\"|'[^']*')*>", re.IGNORECASE
+)
 CDATA_SECTION_RE = re.compile(r"<!\[CDATA\[(.*?)\]\]>", re.DOTALL)
 # Each alternative starts on a different character, and a comment cannot run
 # past its first "*/", so a failed match backtracks linearly, not
@@ -542,20 +547,27 @@ def retarget_root_selector(selector: str, original_id: str, root_id: str) -> str
 def diagram_css_from_html(html: str, root_id: str, original_root_id: str = "") -> str:
     """Filter page <style> rules down to diagram rules, scoped under root_id."""
     kept: list[str] = []
-    svg_tags = iter(SVG_TAG_RE.finditer(mask_opaque_html(html, styles=True)))
-    svg_tag = next(svg_tags, None)
-    svg_depth = 0
+    tags = iter(SVG_STYLE_CONTEXT_RE.finditer(mask_opaque_html(html, styles=True)))
+    tag = next(tags, None)
+    contexts: list[str] = []
     for style in STYLE_BLOCK_RE.finditer(mask_opaque_html(html)):
-        while svg_tag is not None and svg_tag.start() < style.start():
-            tag = svg_tag.group(0)
-            if tag.startswith("</"):
-                svg_depth -= 1
-            elif not tag.endswith("/>"):
-                svg_depth += 1
-            svg_tag = next(svg_tags, None)
+        while tag is not None and tag.start() < style.start():
+            name = tag.group("tag").lower()
+            if tag.group("close"):
+                # Ignore unmatched closing tags, as browsers do. Closing a
+                # matched ancestor also leaves any nested integration points.
+                for index in range(len(contexts) - 1, -1, -1):
+                    if contexts[index] == name:
+                        del contexts[index:]
+                        break
+            elif not tag.group(0).endswith("/>"):
+                if name == "svg" or (contexts and contexts[-1] == "svg"):
+                    contexts.append(name)
+            tag = next(tags, None)
         block = style.group(1)
-        # CDATA is markup in SVG, but literal raw text in HTML <style>.
-        if svg_depth > 0:
+        # foreignObject/desc/title children are HTML; a nested svg re-enters
+        # SVG. CDATA-looking strings in HTML styles must remain literal.
+        if contexts and contexts[-1] == "svg":
             block = CDATA_SECTION_RE.sub(lambda match: match.group(1), block)
         # A comment before a rule would otherwise become part of its selector
         # (`/* Tokens */ :root` is not recognised as `:root`).

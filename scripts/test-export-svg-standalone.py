@@ -712,6 +712,68 @@ class ExportSvgStandaloneTests(unittest.TestCase):
         carried = self.mod.diagram_css_from_html(source, "literal-root")
         self.assertIn('content: "&lt;![CDATA[literal]]>"', carried)
 
+    def test_foreign_object_html_style_is_not_unwrapped(self) -> None:
+        html = ('<svg id="original" viewBox="0 0 10 10"><foreignObject>'
+                '<div xmlns="http://www.w3.org/1999/xhtml"><style>'
+                '#original .paint::after { content: "<![CDATA[literal]]>"; }'
+                '</style></div></foreignObject></svg>')
+        carried = self.mod.diagram_css_from_html(html, "literal-root", "original")
+        self.assertIn('content: "&lt;![CDATA[literal]]>"', carried)
+        # Preserve the existing refusal of invalid XML rather than silently
+        # changing the HTML CSS string so the document can be exported.
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "literal.html"
+            source.write_text(html, encoding="utf-8")
+            self.assertEqual(self.mod.main([str(source), "--system-fonts"]), 2)
+            self.assertFalse(source.with_suffix(".svg").exists())
+
+    def test_nested_svg_styles_inside_foreign_object_are_unwrapped(self) -> None:
+        html = ('<svg id="original" viewBox="0 0 10 10"><foreignObject>'
+                '<div xmlns="http://www.w3.org/1999/xhtml">'
+                '<svg xmlns="http://www.w3.org/2000/svg"><style>'
+                '<![CDATA[#original .paint { fill: red; }]]>'
+                '</style><rect class="paint" width="5" height="5"/></svg>'
+                '<style>.paint::after { content: "<![CDATA[literal]]>"; }</style>'
+                '</div></foreignObject><style><![CDATA[.outline { stroke: blue; }]]></style></svg>')
+        carried = self.mod.diagram_css_from_html(html, "nested-root", "original")
+        self.assertIn("#nested-root .paint { fill: red; }", carried)
+        self.assertIn('content: "&lt;![CDATA[literal]]>"', carried)
+        self.assertIn("#nested-root .outline { stroke: blue; }", carried)
+        valid_html = html.replace(
+            '<style>.paint::after { content: "<![CDATA[literal]]>"; }</style>', "")
+        exported = self.mod.export_svg_document(valid_html, Path("nested.html"), system_fonts=True)
+        document = ET.fromstring(exported)
+        carried_style = document.find(
+            "{http://www.w3.org/2000/svg}defs/{http://www.w3.org/2000/svg}style"
+        ).text
+        self.assertIn("#nested-root .paint { fill: red; }", carried_style)
+        self.assertIn("#nested-root .outline { stroke: blue; }", carried_style)
+
+    def test_svg_html_integration_points_preserve_style_literals(self) -> None:
+        for tag in ("foreignObject", "desc", "title"):
+            with self.subTest(tag=tag):
+                html = (f'<svg><{tag}><style>'
+                        '.paint::after { content: "<![CDATA[literal]]>"; }'
+                        f'</style></{tag}><style><![CDATA[.paint {{ fill:red }}]]></style></svg>')
+                carried = self.mod.diagram_css_from_html(html, "scope-root")
+                self.assertIn('content: "&lt;![CDATA[literal]]>"', carried)
+                self.assertIn("#scope-root .paint { fill:red }", carried)
+
+    def test_cli_carries_svg_styles_after_stray_closing_svg(self) -> None:
+        html = ('<div></svg></div><svg id="original" viewBox="0 0 10 10">'
+                '<style><![CDATA[#original .paint { fill: red; }]]></style>'
+                '<rect class="paint" width="5" height="5"/></svg>')
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "stray.html"
+            source.write_text(html, encoding="utf-8")
+            self.assertEqual(self.mod.main([str(source), "--system-fonts"]), 0)
+            document = ET.fromstring(source.with_suffix(".svg").read_text(encoding="utf-8"))
+            carried = document.find(
+                "{http://www.w3.org/2000/svg}defs/{http://www.w3.org/2000/svg}style"
+            ).text
+            self.assertIn("#stray-root .paint { fill: red; }", carried)
+            self.assertNotIn("&lt;![CDATA[", carried)
+
     def test_cli_writes_default_path(self) -> None:
         source = ASSETS / "example-loop.html"
         with tempfile.TemporaryDirectory() as tmp:
