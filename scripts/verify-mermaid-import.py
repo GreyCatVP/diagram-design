@@ -882,6 +882,26 @@ def check_sequence_highlight_nesting_regression(tmp: Path) -> None:
         fail("rect participant message was mistaken for visual highlighting")
     if diagram["fragments"]:
         fail("rect participant message introduced a semantic fragment")
+    # Count actual depth-reduction work instead of relying on machine timing.
+    extractor = load_extractor_module()
+    for depth in (100, 200):
+        visits = [0]
+
+        def counted_sum(values, start=0):
+            total = start
+            for value in values:
+                visits[0] += 1
+                total += value
+            return total
+
+        extractor.sum = counted_sum
+        text = "rect rgb(0, 0, 0)\nopt nested\n" * depth + "A->>B: deepest\n" + "end\nend\n" * depth
+        diagram = extractor.Diagram(0, "sequenceDiagram", 1)
+        extractor._parse_sequence(diagram, list(enumerate(("sequenceDiagram\n" + text).splitlines(), 1)), 0)
+        if [fragment["depth"] for fragment in diagram.fragments] != list(range(depth)):
+            fail("deep highlight blocks changed semantic fragment depth")
+        if visits[0] > len(text):
+            fail(f"sequence fragment depth rescanned nested stacks: {visits[0]} visits")
     ok("sequence highlight blocks preserve semantic fragment regions and depth")
 
 

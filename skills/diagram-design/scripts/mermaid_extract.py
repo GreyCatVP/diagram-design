@@ -849,6 +849,7 @@ def _parse_sequence(
 ) -> None:
     # None marks a visual-only rect block: its end must not close a semantic fragment.
     fragment_stack: list[dict[str, Any] | None] = []
+    semantic_depth = 0
     participant_re = re.compile(
         r"^(?:create\s+)?(participant|actor)\s+"
         r"(?:\"([^\"]+)\"|'([^']+)'|([\w.:-]+))"
@@ -900,19 +901,20 @@ def _parse_sequence(
                 "kind": fragment.group(1).casefold(),
                 "label": clean_label(fragment.group(2)),
                 "line": line_number,
-                "depth": sum(entry is not None for entry in fragment_stack),
+                "depth": semantic_depth,
                 "regions": [],
             }
             diagram.fragments.append(entry)
             fragment_stack.append(entry)
+            semantic_depth += 1
             continue
         region = re.match(r"^(else|and|option)\b\s*(.*)$", text, re.I)
         if region and fragment_stack and fragment_stack[-1] is not None:
             fragment_stack[-1]["regions"].append(clean_label(region.group(2)))
             continue
         if lowered == "end":
-            if fragment_stack:
-                fragment_stack.pop()
+            if fragment_stack and fragment_stack.pop() is not None:
+                semantic_depth -= 1
             continue
         if lowered.startswith(("activate ", "deactivate ", "+", "-")):
             continue
