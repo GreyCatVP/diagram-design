@@ -438,6 +438,31 @@ def check_generics_survive(tmp: Path) -> None:
     ok("generic parameters survive in labels, members, messages, and the digest")
 
 
+def check_cardinality_ends(tmp: Path) -> None:
+    """Each cardinality stays on the class it was written next to."""
+    def ends(body: str, name: str) -> tuple[tuple[str, str, str, str], str]:
+        source = write_puml(tmp, name, "class A\nclass B\n" + body)
+        edge = extract_json(source)["edges"][0]
+        row = next(line for line in run_extract([str(source)]).splitlines() if line.startswith("| 1 |"))
+        return (
+            edge["source"],
+            edge["target"],
+            edge.get("source_cardinality"),
+            edge.get("target_cardinality"),
+        ), row
+
+    left, left_row = ends('A "1" --> B : owns', "card-left.puml")
+    right, right_row = ends('A --> B "1" : owns', "card-right.puml")
+    if left != ("A", "B", "1", "") or right != ("A", "B", "", "1"):
+        fail(f"one-sided cardinality lost its end: {left} vs {right}")
+    if "cardinality 1 (source)" not in left_row or "cardinality 1 (target)" not in right_row:
+        fail(f"digest cannot tell which end owns the cardinality: {left_row!r} / {right_row!r}")
+    reverse, _row = ends('A "1" <|-- "many" B', "card-reverse.puml")
+    if reverse != ("B", "A", "many", "1"):
+        fail(f"reverse arrow moved a cardinality to the wrong class: {reverse}")
+    ok("source and target cardinalities stay separate in JSON and the digest")
+
+
 def check_multi_diagram() -> None:
     payload = json.loads(run_extract([str(MULTI), "--diagram", "1", "--json"]))
     if payload["diagrams_total"] != 2:
@@ -789,6 +814,7 @@ def main() -> int:
         check_digest_edges_use_ids(tmp)
         check_unselected_comment_isolated(tmp)
         check_generics_survive(tmp)
+        check_cardinality_ends(tmp)
         check_adversarial(tmp)
         check_errors_and_limits(tmp)
         check_legacy_stdout_encoding(tmp)

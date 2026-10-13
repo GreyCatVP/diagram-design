@@ -213,7 +213,11 @@ class Edge:
     arrowhead: str = "arrow"
     bidirectional: bool = False
     undirected: bool = False
+    # `cardinality` is "<source> .. <target>" with `-` for an end that has
+    # none, so `A "1" --> B` and `A --> B "1"` never read the same.
     cardinality: str = ""
+    source_cardinality: str = ""
+    target_cardinality: str = ""
     order: int = 0
 
 
@@ -336,7 +340,8 @@ class Diagram:
         arrowhead: str = "arrow",
         bidirectional: bool = False,
         undirected: bool = False,
-        cardinality: str = "",
+        source_cardinality: str = "",
+        target_cardinality: str = "",
     ) -> Edge:
         if len(self.edges) >= MAX_EDGES:
             _fail(f"edge limit exceeded (max {MAX_EDGES})")
@@ -349,7 +354,13 @@ class Diagram:
             arrowhead=arrowhead,
             bidirectional=bidirectional,
             undirected=undirected,
-            cardinality=cardinality,
+            cardinality=(
+                f"{source_cardinality or '-'} .. {target_cardinality or '-'}"
+                if source_cardinality or target_cardinality
+                else ""
+            ),
+            source_cardinality=source_cardinality,
+            target_cardinality=target_cardinality,
             order=len(self.edges) + 1,
         )
         self.edges.append(edge)
@@ -1243,18 +1254,16 @@ def _parse_class(diagram: Diagram, lines: list[tuple[int, str]]) -> None:
                 diagram.add_node(source, source_name, "class")
             if target not in diagram.node_map:
                 diagram.add_node(target, target_name, "class")
-            cards = " .. ".join(part for part in (left_card, right_card) if part)
-            relation_label = clean_label(label)
-            parts = [part for part in (cards, relation_label) if part]
             diagram.add_edge(
                 source,
                 target,
-                " · ".join(parts),
+                clean_label(label),
                 style,
                 arrowhead,
                 bidirectional=bidirectional,
                 undirected=undirected,
-                cardinality=cards,
+                source_cardinality=clean_label(left_card),
+                target_cardinality=clean_label(right_card),
             )
             continue
         if CLASS_REL_RE.search(text) or "--" in text or ".." in text:
@@ -1583,8 +1592,13 @@ def digest(
                 marks.append("bidir")
             if edge.undirected:
                 marks.append("undirected")
-            if edge.cardinality:
-                marks.append(edge.cardinality)
+            if edge.source_cardinality or edge.target_cardinality:
+                ends = []
+                if edge.source_cardinality:
+                    ends.append(f"{_escape_table(edge.source_cardinality)} (source)")
+                if edge.target_cardinality:
+                    ends.append(f"{_escape_table(edge.target_cardinality)} (target)")
+                marks.append("cardinality " + " .. ".join(ends))
             output.append(
                 f"| {edge.order} | {_escape_table(names.get(edge.source, edge.source))} | "
                 f"{_escape_table(names.get(edge.target, edge.target))} | "
