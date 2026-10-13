@@ -907,6 +907,60 @@ def check_adversarial(tmp: Path) -> None:
     ok("adversarial labels stay inert; nesting, chains, fan-out, discards work")
 
 
+def check_sequence_highlight_nesting_regression(tmp: Path) -> None:
+    cases = [
+        ("named-color-highlight", "rect lightblue\nA->>B: highlighted\nend", [], ["highlighted"]),
+        ("hex-color-highlight", "rect #ffccaa\nA->>B: highlighted\nend", [], ["highlighted"]),
+        ("variable-color-highlight", "rect var(--x)\nA->>B: highlighted\nend", [], ["highlighted"]),
+        ("highlight-inside-alt", "alt success\nrect rgb(200, 200, 200)\nrect rgba(0, 0, 255, .1)\nA->>B: highlighted\nend\nend\nelse failure\nA->>B: rejected\nend", [("alt", "success", 0, ["failure"])], ["highlighted", "rejected"]),
+        ("alt-inside-highlight", "rect rgb(200, 200, 200)\nalt success\nloop retries\nA->>B: attempt\nend\nelse failure\nA->>B: rejected\nend\nend", [("alt", "success", 0, ["failure"]), ("loop", "retries", 1, [])], ["attempt", "rejected"]),
+        ("ordinary-fragment-control", "alt success\nloop retries\nA->>B: attempt\nend\nelse failure\nA->>B: rejected\nend", [("alt", "success", 0, ["failure"]), ("loop", "retries", 1, [])], ["attempt", "rejected"]),
+    ]
+    for name, body, expected_fragments, expected_messages in cases:
+        scene = tmp / ("sequence-highlight-nesting-" + name + ".mmd")
+        scene.write_text("sequenceDiagram\nparticipant A\nparticipant B\n" + body + "\n", encoding="utf-8")
+        diagram = json.loads(run_extract([str(scene), "--json"]))["diagrams"][0]
+        actual = [(fragment["kind"], fragment["label"], fragment["depth"], fragment["regions"]) for fragment in diagram["fragments"]]
+        if actual != expected_fragments:
+            fail(f"{name}: semantic fragment nesting changed: {actual!r}")
+        if [edge["label"] for edge in diagram["edges"]] != expected_messages:
+            fail(f"{name}: messages changed while ignoring highlighting")
+        if [(node["id"], node["label"]) for node in diagram["nodes"]] != [("A", "A"), ("B", "B")]:
+            fail(f"{name}: highlighting introduced or renamed participants")
+    # Preserve an already accepted message source whose ID happens to be rect.
+    participant = tmp / "sequence-highlight-rect-participant.mmd"
+    participant.write_text("sequenceDiagram\nparticipant rect\nparticipant B\nrect ->>B: preserved\n", encoding="utf-8")
+    diagram = json.loads(run_extract([str(participant), "--json"]))["diagrams"][0]
+    if [(edge["source"], edge["target"], edge["label"]) for edge in diagram["edges"]] != [("rect", "B", "preserved")]:
+        fail("rect participant message was mistaken for visual highlighting")
+    if diagram["fragments"]:
+        fail("rect participant message introduced a semantic fragment")
+    malformed = tmp / "sequence-highlight-malformed-rect.mmd"
+    malformed.write_text("sequenceDiagram\nrect ->>: missing target\n", encoding="utf-8")
+    expect_error([str(malformed)], "malformed edge at line 2")
+    # Count actual depth-reduction work instead of relying on machine timing.
+    extractor = load_extractor_module()
+    for depth in (100, 200):
+        visits = [0]
+
+        def counted_sum(values, start=0):
+            total = start
+            for value in values:
+                visits[0] += 1
+                total += value
+            return total
+
+        extractor.sum = counted_sum
+        text = "rect rgb(0, 0, 0)\nopt nested\n" * depth + "A->>B: deepest\n" + "end\nend\n" * depth
+        diagram = extractor.Diagram(0, "sequenceDiagram", 1)
+        extractor._parse_sequence(diagram, list(enumerate(("sequenceDiagram\n" + text).splitlines(), 1)), 0)
+        if [fragment["depth"] for fragment in diagram.fragments] != list(range(depth)):
+            fail("deep highlight blocks changed semantic fragment depth")
+        if visits[0] > len(text):
+            fail(f"sequence fragment depth rescanned nested stacks: {visits[0]} visits")
+    ok("sequence highlight blocks preserve semantic fragment regions and depth")
+
+
 def check_sequence_grammar_forms(tmp: Path) -> None:
     """Quoted participants, create directives, and full arrow vocabulary.
 
@@ -1357,6 +1411,7 @@ def main() -> int:
         check_utf8_bom(tmp)
         check_legacy_stdout_encoding(tmp)
         check_sequence_grammar_forms(tmp)
+        check_sequence_highlight_nesting_regression(tmp)
         check_adversarial(tmp)
         check_errors_and_limits(tmp)
         check_docs_and_wiring()
