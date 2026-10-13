@@ -213,6 +213,19 @@ class ContractTests(unittest.TestCase):
                 self.assertIn('data-kind="endpoint"', source)
                 self.assertIn("data-peering=", source)
 
+    def test_shipped_boundary_labels_use_soft(self):
+        # type-architecture.md: zone labels use `soft`, never ink at an opacity.
+        soft = {"": "#5a6580", "-dark": "#949eb2", "-full": "#5a6580"}
+        for suffix, colour in soft.items():
+            path = ROOT / f"skills/diagram-design/assets/example-architecture-containment{suffix}.html"
+            scanner = checker.Scanner()
+            scanner.finish(path.read_text(encoding="utf-8"))
+            labels = [item for item in scanner.nodes
+                      if item.tag == "text" and item.attrs.get("letter-spacing") == "0.14em"]
+            with self.subTest(variant=suffix):
+                self.assertEqual(len(labels), 6)
+                self.assertEqual({item.attrs.get("fill") for item in labels}, {colour})
+
     def test_cli_discovery_and_failures(self):
         env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
         for args in ([], ["--all"]):
