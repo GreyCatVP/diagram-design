@@ -3,8 +3,9 @@
 
 Checks unique IDs, resolving parents, no cycles, geometric containment,
 innermost-scope parents (only the outermost scope may omit data-parent),
-<rect> bounds, admin-band vs traffic-box shapes with stroke-dasharray resolved
-as rendered, PaaS placement, endpoint targets, declared peerings, sibling axes
+<rect> bounds, admin-band vs traffic-box shapes with supported literal
+stroke-dasharray declarations resolved by priority (unresolved computed values
+are findings), PaaS placement, endpoint targets, declared peerings, sibling axes
 (nested children perpendicular to their parent's), and the 4px grid. Geometry
 is read from raw x/y/width/height, so a transform, moving inline CSS, nested
 <svg> viewport, matching <style> rule, or geometry animation on a checked
@@ -186,6 +187,37 @@ def split_top(text: str, separators: str) -> list[str]:
     return parts
 
 
+DASH_KEYWORDS = {"none", "inherit", "initial", "unset", "revert", "revert-layer"}
+DASH_UNITS = {"", "px", "%", "em", "rem", "ex", "ch", "pt", "pc", "mm", "cm", "in", "vw", "vh"}
+
+
+def dash_declaration_valid(raw: str) -> bool | None:
+    """True for supported literals, False for invalid ones, None if unresolved.
+
+    A valid computed value (for example var() or calc()) must not be discarded
+    as though it were a syntactically invalid declaration. Keep it in the
+    cascade and report that the checker cannot resolve it if it wins.
+    """
+    value = raw.strip().lower()
+    if value in DASH_KEYWORDS:
+        return True
+    if any(char in value for char in "()\\"):
+        return None
+    if not value or re.search(r"^,|,$|,\s*,", value):
+        return False
+    unresolved = False
+    for token in re.split(r"[\s,]+", value):
+        match = re.fullmatch(f"({NUMBER})([a-z%]*)", token)
+        if match is None:
+            return False
+        amount = float(match.group(1))
+        if amount < 0:
+            return False
+        if not math.isfinite(amount) or match.group(2) not in DASH_UNITS:
+            unresolved = True
+    return None if unresolved else True
+
+
 def declarations(text: str) -> dict[str, str]:
     """Resolve declarations by importance, then by their order in the block."""
     result = {}
@@ -195,9 +227,14 @@ def declarations(text: str) -> dict[str, str]:
         name = name.strip().lower()
         if colon and name and not name.startswith("--"):
             priority = re.search(r"!\s*important\s*$", value, flags=re.I)
-            if name in important and priority is None:
+            value = value[:priority.start()].strip() if priority else value.strip()
+            # Invalid declarations must not hide a later valid value or erase
+            # an earlier one merely because they carry !important.
+            if (not value
+                    or (name == "stroke-dasharray" and dash_declaration_valid(value) is False)
+                    or (name in important and priority is None)):
                 continue
-            result[name] = value[:priority.start()].strip() if priority else value.strip()
+            result[name] = value
             if priority:
                 important.add(name)
     return result
@@ -471,9 +508,9 @@ def rule_may_match(selector: str, node: Node, parent_of) -> bool:
 def dash_value(raw: str) -> bool | None:
     """True dashed, False solid, None when unspecified, inherited or invalid."""
     value = raw.strip().lower()
-    if value in ("", "inherit"):
+    if value in ("", "inherit", "unset", "revert", "revert-layer"):
         return None
-    if value in ("none", "initial", "unset", "revert"):
+    if value in ("none", "initial"):
         return False
     lengths = []
     for token in re.split(r"[\s,]+", value):
@@ -489,9 +526,22 @@ def is_dashed(node: Node, root: Node) -> bool:
     and the property inherits from ancestors up to the diagram SVG."""
     current: Node | None = node
     while current is not None:
-        for raw in (declarations(current.attrs.get("style", "")).get("stroke-dasharray"),
-                    current.attrs.get("stroke-dasharray")):
+        inline = declarations(current.attrs.get("style", "")).get("stroke-dasharray")
+        keyword = inline.strip().lower() if inline is not None else ""
+        if keyword in {"inherit", "unset", "revert"}:
+            # These inherit the parent's computed value rather than resurrect
+            # this element's lower-priority presentation attribute.
+            values = ()
+        elif keyword == "revert-layer":
+            # Matching stylesheet rules are refused below, so reverting the
+            # inline layer exposes the presentation attribute or inheritance.
+            values = (current.attrs.get("stroke-dasharray"),)
+        else:
+            values = (inline, current.attrs.get("stroke-dasharray"))
+        for raw in values:
             if raw is not None:
+                if dash_declaration_valid(raw) is None:
+                    raise ValueError(f"unsupported stroke-dasharray value: {raw!r}")
                 resolved = dash_value(raw)
                 if resolved is not None:
                     return resolved

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -388,6 +389,64 @@ class ContractTests(unittest.TestCase):
                 self.rejects(GOOD.replace('stroke-dasharray="4,4"',
                                          f'style="{style}"', 1),
                              "admin band must use a dashed stroke")
+
+    def test_invalid_literal_values_do_not_acquire_declaration_priority(self):
+        invalid = ("", " ", "/**/", "nope", "-1", "4,-1", "4,,4", ",4", "4,")
+        for value in invalid:
+            for style in (
+                f"stroke-dasharray:{value}!important;stroke-dasharray:4,4",
+                f"stroke-dasharray:4,4!important;stroke-dasharray:{value}!important",
+                f"stroke-dasharray:4,4;stroke-dasharray:{value}",
+            ):
+                with self.subTest(style=style, scope="admin"):
+                    self.clean(GOOD.replace('stroke-dasharray="4,4"', f'style="{style}"', 1))
+                with self.subTest(style=style, scope="traffic"):
+                    traffic = GOOD.replace(
+                        'data-scope-id="hub" data-scope-kind="traffic"',
+                        f'data-scope-id="hub" data-scope-kind="traffic" style="{style}"', 1,
+                    )
+                    self.rejects(traffic, "traffic box must use a solid stroke")
+
+    def test_unresolved_dash_values_fail_closed_only_when_they_win(self):
+        for value in ("var(--dash, 4)", "calc(2px + 2px)", "4cap", r"n\6f ne"):
+            with self.subTest(value=value):
+                self.rejects(GOOD.replace(
+                    'stroke-dasharray="4,4"',
+                    f'style="stroke-dasharray:{value}!important;stroke-dasharray:4,4"', 1,
+                ), "unsupported stroke-dasharray value")
+                self.clean(GOOD.replace(
+                    'stroke-dasharray="4,4"',
+                    f'style="stroke-dasharray:4,4!important;stroke-dasharray:{value}"', 1,
+                ))
+
+    def test_css_wide_dash_keywords_are_retained_in_priority_resolution(self):
+        for value in ("inherit", "initial", "unset", "revert", "revert-layer"):
+            with self.subTest(value=value):
+                self.assertEqual(checker.declarations(
+                    f"stroke-dasharray:{value}!important;stroke-dasharray:4,4"
+                )["stroke-dasharray"], value)
+
+    def test_css_wide_dash_priority_matches_attribute_and_parent_inheritance(self):
+        for value in ("inherit", "initial", "unset", "revert", "revert-layer"):
+            style = f"stroke-dasharray:{value}!important;stroke-dasharray:4,4"
+            with self.subTest(value=value, source="presentation attribute"):
+                source = GOOD.replace('stroke-dasharray="4,4"',
+                                      f'stroke-dasharray="4,4" style="{style}"', 1)
+                if value == "revert-layer":
+                    self.clean(source)
+                else:
+                    self.rejects(source, "admin band must use a dashed stroke")
+            with self.subTest(value=value, source="dashed parent"):
+                source = GOOD.replace('stroke-dasharray="4,4"', f'style="{style}"', 1)
+                source = re.sub(
+                    r'<rect\b[^>]*data-scope-id="subscription"[^>]*/>',
+                    lambda match: '<g stroke-dasharray="4,4">' + match.group() + '</g>',
+                    source, count=1,
+                )
+                if value == "initial":
+                    self.rejects(source, "admin band must use a dashed stroke")
+                else:
+                    self.clean(source)
 
     def test_dasharray_resolves_style_and_inheritance(self):
         self.rejects(GOOD.replace(' stroke-dasharray="4,4"', ' stroke-dasharray="4,4" style="stroke-dasharray: none"', 1),
