@@ -463,6 +463,41 @@ def check_cardinality_ends(tmp: Path) -> None:
     ok("source and target cardinalities stay separate in JSON and the digest")
 
 
+def check_note_placement(tmp: Path) -> None:
+    """Sequence notes keep every covered participant and their message position."""
+    source = write_puml(
+        tmp,
+        "note-placement.puml",
+        "participant A\nparticipant B\nparticipant C\nA -> B : one\n"
+        "note over A, B: shared transaction\nB -> C : two\nnote right of C #aqua: colored\n"
+        "note left: on message two\nnote over B, C\n  spans\nend note\nnote across: everyone",
+    )
+    diagram = extract_json(source)
+    if [node["id"] for node in diagram["nodes"]] != ["A", "B", "C"]:
+        fail(f"a note target invented a participant: {[node['id'] for node in diagram['nodes']]}")
+    placements = [
+        (item["text"], item["position"], item["participants"], item["after_message"], item["message"])
+        for item in diagram.get("note_details", [])
+    ]
+    expected = [
+        ("shared transaction", "over", ["A", "B"], 1, None),
+        ("colored", "right", ["C"], 2, None),
+        ("on message two", "left", [], 2, 2),
+        ("spans", "over", ["B", "C"], 2, None),
+        ("everyone", "across", [], 2, None),
+    ]
+    if placements != expected:
+        fail(f"notes lost their participants or message position: {placements}")
+    digest = run_extract([str(source)])
+    if "over A, B @1: shared transaction" not in digest or "left of msg 2: on message two" not in digest:
+        fail(f"digest notes lost their placement: {digest!r}")
+    expect_error(
+        [str(write_puml(tmp, "note-orphan.puml", "participant A\nnote left: nothing yet\nA -> A : x"))],
+        "malformed statement at line 3",
+    )
+    ok("sequence notes keep all covered participants and their message position")
+
+
 def check_multi_diagram() -> None:
     payload = json.loads(run_extract([str(MULTI), "--diagram", "1", "--json"]))
     if payload["diagrams_total"] != 2:
@@ -815,6 +850,7 @@ def main() -> int:
         check_unselected_comment_isolated(tmp)
         check_generics_survive(tmp)
         check_cardinality_ends(tmp)
+        check_note_placement(tmp)
         check_adversarial(tmp)
         check_errors_and_limits(tmp)
         check_legacy_stdout_encoding(tmp)

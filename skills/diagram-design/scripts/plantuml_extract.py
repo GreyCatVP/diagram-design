@@ -233,6 +233,10 @@ class Diagram:
     fragments: list[dict[str, Any]] = field(default_factory=list)
     activations: list[dict[str, Any]] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    # One entry per note: text, position (left/right/over/across/top/bottom),
+    # every participant or class it covers, and where it sits in the message
+    # sequence (`after_message`; `message` when it is attached to a message).
+    note_details: list[dict[str, Any]] = field(default_factory=list)
     discarded: dict[str, int] = field(
         default_factory=lambda: {"skin": 0, "includes": 0}
     )
@@ -706,6 +710,21 @@ def _quoted_or_token(text: str) -> tuple[str, str]:
 
 
 COLOR_TOKEN_RE = re.compile(r"^#{1,2}(?:\[[^\]]*\])?[\w:;.#-]*$")
+# A participant or class reference: one quoted string, or one bare name with
+# no whitespace, quotes, arrow heads, colons, brackets, or commas.
+ENDPOINT_RE = re.compile(r'^(?:"[^"]+"|[^\s"\'<>:\[\]{}|,#][^\s"\'<>:\[\]{}|,]*)$')
+SEQ_NOTE_RE = re.compile(
+    r"^note\s+(?P<position>left|right|over|across|top|bottom)\b(?P<rest>[^:]*?)"
+    r"\s*(?::\s*(?P<body>.*))?$",
+    re.I,
+)
+
+
+def _strip_trailing_colors(text: str) -> str:
+    tokens = text.split()
+    while tokens and COLOR_TOKEN_RE.match(tokens[-1]):
+        tokens.pop()
+    return " ".join(tokens)
 
 
 def _parse_declaration_tail(
@@ -963,9 +982,36 @@ class _SkinBlocks:
             _fail(f"unterminated styling block at line {self.start_line}")
 
 
+def _split_unquoted(text: str, separator: str) -> list[str]:
+    parts: list[str] = []
+    current: list[str] = []
+    in_quote = False
+    for character in text:
+        if character == '"':
+            in_quote = not in_quote
+        if character == separator and not in_quote:
+            parts.append("".join(current))
+            current = []
+            continue
+        current.append(character)
+    parts.append("".join(current))
+    return parts
+
+
+def _record_note(diagram: Diagram, placement: dict[str, Any], body: str) -> None:
+    """Store a note's text plus where it sits. A note on exactly one
+    participant or class is also listed in that node's fields."""
+    diagram.notes.append(body)
+    diagram.note_details.append({"text": body, **placement})
+    if len(placement["participants"]) == 1:
+        node = diagram.node_map.get(placement["participants"][0])
+        if node is not None:
+            node.fields.append(body)
+
+
 def _parse_sequence(diagram: Diagram, lines: list[tuple[int, str]]) -> None:
     fragment_stack: list[dict[str, Any]] = []
-    note_target: str | None = None
+    open_note: dict[str, Any] | None = None
     note_lines: list[str] = []
     note_start = 0
     skin = _SkinBlocks()
@@ -980,16 +1026,30 @@ def _parse_sequence(diagram: Diagram, lines: list[tuple[int, str]]) -> None:
             region["first_message"] = region["last_message"] = None
 
     def close_note() -> None:
-        nonlocal note_target, note_lines
+        nonlocal open_note, note_lines
         body = clean_label("\n".join(note_lines))
-        if body:
-            diagram.notes.append(body)
-            if note_target is not None:
-                node_id = diagram.resolve(note_target)
-                if node_id in diagram.node_map:
-                    diagram.node_map[node_id].fields.append(body)
-        note_target = None
+        if body and open_note is not None:
+            _record_note(diagram, open_note, body)
+        open_note = None
         note_lines = []
+
+    def note_participants(raw: str, line_number: int) -> list[str]:
+        """Resolve every participant a note covers (`note over A, B`)."""
+        text = _strip_trailing_colors(raw)
+        if not text:
+            return []
+        resolved_ids: list[str] = []
+        for token in _split_unquoted(text, ","):
+            name = token.strip()
+            if not ENDPOINT_RE.match(name):
+                _fail(f"malformed statement at line {line_number}")
+            label = clean_label(name) or name
+            node_id = diagram.resolve(label)
+            if node_id not in diagram.node_map:
+                diagram.add_node(node_id, label, "lifeline")
+            if node_id not in resolved_ids:
+                resolved_ids.append(node_id)
+        return resolved_ids
 
     for line_number, raw in lines:
         text = raw.strip()
@@ -998,7 +1058,7 @@ def _parse_sequence(diagram: Diagram, lines: list[tuple[int, str]]) -> None:
         if len(text) > MAX_STATEMENT_CHARS:
             _statement_too_long(line_number)
         lowered = text.casefold()
-        if note_target is not None or note_lines:
+        if open_note is not None:
             if lowered in {"end note", "endnote"}:
                 close_note()
                 continue
@@ -1087,22 +1147,34 @@ def _parse_sequence(diagram: Diagram, lines: list[tuple[int, str]]) -> None:
                 diagram.add_node(target, target, "lifeline")
             diagram.add_activation(target, action)
             continue
-        note = re.match(
-            r"^note\s+(?:left|right|over|top|bottom)(?:\s+of)?\s+([^:]+?)(?:\s*:\s*(.*))?$",
-            text,
-            re.I,
-        )
+        note = SEQ_NOTE_RE.match(text)
         if note:
-            target_token = note.group(1).split(",")[0].strip()
-            body = note.group(2)
-            note_target = clean_label(target_token) or target_token
-            if note_target not in diagram.node_map:
-                resolved = diagram.resolve(note_target)
-                if resolved not in diagram.node_map:
-                    diagram.add_node(resolved, note_target, "lifeline")
-                note_target = resolved
-            if body is not None:
-                note_lines = [body]
+            position = note.group("position").casefold()
+            rest = note.group("rest").strip()
+            of_prefix = re.match(r"^of\b\s*(.*)$", rest, re.I)
+            if of_prefix:
+                rest = of_prefix.group(1)
+            participants = note_participants(rest, line_number)
+            message: int | None = None
+            if not participants:
+                if position in {"left", "right"} and not of_prefix:
+                    # `note left: text` sits beside the message just sent.
+                    if not diagram.edges:
+                        _fail(f"malformed statement at line {line_number}")
+                    message = len(diagram.edges)
+                elif position != "across":
+                    _fail(f"malformed statement at line {line_number}")
+            elif position == "across":
+                _fail(f"malformed statement at line {line_number}")
+            open_note = {
+                "position": position,
+                "participants": participants,
+                "after_message": len(diagram.edges),
+                "message": message,
+                "line": line_number,
+            }
+            if note.group("body") is not None:
+                note_lines = [note.group("body")]
                 close_note()
             else:
                 note_lines = []
@@ -1145,7 +1217,7 @@ def _parse_sequence(diagram: Diagram, lines: list[tuple[int, str]]) -> None:
         if SEQ_ARROW_RE.search(text):
             _fail(f"malformed edge at line {line_number}")
         _fail(f"malformed statement at line {line_number}")
-    if note_target is not None or note_lines:
+    if open_note is not None:
         _fail(f"unterminated note at line {note_start}")
     skin.check_closed()
     if fragment_stack:
@@ -1223,16 +1295,28 @@ def _parse_class(diagram: Diagram, lines: list[tuple[int, str]]) -> None:
             re.I,
         )
         if note:
-            target_token = clean_label(note.group(1).split(",")[0])
+            raw_target = _strip_trailing_colors(note.group(1))
             body = note.group(2)
-            if body is None:
+            if body is None or not ENDPOINT_RE.match(raw_target):
                 _fail(f"malformed statement at line {line_number}")
+            target_token = clean_label(raw_target) or raw_target
             target = diagram.resolve(target_token, packages)
             if target not in diagram.node_map:
                 diagram.add_node(target, target_token, "class")
             cleaned = clean_label(body)
-            diagram.notes.append(cleaned)
-            diagram.node_map[target].fields.append(cleaned)
+            if cleaned:
+                position = text.split()[1].casefold()
+                _record_note(
+                    diagram,
+                    {
+                        "position": position,
+                        "participants": [target],
+                        "after_message": None,
+                        "message": None,
+                        "line": line_number,
+                    },
+                    cleaned,
+                )
             continue
         split = _find_arrow(text, CLASS_ARROWS)
         if split:
@@ -1434,6 +1518,20 @@ def _message_span(first: int | None, last: int | None) -> str:
     return f"msg {first}" if first == last else f"msgs {first}-{last}"
 
 
+def _note_summary(item: dict[str, Any]) -> str:
+    text = _escape_markdown(item["text"].replace("\n", " ⏎ "))
+    position = item["position"]
+    if item["message"] is not None:
+        return f"{position} of msg {item['message']}: {text}"
+    where = position
+    if item["participants"]:
+        joiner = " " if position in {"over", "across"} else " of "
+        where += joiner + ", ".join(_escape_markdown(name) for name in item["participants"])
+    if item["after_message"] is not None:
+        where += f" @{item['after_message']}"
+    return f"{where}: {text}"
+
+
 def _fragment_summary(item: dict[str, Any]) -> str:
     label = _escape_markdown(item["label"] or "unlabeled")
     if item["kind"] == "divider":
@@ -1522,9 +1620,16 @@ def digest(
                     else ""
                 )
             )
-        if diagram.notes:
+        if diagram.note_details:
+            shown = diagram.note_details[:max_rows]
             output.append(
-                f"- notes: {'; '.join(_escape_markdown(note) for note in diagram.notes[:6])}"
+                "- notes (after message #): "
+                + "; ".join(_note_summary(item) for item in shown)
+                + (
+                    f"; +{len(diagram.note_details) - len(shown)} more (use --json)"
+                    if len(diagram.note_details) > len(shown)
+                    else ""
+                )
             )
         if info["hubs"]:
             output.append(
@@ -1629,6 +1734,7 @@ def to_json(path: Path, blocks: list[SourceBlock], selected: list[Diagram]) -> s
                     "fragments": diagram.fragments,
                     "activations": diagram.activations,
                     "notes": diagram.notes,
+                    "note_details": diagram.note_details,
                     "nodes": [asdict(node) for node in diagram.nodes],
                     "edges": [asdict(edge) for edge in diagram.edges],
                 }
