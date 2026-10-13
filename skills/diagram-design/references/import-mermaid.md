@@ -25,6 +25,7 @@ Supported grammars are `flowchart` / `graph`, `sequenceDiagram`, `stateDiagram-v
 
 Labels decode Mermaid base-10 entity codes (such as `#35;` and `#9829;`) and HTML character names (`#copy;`) once, after flattening source markup so escaped characters stay literal. Existing HTML references keep the same one-pass normalization; unknown names and invalid numeric code points stay literal.
 
+- Mermaid examples inside another Markdown code fence stay literal and are not counted as diagrams. Backtick and tilde outer fences close with the same character and at least the opening length.
 - `--diagram N` selects one fenced block before parsing, so a malformed or unsupported block elsewhere in the file does not stop it. `--diagram all` selects every fenced block and fails if any of them fails. Default is diagram 0.
 - `--json` emits the full IR, including ER fields and sequence fragments.
 - `--max-rows N` controls digest table length; default 40.

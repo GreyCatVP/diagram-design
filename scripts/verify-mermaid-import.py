@@ -579,6 +579,56 @@ A --> B
     ok("frontmatter is skipped, and an unterminated block still fails specifically")
 
 
+def check_outer_markdown_fences(tmp: Path) -> None:
+    for name, opening, closing in [
+        ("backtick", "````markdown", "````"),
+        ("tilde", "~~~markdown", "~~~"),
+        ("unlabelled", "````", "````"),
+        ("longer-close", "````markdown", "`````"),
+        ("three-space-indent", "   ````markdown", "   ````"),
+    ]:
+        path = tmp / f"outer-fence-{name}.md"
+        path.write_text(opening + "\n```mermaid\npie title Literal example\n```\n" + closing
+                        + "\n\n```mermaid\nflowchart TD\nA --> B\n```\n", encoding="utf-8")
+        payload = json.loads(run_extract([str(path), "--diagram", "all", "--json"]))
+        if payload["diagrams_total"] != 1 or len(payload["diagrams"]) != 1:
+            fail(f"{name}: literal Mermaid sample was counted as a live block")
+        diagram = payload["diagrams"][0]
+        if diagram["kind"] != "flowchart" or {n["id"] for n in diagram["nodes"]} != {"A", "B"}:
+            fail(f"{name}: live flowchart was not preserved")
+    mixed = tmp / "outer-fence-live-controls.md"
+    mixed.write_text("~~~text\n```mermaid\npie title Literal\n```\n~~~\n"
+                     "``` MeRmAiD  \nflowchart LR\nC --> D\n````\n"
+                     "~~~mermaid\nflowchart TD\nE --> F\n~~~~\n", encoding="utf-8")
+    payload = json.loads(run_extract([str(mixed), "--diagram", "all", "--json"]))
+    if payload["diagrams_total"] != 2 or [d["kind"] for d in payload["diagrams"]] != ["flowchart", "flowchart"]:
+        fail("live mixed-case/whitespace and tilde fences did not retain their order")
+    if [{n["id"] for n in d["nodes"]} for d in payload["diagrams"]] != [{"C", "D"}, {"E", "F"}]:
+        fail("ordinary fence contents leaked into live diagram nodes")
+    selected = json.loads(run_extract([str(mixed), "--diagram", "1", "--json"]))
+    if {n["id"] for n in selected["diagrams"][0]["nodes"]} != {"E", "F"}:
+        fail("selection counted literal samples instead of live Mermaid blocks")
+    expect_error([str(mixed), "--diagram", "2"], "no diagram with index 2 (have 0..1)")
+    indented = tmp / "outer-fence-indented-example.md"
+    indented.write_text("    ```text\n\n```mermaid\nflowchart TD\nA --> B\n```\n", encoding="utf-8")
+    payload = json.loads(run_extract([str(indented), "--json"]))
+    if {node["id"] for node in payload["diagrams"][0]["nodes"]} != {"A", "B"}:
+        fail("indented code example hid the following live Mermaid block")
+    indented.write_text("```text\n    ```\nstill inside\n```\n\n```mermaid\nflowchart TD\nA --> B\n```\n", encoding="utf-8")
+    payload = json.loads(run_extract([str(indented), "--json"]))
+    if {node["id"] for node in payload["diagrams"][0]["nodes"]} != {"A", "B"}:
+        fail("indented closing fence ended an ordinary block early")
+    # Existing Mermaid indentation remains supported, including four spaces.
+    indented.write_text("    ```mermaid\nflowchart TD\nA --> B\n    ```\n", encoding="utf-8")
+    payload = json.loads(run_extract([str(indented), "--json"]))
+    if {node["id"] for node in payload["diagrams"][0]["nodes"]} != {"A", "B"}:
+        fail("existing indented Mermaid support changed")
+    unclosed = tmp / "outer-fence-unclosed.md"
+    unclosed.write_text("````markdown\n```mermaid\nflowchart TD\nA --> B\n```\n", encoding="utf-8")
+    expect_error([str(unclosed)], "no fenced mermaid block found")
+    ok("outer code fences keep Mermaid samples literal and preserve live block order")
+
+
 def check_markdown_and_grammars(tmp: Path) -> None:
     header = run_extract([str(README_FIXTURE)])
     if "2 diagram(s)" not in header or "[1] sequenceDiagram" not in header:
@@ -1353,6 +1403,7 @@ def main() -> int:
         check_entity_label_codes(tmp)
         check_shape_and_edge_vocabulary(tmp)
         check_frontmatter(tmp)
+        check_outer_markdown_fences(tmp)
         check_markdown_and_grammars(tmp)
         check_state_descriptions(tmp)
         check_named_composite_states(tmp)
