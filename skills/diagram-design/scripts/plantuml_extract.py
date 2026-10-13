@@ -585,7 +585,9 @@ def load_blocks(path: Path) -> list[SourceBlock]:
         elif capture:
             content.append(line)
     if start is not None and capture:
-        _fail(f"{path.name}: unterminated plantuml fence starting at line {start - 1}")
+        # The open fence is its own block's error, so earlier blocks stay
+        # selectable; it is raised only when this block is selected.
+        add(start, "\n".join(content), "uml", f"unterminated plantuml fence starting at line {start - 1}")
     if not collected:
         _fail(f"{path.name}: no fenced plantuml block found")
     return collected

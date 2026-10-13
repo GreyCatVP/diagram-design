@@ -943,6 +943,36 @@ def check_declaration_styling(tmp: Path) -> None:
     ok("declarations read one name and alias, drop color and keep stereotype, and reject leftovers")
 
 
+def check_block_errors_stay_local(tmp: Path) -> None:
+    """Every split or scan failure belongs to its block: block 0 still imports."""
+    valid = "@startuml\nAlice -> Bob : one\n@enduml\n"
+    fence = "```plantuml\n@startuml\nAlice -> Bob : one\n@enduml\n```\n\n"
+    cases = (
+        ("local-comment.puml", valid + "@startuml\nC -> D : x\n/'\n@enduml\n", "unterminated block comment at line 6"),
+        ("local-missing-end.puml", valid + "@startuml\nC -> D : x\n", "missing @enduml for @startuml at line 4"),
+        ("local-mismatch.puml", valid + "@startuml\nC -> D : x\n@endjson\n", "`@endjson` at line 6 does not close"),
+        ("local-nested.puml", valid + "@startuml\n@startuml\nC -> D : x\n@enduml\n", "nested @startuml at line 5"),
+        ("local-kind.puml", valid + "@startgantt\nProject starts 2026-01-01\n@endgantt\n", "unsupported diagram kind"),
+        ("local-include.puml", valid + "@startuml\n!include other.puml\n@enduml\n", "include not inlined"),
+        ("local-fence-open.md", fence + "```plantuml\n@startuml\nC -> D : x\n@enduml\n", "unterminated plantuml fence starting at line 7"),
+        ("local-fence-comment.md", fence + "```plantuml\n@startuml\n/'\n@enduml\n```\n", "unterminated block comment at line 9"),
+        ("local-fence-end.md", fence + "```plantuml\n@startuml\nC -> D : x\n```\n", "missing @enduml for @startuml at line 8"),
+    )
+    for name, text, message in cases:
+        path = tmp / name
+        path.write_text(text, encoding="utf-8")
+        digest = run_extract([str(path), "--diagram", "0"])
+        if "## Diagram 0" not in digest or f"[1] unparsed: {_escape_digest(message)}" not in digest:
+            fail(f"{name}: block 1's error was not kept on block 1: {digest!r}")
+        expect_error([str(path), "--diagram", "1"], message)
+    ok(f"{len(cases)} block-level failures stay on their block and fire only when it is selected")
+
+
+def _escape_digest(text: str) -> str:
+    """The digest escapes Markdown punctuation; match its form of a message."""
+    return re.sub(r"([\\`*{}\[\]()#+\-.!_|>])", r"\\\1", text.replace("&", "&amp;").replace("<", "&lt;"))
+
+
 def check_multi_diagram() -> None:
     payload = json.loads(run_extract([str(MULTI), "--diagram", "1", "--json"]))
     if payload["diagrams_total"] != 2:
@@ -1311,6 +1341,7 @@ def main() -> int:
         check_fences_follow_markdown(tmp)
         check_command_named_kind(tmp)
         check_declaration_styling(tmp)
+        check_block_errors_stay_local(tmp)
         check_adversarial(tmp)
         check_errors_and_limits(tmp)
         check_legacy_stdout_encoding(tmp)
