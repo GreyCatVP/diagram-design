@@ -66,6 +66,27 @@ class ExportSvgStandaloneTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.mod = load_helper()
 
+    def test_selector_lists_preserve_quoted_and_escaped_literals(self) -> None:
+        selectors = [
+            'rect[data-label="Revenue, net"]',
+            'rect[data-label="Revenue  net"]',
+            "rect[data-label='Revenue,  net']",
+            r'rect[data-label="a\"b,  c"]',
+            r'.revenue\,net',
+            r'.revenue\2c net',
+            ':is(rect, circle):not([data-label="a,b"])',
+            ':where(rect, :is(circle, path))',
+        ]
+        for selector in selectors:
+            with self.subTest(selector=selector):
+                html = '<style>' + selector + ', .other {fill:red}</style>'
+                html += '<svg viewBox="0 0 40 40"><rect class="other"/></svg>'
+                css = embedded_css(self.mod.export_svg_document(html, Path("literal.html")))
+                self.assertIn('#literal-root ' + selector + ', #literal-root .other { fill:red }', css)
+        # Hex escape terminator plus descendant whitespace must remain distinct.
+        css = self.mod.diagram_css_from_html('<style>.\\31  rect {fill:red}</style>', 'literal-root')
+        self.assertIn('#literal-root .\\31  rect', css)
+
     def test_rgba_parent_normalizes_with_unrelated_page_paint(self) -> None:
         for prop in ("fill", "stroke"):
             for selector in (".paint", "rect.paint", "#unrelated", ".unused .paint"):
