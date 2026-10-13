@@ -253,7 +253,7 @@ def _read_bounded(path: Path) -> str:
             f"source exceeds the {MAX_SOURCE_BYTES // (1024 * 1024)} MiB limit"
         )
     try:
-        return data.decode("utf-8")
+        return data.decode("utf-8-sig")
     except UnicodeDecodeError:
         _fail(f"{path.name}: source is not valid UTF-8 text")
 

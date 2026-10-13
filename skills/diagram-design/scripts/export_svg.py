@@ -29,6 +29,7 @@ import re
 import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from typing import Callable, Iterator
 
 GOOGLE_FONTS_IMPORT = (
     "@import url('https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1"
@@ -100,6 +101,13 @@ STYLE_BLOCK_RE = re.compile(r"<style\b[^>]*>(.*?)</style\s*>", re.IGNORECASE | r
 SVG_TAG_RE = re.compile(
     r"<svg(?=[\s/>])(?:[^>\"']|\"[^\"]*\"|'[^']*')*>|</svg\s*>", re.IGNORECASE
 )
+# Consume every tag, including quoted attributes, before checking whether it
+# changes the namespace of a style. Tag-looking attribute values are literal.
+HTML_TOKEN_RE = re.compile(
+    r"<!--.*?(?:-->|$)|<!\[CDATA\[.*?(?:\]\]>|$)|"
+    r"<(?P<close>/)?(?P<tag>[A-Za-z][^\s/>]*)"
+    r"(?:[^>\"']|\"[^\"]*\"|'[^']*')*>", re.IGNORECASE | re.DOTALL
+)
 CDATA_SECTION_RE = re.compile(r"<!\[CDATA\[(.*?)\]\]>", re.DOTALL)
 # Each alternative starts on a different character, and a comment cannot run
 # past its first "*/", so a failed match backtracks linearly, not
@@ -122,14 +130,60 @@ def slug_for(path: Path) -> str:
     return slug
 
 
+def html_tokens(source: str) -> Iterator[tuple[re.Match[str], bool, int, int]]:
+    """Yield markup with its SVG context and any opaque text body boundaries.
+
+    HTML text elements consume through their end tag without interpreting the
+    contents as markup. SVG title/desc remain HTML integration points instead.
+    """
+    contexts: list[str] = []
+    pos = 0
+    while token := HTML_TOKEN_RE.search(source, pos):
+        name = (token.group("tag") or "").lower()
+        in_svg = bool(contexts and contexts[-1] == "svg")
+        body_end = end = token.end()
+        self_closing = token.group(0).endswith("/>")
+        text_element = name in {"script", "style"} or (
+            not in_svg and name in {"textarea", "title", "xmp", "iframe", "noembed", "noframes", "noscript", "plaintext"}
+        )
+        if name and not token.group("close") and text_element and not (in_svg and self_closing):
+            closing = (None if name == "plaintext" else re.compile(
+                r"</" + name + r"(?=[\s/>])(?:[^>\"']|\"[^\"]*\"|'[^']*')*>",
+                re.IGNORECASE,
+            ).search(source, end))
+            body_end = closing.start() if closing else len(source)
+            end = closing.end() if closing else len(source)
+        elif name in {"svg", "foreignobject", "desc", "title"}:
+            if token.group("close"):
+                for index in range(len(contexts) - 1, -1, -1):
+                    if contexts[index] == name:
+                        del contexts[index:]
+                        break
+            elif not self_closing and (name == "svg" or in_svg):
+                contexts.append(name)
+        yield token, in_svg, body_end, end
+        pos = end
+
+
 def mask_opaque_html(source: str, *, styles: bool = False) -> str:
-    tags = "script|style"
-    pattern = re.compile(r"<!\[CDATA\[.*?\]\]>|<!--.*?-->|<(?P<raw>" + tags + r")\b[^>]*>.*?</(?P=raw)\s*>", re.IGNORECASE | re.DOTALL)
-    def mask(match: re.Match[str]) -> str:
-        if not styles and (match.group("raw") or "").lower() == "style":
-            return match.group(0)
-        return " " * len(match.group(0))
-    return pattern.sub(mask, source)
+    out: list[str] = []
+    pos = 0
+    for token, _, _, end in html_tokens(source):
+        out.append(source[pos:token.start()])
+        name = (token.group("tag") or "").lower()
+        if not name or (end > token.end() and (styles or name != "style")):
+            out.append(" " * (end - token.start()))
+        else:
+            # Keep tag names and boundaries, but do not expose markup-looking
+            # quoted attribute values to consumers of the masked source.
+            suffix = "/>" if token.group(0).endswith("/>") else ">"
+            attr_start = token.end("tag")
+            out.append(source[token.start():attr_start])
+            out.append(" " * (token.end() - len(suffix) - attr_start) + suffix)
+            out.append(source[token.end():end])
+        pos = end
+    out.append(source[pos:])
+    return "".join(out)
 
 
 def extract_first_svg(html: str) -> str:
@@ -209,17 +263,14 @@ def _xml_start_tag(match: re.Match[str]) -> str:
     return f"<{name}{TAG_ATTR_RE.sub(attr, attrs)}{end}>"
 
 
-def xmlify_attributes(svg: str) -> str:
-    """Rewrite valueless and unquoted HTML attributes as XML (`attr=""`).
-
-    Comments and CDATA sections are copied unchanged.
-    """
+def _rewrite_start_tags(svg: str, transform: Callable[[re.Match[str]], str]) -> str:
+    """Transform actual start tags, preserving comments and CDATA sections."""
     out: list[str] = []
     pos = 0
     while True:
         opener = XML_OPAQUE_OPEN_RE.search(svg, pos)
         text_end = opener.start() if opener else len(svg)
-        out.append(START_TAG_RE.sub(_xml_start_tag, svg[pos:text_end]))
+        out.append(START_TAG_RE.sub(transform, svg[pos:text_end]))
         if opener is None:
             break
         closer = "-->" if opener.group(0) == "<!--" else "]]>"
@@ -230,6 +281,11 @@ def xmlify_attributes(svg: str) -> str:
         if close_at == -1:
             break
     return "".join(out)
+
+
+def xmlify_attributes(svg: str) -> str:
+    """Rewrite valueless and unquoted HTML attributes as XML (`attr=""`)."""
+    return _rewrite_start_tags(svg, _xml_start_tag)
 
 
 # HTML named references that browsers decode even without a trailing semicolon.
@@ -539,7 +595,14 @@ def retarget_root_selector(selector: str, original_id: str, root_id: str) -> str
 def diagram_css_from_html(html: str, root_id: str, original_root_id: str = "") -> str:
     """Filter page <style> rules down to diagram rules, scoped under root_id."""
     kept: list[str] = []
-    for block in STYLE_BLOCK_RE.findall(mask_opaque_html(html)):
+    for token, in_svg, body_end, _ in html_tokens(html):
+        if (token.group("tag") or "").lower() != "style" or token.group("close"):
+            continue
+        block = html[token.end():body_end]
+        # foreignObject/desc/title children are HTML; a nested svg re-enters
+        # SVG. CDATA-looking strings in HTML styles must remain literal.
+        if in_svg:
+            block = CDATA_SECTION_RE.sub(lambda match: match.group(1), block)
         # A comment before a rule would otherwise become part of its selector
         # (`/* Tokens */ :root` is not recognised as `:root`).
         block = CSS_COMMENT_RE.sub("", block)
@@ -616,23 +679,25 @@ def merge_style_into_defs(svg: str, style_css: str, system_fonts: bool = False) 
 
 
 def find_defs_ids(svg: str) -> list[str]:
-    """IDs on referenceable elements living under <defs>."""
+    """IDs on referenceable elements living under <defs>, including comments."""
     defs_blocks = re.findall(r"<defs\b[^>]*>(.*?)</defs>", svg, re.IGNORECASE | re.DOTALL)
-    if not defs_blocks:
-        return []
-    tag_alt = "|".join(DEFS_ID_TAGS)
-    pattern = re.compile(
-        rf"<(?:{tag_alt})\b[^>]*\bid\s*=\s*[\"']([^\"']+)[\"']",
-        re.IGNORECASE,
-    )
+    allowed_tags = {kind.lower() for kind in DEFS_ID_TAGS}
     found: list[str] = []
     seen: set[str] = set()
     for block in defs_blocks:
-        for match in pattern.finditer(block):
-            ident = decode_xml_references(match.group(1))
-            if ident not in seen:
-                seen.add(ident)
-                found.append(ident)
+        for tag in START_TAG_RE.finditer(block):
+            name, attrs, _ = tag.groups()
+            if name.lower() not in allowed_tags:
+                continue
+            for attribute in TAG_ATTR_RE.finditer(attrs):
+                _, name, _, quoted = attribute.groups()
+                if name != "id" or quoted is None or quoted[0] not in "\"'":
+                    continue
+                ident = decode_xml_references(quoted[1:-1])
+                if ident not in seen:
+                    seen.add(ident)
+                    found.append(ident)
+                break
     return found
 
 
@@ -791,19 +856,144 @@ def namespace_defs_ids(svg: str, prefix: str) -> str:
     return REFERENCE_REGION_RE.sub(rewrite, svg)
 
 
+def _decoded_css_property_text(style: str) -> str:
+    """Read opacity spellings conservatively without changing carried CSS."""
+    style = CSS_COMMENT_RE.sub("", html_entities.unescape(style))
+
+    def escape(match: re.Match[str]) -> str:
+        hexadecimal, literal = match.groups()
+        if hexadecimal is not None:
+            value = int(hexadecimal, 16)
+            return chr(value) if 0 < value <= 0x10FFFF and not 0xD800 <= value <= 0xDFFF else "\ufffd"
+        return "" if literal in "\r\n\f" else literal
+
+    return re.sub(r"\\(?:([0-9a-fA-F]{1,6})(?:\r\n|[ \t\r\n\f])?|([\s\S]))", escape, style)
+
+
+def _css_paint_may_target_descendants(selector: str, children: list[ET.Element]) -> bool:
+    """Exclude provably unrelated simple selectors; preserve unknown CSS cascades."""
+    for branch in selector.split(","):
+        terminal = re.split(r"[\s>+~]+", branch.strip())[-1]
+        # Unsupported selectors remain conservative, including escaped names,
+        # attribute selectors and pseudo-classes that can affect descendant paint.
+        if not re.fullmatch(r"(?:[A-Za-z][\w-]*|\*)?(?:[.#][\w-]+)*", terminal) or not terminal:
+            return True
+        tag = re.match(r"^[A-Za-z][\w-]*", terminal)
+        classes = re.findall(r"\.([\w-]+)", terminal)
+        ids = re.findall(r"#([\w-]+)", terminal)
+        for child in children:
+            if tag and child.tag.rsplit("}", 1)[-1] != tag.group(0):
+                continue
+            if all(name in child.get("class", "").split() for name in classes) and all(
+                name == child.get("id") for name in ids
+            ):
+                return True
+    return False
+
+
 def normalize_rgba_presentation_attrs(svg: str) -> str:
-    """Split rgba()/transparent presentation attrs for strict SVG 1.1 importers."""
+    """Split rgba paint and combine its alpha with existing presentation opacity."""
 
-    def repl(match: re.Match[str]) -> str:
-        prop, r, g, b, a = match.groups()
-        return '{0}="#{1:02x}{2:02x}{3:02x}" {0}-opacity="{4}"'.format(
-            prop, max(0, min(255, int(r))), max(0, min(255, int(g))),
-            max(0, min(255, int(b))), a if 0 <= float(a) <= 1 else "0" if float(a) < 0 else "1"
-        )
+    # A parent's paint and opacity may be inherited independently. Converting
+    # its color alpha into opacity would also change children overriding paint.
+    try:
+        elements = list(ET.fromstring(svg).iter())
+        descendants = {
+            index: list(element.iter())[1:]
+            for index, element in enumerate(elements) if len(element)
+        }
+    except ET.ParseError:
+        return svg  # The existing final XML validator supplies the public error.
+    opacity_counts = {"fill-opacity": 0, "stroke-opacity": 0}
+    styles = list(STYLE_BLOCK_RE.findall(svg))
 
-    svg = RGBA_ATTR_RE.sub(repl, svg)
-    svg = TRANSPARENT_ATTR_RE.sub(r'\1="none"', svg)
-    return svg
+    def collect_opacity_context(match: re.Match[str]) -> str:
+        for attr in TAG_ATTR_RE.finditer(match.group(2)):
+            key, value = attr.group(2), attr.group(4)
+            if key in opacity_counts:
+                opacity_counts[key] += 1
+            elif key == "style" and value is not None:
+                styles.append(value[1:-1])
+        return match.group(0)
+
+    _rewrite_start_tags(svg, collect_opacity_context)
+    css_opacity = {
+        key for key in opacity_counts
+        if any(re.search(rf"(?:^|[;{{])\s*{key}\s*:", _decoded_css_property_text(style), re.IGNORECASE)
+               for style in styles)
+    }
+
+    position = 0
+
+    def normalize_tag(match: re.Match[str]) -> str:
+        nonlocal position
+        children = descendants.get(position, [])
+        element = elements[position]
+        position += 1
+        name, attrs, end = match.groups()
+        values = {
+            attr.group(2): attr.group(4)[1:-1]
+            for attr in TAG_ATTR_RE.finditer(attrs)
+            if attr.group(4) is not None
+        }
+        updates: dict[str, str] = {}
+        additions: list[str] = []
+        for prop in ("fill", "stroke"):
+            value = values.get(prop, "")
+            if value == "transparent":
+                updates[prop] = "none"
+                continue
+            rgba = RGBA_ATTR_RE.fullmatch(f'{prop}="{value}"')
+            if rgba is None:
+                continue
+            _, r, g, b, alpha = rgba.groups()
+            opacity_name = f"{prop}-opacity"
+            # Presentation opacity may be overridden by CSS or inherited from
+            # another element. Preserve the color alpha when that cascade is
+            # unresolved instead of replacing it with opaque RGB.
+            # Converting a parent is safe when descendants inherit its paint.
+            # Preserve alpha if a descendant overrides that paint, including
+            # a conservatively detected stylesheet or inline declaration.
+            inline_paint = re.search(
+                rf"(?:^|[;{{])\s*{prop}\s*:",
+                _decoded_css_property_text(element.get("style", "")), re.I,
+            )
+            descendant_paint = any(
+                prop in child.attrib
+                or re.search(rf"(?:^|[;{{])\s*{prop}\s*:",
+                             _decoded_css_property_text(child.get("style", "")), re.I)
+                for child in children
+            )
+            stylesheet_paint = any(
+                re.search(rf"(?:^|[;{{])\s*{prop}\s*:", _decoded_css_property_text(rule.group(2)), re.I)
+                and _css_paint_may_target_descendants(rule.group(1), [element] + children)
+                for style in STYLE_BLOCK_RE.findall(svg)
+                for rule in RULE_RE.finditer(CSS_COMMENT_RE.sub("", style))
+            )
+            if inline_paint or descendant_paint or stylesheet_paint or opacity_name in css_opacity or opacity_counts[opacity_name] > int(opacity_name in values):
+                continue
+            opacity = alpha if 0 <= float(alpha) <= 1 else "0" if float(alpha) < 0 else "1"
+            if opacity_name in values:
+                try:
+                    original = values[opacity_name].strip()
+                    amount = float(original.rstrip("%")) / (100 if original.endswith("%") else 1)
+                except ValueError:
+                    continue  # Keep paint intact when the opacity cannot be resolved here.
+                if not math.isfinite(amount):
+                    continue
+                opacity = format(min(1, max(0, amount)) * max(0, min(1, float(alpha))), ".12g")
+                updates[opacity_name] = opacity
+            else:
+                additions.append(f' {opacity_name}="{opacity}"')
+            updates[prop] = "#{:02x}{:02x}{:02x}".format(*(max(0, min(255, int(c))) for c in (r, g, b)))
+
+        def replace_attr(attr: re.Match[str]) -> str:
+            space, key, _equals, _value = attr.groups()
+            return f'{space}{key}="{updates[key]}"' if key in updates else attr.group(0)
+
+        return f"<{name}{TAG_ATTR_RE.sub(replace_attr, attrs)}{''.join(additions)}{end}>"
+
+    return _rewrite_start_tags(svg, normalize_tag)
 
 
 def has_diagram_stylesheet(svg: str) -> bool:
@@ -856,8 +1046,8 @@ def export_svg_document(html: str, source_path: Path, system_fonts: bool = False
     diagram_css = diagram_css_from_html(html, root_id, original_root_id)
     svg = merge_style_into_defs(svg, diagram_css, system_fonts)
     svg = namespace_defs_ids(svg, slug)
-    svg = normalize_rgba_presentation_attrs(svg)
     svg = xml_safe_comments(svg)
+    svg = normalize_rgba_presentation_attrs(svg)
     assert_export_gate(svg)
     document = '<?xml version="1.0" encoding="UTF-8"?>\n' + svg + "\n"
     # Catch any remaining XML-breaking characters in carried content.

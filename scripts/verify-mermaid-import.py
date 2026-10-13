@@ -126,6 +126,21 @@ def check_legacy_stdout_encoding(tmp: Path) -> None:
     ok("Mermaid stdout stays lossless UTF-8 under a legacy Windows encoding")
 
 
+def check_utf8_bom(tmp: Path) -> None:
+    for suffix, source in (
+        ("mmd", "flowchart TD\nA --> B\n"),
+        ("md", "```mermaid\nflowchart TD\nA --> B\n```\n"),
+    ):
+        path = tmp / f"bom-source.{suffix}"
+        path.write_bytes(source.encode("utf-8"))
+        expected = json.loads(run_extract([str(path), "--json"]))
+        path.write_bytes(b"\xef\xbb\xbf" + source.encode("utf-8"))
+        actual = json.loads(run_extract([str(path), "--json"]))
+        if actual != expected:
+            fail(f"UTF-8 BOM changed the {suffix} extraction")
+    ok("UTF-8 BOM does not prevent Mermaid or Markdown import")
+
+
 def expect_error(args: list[str], message: str) -> None:
     process = invoke(args)
     if process.returncode != 2 or message not in process.stderr:
@@ -1288,6 +1303,7 @@ def main() -> int:
         check_state_descriptions(tmp)
         check_named_composite_states(tmp)
         check_selection_before_parse(tmp)
+        check_utf8_bom(tmp)
         check_legacy_stdout_encoding(tmp)
         check_sequence_grammar_forms(tmp)
         check_adversarial(tmp)
