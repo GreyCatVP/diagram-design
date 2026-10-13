@@ -262,6 +262,8 @@ def painted_points(tag: str, attrs: dict[str, str]) -> list[tuple[float, float]]
         width, height = svg_length(attrs, "width"), svg_length(attrs, "height")
         if x is None or y is None or width is None or height is None:
             return []
+        if width <= 0 or height <= 0:
+            return []
         return [(x, y), (x + width, y + height)]
     if tag == "line":
         ends = [
@@ -274,6 +276,8 @@ def painted_points(tag: str, attrs: dict[str, str]) -> list[tuple[float, float]]
         rx = svg_length(attrs, "r" if tag == "circle" else "rx")
         ry = svg_length(attrs, "r" if tag == "circle" else "ry")
         if cx is None or cy is None or rx is None or ry is None:
+            return []
+        if rx <= 0 or ry <= 0:
             return []
         return [(cx - rx, cy - ry), (cx + rx, cy + ry)]
     if tag in {"polygon", "polyline"}:

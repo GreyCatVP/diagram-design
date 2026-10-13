@@ -284,6 +284,10 @@ def main() -> int:
          '<clipPath id="inside"><rect x="10" y="10" width="200" height="100"/></clipPath>'
          '<g clip-path="url(#inside)"><rect x="-100" y="20" width="1200" height="40"/></g>'),
         ("masked group", '<g mask="url(#m)"><rect x="1100" y="20" width="10" height="10"/></g>'),
+        ("zero-width rect placeholder", '<rect x="1100" y="20" width="0" height="10"/>'),
+        ("zero-height rect placeholder", '<rect x="1100" y="20" width="10" height="0"/>'),
+        ("zero-radius circle placeholder", '<circle cx="1100" cy="20" r="0"/>'),
+        ("zero-radius ellipse placeholder", '<ellipse cx="1100" cy="20" rx="0" ry="5"/>'),
     ):
         check_source_pass(label, static.replace("</svg>", markup + "</svg>", 1))
     def styled(rule: str, markup: str) -> str:
