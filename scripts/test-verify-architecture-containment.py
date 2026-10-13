@@ -355,6 +355,40 @@ class ContractTests(unittest.TestCase):
                 self.assertNotEqual(traffic, GOOD)
                 self.clean(traffic)
 
+    def test_important_dasharray_wins_over_later_normal_declaration(self):
+        for style in (
+            "stroke-dasharray:none!important;stroke-dasharray:4,4",
+            "stroke-dasharray:none ! IMPORTANT;stroke-dasharray:4,4",
+        ):
+            with self.subTest(style=style):
+                self.rejects(GOOD.replace('stroke-dasharray="4,4"',
+                                         f'style="{style}"', 1),
+                             "admin band must use a dashed stroke")
+        for style in (
+            "stroke-dasharray:4,4!important;stroke-dasharray:none",
+            "stroke-dasharray:4,4 ! IMPORTANT;stroke-dasharray:none",
+        ):
+            with self.subTest(style=style):
+                self.clean(GOOD.replace('stroke-dasharray="4,4"',
+                                        f'style="{style}"', 1))
+
+    def test_equal_dasharray_priority_keeps_later_declaration(self):
+        for style in (
+            "stroke-dasharray:none;stroke-dasharray:4,4",
+            "stroke-dasharray:none!important;stroke-dasharray:4,4!important",
+        ):
+            with self.subTest(style=style):
+                self.clean(GOOD.replace('stroke-dasharray="4,4"',
+                                        f'style="{style}"', 1))
+        for style in (
+            "stroke-dasharray:4,4;stroke-dasharray:none",
+            "stroke-dasharray:4,4!important;stroke-dasharray:none!important",
+        ):
+            with self.subTest(style=style):
+                self.rejects(GOOD.replace('stroke-dasharray="4,4"',
+                                         f'style="{style}"', 1),
+                             "admin band must use a dashed stroke")
+
     def test_dasharray_resolves_style_and_inheritance(self):
         self.rejects(GOOD.replace(' stroke-dasharray="4,4"', ' stroke-dasharray="4,4" style="stroke-dasharray: none"', 1),
                      "admin band must use a dashed stroke")

@@ -187,13 +187,19 @@ def split_top(text: str, separators: str) -> list[str]:
 
 
 def declarations(text: str) -> dict[str, str]:
-    """Parse a CSS declaration block; later declarations win, as in CSS."""
+    """Resolve declarations by importance, then by their order in the block."""
     result = {}
+    important = set()
     for part in split_top(re.sub(r"/\*.*?\*/", "", text, flags=re.S), ";"):
         name, colon, value = part.partition(":")
         name = name.strip().lower()
         if colon and name and not name.startswith("--"):
-            result[name] = re.sub(r"!\s*important\s*$", "", value.strip(), flags=re.I).strip()
+            priority = re.search(r"!\s*important\s*$", value, flags=re.I)
+            if name in important and priority is None:
+                continue
+            result[name] = value[:priority.start()].strip() if priority else value.strip()
+            if priority:
+                important.add(name)
     return result
 
 
