@@ -552,32 +552,41 @@ def load_blocks(path: Path) -> list[SourceBlock]:
             add(start_line, text, kind, error)
         return collected
 
+    # Every fence is tracked, as the Mermaid importer does, so a plantuml
+    # fence quoted inside another fence (a Markdown example) is not imported.
     lines = source.splitlines()
     start: int | None = None
     fence = ""
+    capture = False
     content: list[str] = []
     for line_number, line in enumerate(lines, 1):
         if start is None:
-            match = FENCE_OPEN_RE.match(line)
-            if match:
-                start = line_number + 1
-                fence = match.group(1)
-                content = []
+            match = re.match(r"^\s*(`{3,}|~{3,})(.*)$", line)
+            if match and not (match.group(1)[0] == "`" and "`" in match.group(2)):
+                is_plantuml = bool(FENCE_OPEN_RE.match(line))
+                if is_plantuml or re.match(r"^ {0,3}[`~]", line):
+                    start = line_number + 1
+                    fence = match.group(1)
+                    capture = is_plantuml
+                    content = []
             continue
-        if re.match(rf"^\s*{re.escape(fence[0])}{{{len(fence)},}}\s*$", line):
-            block_text = "\n".join(content)
-            regions = _split_uml_regions(block_text, start)
-            if regions:
-                for start_line, text, kind, error in regions:
-                    add(start_line, text, kind, error)
-            else:
-                add(start, block_text, "uml")
+        if re.match(rf"^\s*{re.escape(fence[0])}{{{len(fence)},}}\s*$", line) and (
+            capture or re.match(r"^ {0,3}[`~]", line)
+        ):
+            if capture:
+                block_text = "\n".join(content)
+                regions = _split_uml_regions(block_text, start)
+                if regions:
+                    for start_line, text, kind, error in regions:
+                        add(start_line, text, kind, error)
+                else:
+                    add(start, block_text, "uml")
             start = None
             fence = ""
             content = []
-        else:
+        elif capture:
             content.append(line)
-    if start is not None:
+    if start is not None and capture:
         _fail(f"{path.name}: unterminated plantuml fence starting at line {start - 1}")
     if not collected:
         _fail(f"{path.name}: no fenced plantuml block found")

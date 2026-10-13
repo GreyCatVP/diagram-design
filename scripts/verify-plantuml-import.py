@@ -822,6 +822,21 @@ def check_keyword_named_endpoints(tmp: Path) -> None:
     ok("participants and classes named after command words keep their messages and links")
 
 
+def check_fences_follow_markdown(tmp: Path) -> None:
+    """A plantuml fence quoted inside another fence is example text, not a diagram."""
+    source = tmp / "nested-fence.md"
+    source.write_text(
+        "````markdown\n```plantuml\n@startuml\nA -> B : example\n@enduml\n```\n````\n\n"
+        "```plantuml\n@startuml\nC -> D : real\n@enduml\n```\n",
+        encoding="utf-8",
+    )
+    payload = json.loads(run_extract([str(source), "--diagram", "all", "--json"]))
+    labels = [[edge["label"] for edge in item["edges"]] for item in payload["diagrams"]]
+    if payload["diagrams_total"] != 1 or labels != [["real"]]:
+        fail(f"a plantuml fence inside another fence was imported: {labels}")
+    ok("only top-level plantuml fences are imported, matching the Mermaid importer")
+
+
 def check_multi_diagram() -> None:
     payload = json.loads(run_extract([str(MULTI), "--diagram", "1", "--json"]))
     if payload["diagrams_total"] != 2:
@@ -1187,6 +1202,7 @@ def main() -> int:
         check_endpoint_codes(tmp)
         check_region_boundaries(tmp)
         check_keyword_named_endpoints(tmp)
+        check_fences_follow_markdown(tmp)
         check_adversarial(tmp)
         check_errors_and_limits(tmp)
         check_legacy_stdout_encoding(tmp)
