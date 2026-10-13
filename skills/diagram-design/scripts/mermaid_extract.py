@@ -271,22 +271,25 @@ def load_blocks(path: Path) -> list[SourceBlock]:
     start: int | None = None
     fence = ""
     content: list[str] = []
+    capture = False
     for line_number, line in enumerate(lines, 1):
         if start is None:
-            match = re.match(r"^\s*(`{3,}|~{3,})\s*mermaid\s*$", line, re.I)
-            if match:
+            match = re.match(r"^\s*(`{3,}|~{3,})(.*)$", line)
+            if match and not (match.group(1)[0] == "`" and "`" in match.group(2)):
                 start = line_number + 1
                 fence = match.group(1)
+                capture = match.group(2).strip().casefold() == "mermaid"
                 content = []
             continue
         if re.match(rf"^\s*{re.escape(fence[0])}{{{len(fence)},}}\s*$", line):
-            blocks.append(SourceBlock(len(blocks), "\n".join(content), start))
+            if capture:
+                blocks.append(SourceBlock(len(blocks), "\n".join(content), start))
             start = None
             fence = ""
             content = []
-        else:
+        elif capture:
             content.append(line)
-    if start is not None:
+    if start is not None and capture:
         _fail(f"{path.name}: unterminated mermaid fence starting at line {start - 1}")
     if not blocks:
         _fail(f"{path.name}: no fenced mermaid block found")
