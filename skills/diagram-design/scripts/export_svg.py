@@ -813,6 +813,10 @@ def _decoded_css_property_text(style: str) -> str:
 def _css_paint_may_target_descendants(selector: str, children: list[ET.Element]) -> bool:
     """Exclude provably unrelated simple selectors; preserve unknown CSS cascades."""
     for branch in selector_list_parts(selector):
+        # A hex escape's whitespace terminator belongs to its identifier.
+        # Keep escaped branches conservative before splitting combinators.
+        if "\\" in branch:
+            return True
         terminal = re.split(r"[\s>+~]+", branch.strip())[-1]
         # Unsupported selectors remain conservative, including escaped names,
         # attribute selectors and pseudo-classes that can affect descendant paint.
