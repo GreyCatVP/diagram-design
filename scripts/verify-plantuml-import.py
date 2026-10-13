@@ -769,6 +769,40 @@ def check_endpoint_codes(tmp: Path) -> None:
     ok("endpoints resolve by raw code, inline `as` declarations work, labels are cleaned separately")
 
 
+def check_region_boundaries(tmp: Path) -> None:
+    """A block must close with its own `@end` marker; failures stay on that block."""
+    def source(name: str, text: str) -> str:
+        path = tmp / name
+        path.write_bytes(text.encode("utf-8"))
+        return str(path)
+
+    unclosed = source("unclosed.puml", "@startuml\nA -> B : one\n@enduml\n\n@startuml\nC -> D : two\n")
+    digest = run_extract([unclosed])
+    if "[1] unparsed: missing @enduml for @startuml at line 5" not in digest or "## Diagram 0" not in digest:
+        fail(f"a block with no closing marker was accepted or blocked the others: {digest!r}")
+    expect_error([unclosed, "--diagram", "1"], "missing @enduml for @startuml at line 5")
+    expect_error(
+        [source("mismatched.puml", "@startuml\nA -> B : one\n@endjson\n")],
+        "`@endjson` at line 3 does not close `@startuml` at line 1",
+    )
+    expect_error(
+        [source("nested.puml", "@startuml\nA -> B : one\n@startuml\nB -> A : two\n@enduml\n")],
+        "nested @startuml at line 3",
+    )
+    diagram = extract_json(
+        Path(source("bom-crlf.puml", "\ufeff@startuml mydiagram  \r\nA -> B : one\r\n  @enduml  \r\n"))
+    )
+    if [edge["label"] for edge in diagram["edges"]] != ["one"]:
+        fail(f"BOM, CRLF, a diagram name, or padded markers broke the block: {diagram['edges']}")
+    fenced = source(
+        "fenced-bom.md",
+        "\ufeff# Notes\r\n\r\n```plantuml\r\n@startuml\r\nA -> B : one\r\n@enduml\r\n```\r\n",
+    )
+    if [edge["label"] for edge in extract_json(Path(fenced))["edges"]] != ["one"]:
+        fail("a fenced block with a BOM and CRLF line endings did not parse")
+    ok("blocks need their own @end marker, nesting fails, and BOM/CRLF/names/padding are accepted")
+
+
 def check_multi_diagram() -> None:
     payload = json.loads(run_extract([str(MULTI), "--diagram", "1", "--json"]))
     if payload["diagrams_total"] != 2:
@@ -1132,6 +1166,7 @@ def main() -> int:
         check_kind_uses_arrow_parser(tmp)
         check_quoted_note_targets(tmp)
         check_endpoint_codes(tmp)
+        check_region_boundaries(tmp)
         check_adversarial(tmp)
         check_errors_and_limits(tmp)
         check_legacy_stdout_encoding(tmp)

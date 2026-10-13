@@ -457,7 +457,9 @@ def _read_bounded(path: Path) -> str:
     if len(data) > MAX_SOURCE_BYTES:
         _fail(f"source exceeds the {MAX_SOURCE_BYTES // (1024 * 1024)} MiB limit")
     try:
-        return data.decode("utf-8")
+        # `utf-8-sig` drops a leading byte-order mark, so `@startuml` on the
+        # first line is still found.
+        return data.decode("utf-8-sig")
     except UnicodeDecodeError:
         _fail(f"{path.name}: source is not valid UTF-8 text")
 
@@ -468,25 +470,30 @@ def _split_uml_regions(
     """Return (start_line, body, start_kind, error) for each @start/@end region.
 
     Block comments are tracked inside a region, so an ``@enduml`` line inside
-    ``/' ... '/`` does not close the diagram early. An unclosed comment is
-    recorded as that region's error instead of stopping the whole file, so
-    other blocks stay selectable.
+    ``/' ... '/`` does not close the diagram early. A block must close with
+    its own marker (`@startuml` with `@enduml`). An unclosed comment, a
+    missing or mismatched closing marker, or a nested `@start` is recorded as
+    that region's error instead of stopping the whole file, so other blocks
+    stay selectable and the error is raised only when the block is selected.
     """
     regions: list[tuple[int, str, str, str | None]] = []
     lines = text.splitlines()
     start: int | None = None
     kind = "uml"
     body: list[str] = []
+    error: str | None = None
     comment_start: int | None = None
     for offset, raw in enumerate(lines):
         stripped = raw.strip()
         opened = START_RE.match(stripped)
         closed = END_RE.match(stripped)
+        line_number = base_line + offset
         if start is None:
             if opened:
-                start = base_line + offset + 1
+                start = line_number + 1
                 kind = opened.group(1).casefold()
                 body = []
+                error = None
             continue
         if comment_start is not None:
             if not _strip_block_comments(raw, True)[1]:
@@ -498,17 +505,24 @@ def _split_uml_regions(
             body.append(raw)
             continue
         if closed:
-            regions.append((start, "\n".join(body), kind, None))
+            closing = closed.group(1).casefold()
+            if closing != kind and error is None:
+                error = (
+                    f"`@end{closed.group(1)}` at line {line_number} does not close "
+                    f"`@start{kind}` at line {start - 1}"
+                )
+            regions.append((start, "\n".join(body), kind, error))
             start = None
             body = []
             continue
+        if opened and error is None:
+            error = f"nested @start{opened.group(1).casefold()} at line {line_number}"
         body.append(raw)
     if start is not None:
-        error = (
-            f"unterminated block comment at line {comment_start}"
-            if comment_start is not None
-            else None
-        )
+        if comment_start is not None:
+            error = f"unterminated block comment at line {comment_start}"
+        elif error is None:
+            error = f"missing @end{kind} for @start{kind} at line {start - 1}"
         regions.append((start, "\n".join(body), kind, error))
     return regions
 

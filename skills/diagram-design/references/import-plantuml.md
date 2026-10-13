@@ -91,7 +91,7 @@ The extractor reports 3 lifelines, 8 messages, one `alt` fragment, and 4 discard
 
 ## Multi-block files
 
-Several `@startuml`…`@enduml` regions in one file, or several fenced `plantuml` blocks in Markdown, are the PlantUML analogue of multi-page draw.io. The header lists every block with kind and node/edge counts. A block that was not selected and cannot be parsed is listed as `[N] unparsed: <reason>` instead of failing the run; select it to get the exit-2 error.
+Several `@startuml`…`@enduml` regions in one file, or several fenced `plantuml` blocks in Markdown, are the PlantUML analogue of multi-page draw.io. The header lists every block with kind and node/edge counts. A block that was not selected and cannot be parsed is listed as `[N] unparsed: <reason>` instead of failing the run; select it to get the exit-2 error. Each block must close with its own marker (`@startuml` with `@enduml`); a missing or mismatched closing marker, a nested `@startuml`, or an unclosed block comment is that block's error. A leading byte-order mark and CRLF line endings are accepted.
 
 - With no `--diagram`, inspect diagram 0 and ask which block if the user did not identify one.
 - If the block you need fails, the others stay reachable with `--diagram N`. Report the failure verbatim and do not redraw that block.
