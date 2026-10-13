@@ -276,6 +276,37 @@ class ContractTests(unittest.TestCase):
                 self.rejects(wrapped.replace("body {margin:0}", "body {margin:0} " + rule, 1),
                              "moves checked bounds")
 
+    @staticmethod
+    def omitted_tag_pages():
+        # Valid HTML may omit <html>, <head> and <body>; a browser implies them.
+        no_html = GOOD.replace("<html>", "", 1).replace("</html>", "", 1)
+        no_body = GOOD.replace("<body>", "", 1).replace("</body>", "", 1)
+        neither = no_html.replace("<body>", "", 1).replace("</body>", "", 1)
+        bare = neither.replace("<head>", "", 1).replace("</head>", "", 1)
+        pages = {"no-html": no_html, "no-body": no_body, "neither": neither, "bare": bare}
+        for page in pages.values():
+            assert page != GOOD and "body {margin:0}" in page
+        return pages
+
+    def test_omitted_html_and_body_still_anchor_style_rules(self):
+        for label, page in self.omitted_tag_pages().items():
+            with self.subTest(page=label):
+                self.clean(page)
+            for rule in ('body [data-node-id="sql"] { transform: translate(0,108px) }',
+                         'html [data-node-id="sql"] { transform: translate(0,108px) }',
+                         ':root [data-node-id="sql"] { transform: translate(0,108px) }',
+                         'html > body > svg [data-node-id="sql"] { transform: translate(0,108px) }'):
+                with self.subTest(page=label, rule=rule):
+                    self.rejects(page.replace("body {margin:0}", "body {margin:0} " + rule, 1),
+                                 "moves checked bounds")
+
+    def test_omitted_tag_pages_keep_page_only_rules_clean(self):
+        for label, page in self.omitted_tag_pages().items():
+            for rule in (":root { height: 100% }", "body > rect { x: 0 }", "head rect { x: 0 }",
+                         "html > rect { x: 0 }", ":root > g { transform: translate(4px, 0) }"):
+                with self.subTest(page=label, rule=rule):
+                    self.clean(page.replace("body {margin:0}", "body {margin:0} " + rule, 1))
+
     def test_child_combinator_outside_svg_survives_implied_end_tags(self):
         # A browser closes the <p> at <div>, so body > .card matches; the
         # stdlib parser nests the div in the p, so the checker must not trust it.

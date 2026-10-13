@@ -345,7 +345,7 @@ def match_attribute(token: str, node: Node) -> bool | None:
     return bool(expected) and expected in value
 
 
-def match_compound(compound: str, node: Node) -> bool | None:
+def match_compound(compound: str, node: Node, parent_of) -> bool | None:
     """True or False when every part can be evaluated; None (may match) when a
     part such as :not() or :hover cannot. Any definite failure wins."""
     if "\\" in compound or "|" in compound.split("[")[0]:
@@ -384,7 +384,7 @@ def match_compound(compound: str, node: Node) -> bool | None:
             if element or label in LEGACY_PSEUDO_ELEMENTS:
                 results.append(False)  # pseudo-elements never box SVG graphics
             elif label == "root":
-                results.append(node.parent is not None and node.parent.tag == "document")
+                results.append(node.tag == "html" and parent_of(node) is None)
             else:
                 results.append(None)
         else:
@@ -394,10 +394,11 @@ def match_compound(compound: str, node: Node) -> bool | None:
     return True if all(result is True for result in results) else None
 
 
-def selector_may_match(parts: list[tuple[str, str]], index: int, node: Node | None, element: Node) -> bool:
+def selector_may_match(parts: list[tuple[str, str]], index: int, node: Node | None, element: Node,
+                       parent_of) -> bool:
     """Right-to-left match of parts[:index + 1] ending at node. node is None for
     a sibling we do not evaluate; element then supplies the shared parent."""
-    if node is not None and match_compound(parts[index][1], node) is False:
+    if node is not None and match_compound(parts[index][1], node, parent_of) is False:
         return False
     if index == 0:
         return True
@@ -406,15 +407,45 @@ def selector_may_match(parts: list[tuple[str, str]], index: int, node: Node | No
     if combinator in "+~":
         # Sibling selectors are honoured conservatively: the sibling compound
         # is assumed to match and the rest is checked against the shared parent.
-        return selector_may_match(parts, index - 1, None, anchor)
+        return selector_may_match(parts, index - 1, None, anchor, parent_of)
     candidates: list[Node] = []
-    current = anchor.parent
-    while current is not None and current.tag != "document":
+    current = parent_of(anchor)
+    while current is not None:
         candidates.append(current)
         if combinator == ">" and in_svg(current):
             break
-        current = current.parent
-    return any(selector_may_match(parts, index - 1, candidate, candidate) for candidate in candidates)
+        current = parent_of(current)
+    return any(selector_may_match(parts, index - 1, candidate, candidate, parent_of) for candidate in candidates)
+
+
+HEAD_TAGS = {"head", "title", "meta", "link", "style", "script", "base", "noscript", "template"}
+
+
+def ancestry(scanner: Scanner):
+    """Parent lookup that adds the <html> and <body> a browser implies when a
+    valid page omits those optional tags, so :root, html and body selectors
+    resolve the way they do in the rendered page."""
+    real_html = next((node for node in scanner.nodes if node.tag == "html"), None)
+    has_body = any(node.tag == "body" for node in scanner.nodes)
+    implied_html = None if real_html else Node("html", {}, 0)
+    implied_body = None if has_body else Node("body", {}, 0)
+    html = real_html or implied_html
+
+    def parent_of(node: Node) -> Node | None:
+        if node is html:
+            return None
+        if node is implied_body:
+            return html
+        parent = node.parent
+        if parent is None:
+            return None
+        if parent.tag == "document":
+            parent = html
+        if parent is html and implied_body is not None and node.tag not in HEAD_TAGS | {"body"}:
+            return implied_body
+        return parent
+
+    return parent_of
 
 
 def in_svg(node: Node) -> bool:
@@ -424,11 +455,11 @@ def in_svg(node: Node) -> bool:
     return node.tag == "svg" or any(item.tag == "svg" for item in node.ancestors())
 
 
-def rule_may_match(selector: str, node: Node) -> bool:
+def rule_may_match(selector: str, node: Node, parent_of) -> bool:
     parts = selector_parts(selector)
     if parts is None:
         return True
-    return selector_may_match(parts, len(parts) - 1, node, node)
+    return selector_may_match(parts, len(parts) - 1, node, node, parent_of)
 
 
 def dash_value(raw: str) -> bool | None:
@@ -766,6 +797,7 @@ def check_moved_geometry(scanner: Scanner, root: Node, checked: list[Node], fail
         if node.tag == "svg":
             fail(node, f"nested <svg> viewport {MOVES}")
 
+    parent_of = ancestry(scanner)
     for style in (node for node in scanner.nodes if node.tag == "style"):
         text = "".join(part for part in style.content if isinstance(part, str))
         for selector_list, decls in css_rules(text):
@@ -774,7 +806,7 @@ def check_moved_geometry(scanner: Scanner, root: Node, checked: list[Node], fail
             if not moving:
                 continue
             for selector in split_top(selector_list, ","):
-                if selector.strip() and any(rule_may_match(selector, node) for node in affected):
+                if selector.strip() and any(rule_may_match(selector, node, parent_of) for node in affected):
                     effect = ("overrides the checked stroke-dasharray" if moving == ["stroke-dasharray"]
                               else MOVES)
                     fail(style, f'<style> rule "{selector.strip()}" sets {", ".join(moving)} on a checked '
