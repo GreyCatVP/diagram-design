@@ -253,6 +253,21 @@ class ContractTests(unittest.TestCase):
                                   'x="0" y="40" width="80" height="40"', 1),
                      "not geometrically inside compartment")
 
+    def test_bounds_must_be_a_rect(self):
+        # A circle's x/y/width/height are unused, so it would be measured at
+        # one place and drawn at another.
+        circle = GOOD.replace('<rect data-role="bounds" x="240" y="40" width="80" height="40" rx="16"/>',
+                              '<circle data-role="bounds" cx="500" cy="60" r="20" '
+                              'x="240" y="40" width="80" height="40"/>', 1)
+        self.rejects(circle, "bounds must be a <rect>")
+        compartment = GOOD.replace('<rect data-kind="compartment"', '<ellipse data-kind="compartment"', 1)
+        self.rejects(compartment, "bounds must be a <rect>")
+        carrier = GOOD.replace('<g data-kind="macromolecule" data-entity-id="b" data-compartment="cyt">\n'
+                               '    <rect data-role="bounds" x="240" y="40" width="80" height="40" rx="16"/>\n  </g>',
+                               '<image data-kind="macromolecule" data-entity-id="b" data-compartment="cyt" '
+                               'x="240" y="40" width="80" height="40"/>', 1)
+        self.rejects(carrier, "bounds")
+
     def test_missing_compartment_ref(self):
         self.rejects(GOOD.replace('data-compartment="cyt"', 'data-compartment="missing"', 1),
                      "data-compartment must name a compartment")

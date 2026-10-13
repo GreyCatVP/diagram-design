@@ -176,6 +176,10 @@ def parse_bounds(carrier: Node) -> tuple[float, float, float, float]:
         target = carrier
     elif len(bounds) != 1 and carrier.tag != "rect":
         raise ValueError("glyph must expose exactly one data-role=\"bounds\" rect")
+    if target.tag != "rect":
+        # Only a rect is drawn from x, y, width and height; any other shape
+        # would be measured at one place and drawn at another.
+        raise ValueError(f"glyph bounds must be a <rect>; found <{target.tag}>")
     attrs = target.attrs
     x = number(attrs.get("x", ""))
     y = number(attrs.get("y", ""))
