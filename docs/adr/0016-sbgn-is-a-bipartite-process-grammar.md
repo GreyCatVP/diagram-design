@@ -1,4 +1,4 @@
-# ADR 0015 — SBGN is a bipartite process grammar
+# ADR 0016 — SBGN is a bipartite process grammar
 
 **Status:** accepted
 
@@ -18,7 +18,7 @@ No existing grammar forces (a) a bipartite species/process graph, (b) role-typed
 
 ## Decision
 
-Add **SBGN** as visual type #45 with the full §10 shipping set: `references/type-sbgn.md`, the three Bruno carotenoid-cleavage example variants, a gallery tab, the selection-table row and frontmatter hook, a §7 budget row (7 macromolecules, 6 processes, 1 compartment, 2 source/sink), the canonical screenshot, and an executable contract.
+Add **SBGN** as visual type #46 with the full §10 shipping set: `references/type-sbgn.md`, the three Bruno carotenoid-cleavage example variants, a gallery tab, the selection-table row and frontmatter hook, a §7 budget row (7 macromolecules, 6 processes, 1 compartment, 2 source/sink), the canonical screenshot, and an executable contract.
 
 The grammar is declared, not inferred: every species, process, and compartment carries a stable ID; every arc states `data-kind`, `data-from`, and `data-to`. `scripts/verify-sbgn.py` fails duplicate IDs, unresolved endpoints, an arc that skips the bipartite rule, a macromolecule drawn outside its compartment, off-grid structural geometry, and a figure over the Bruno ceiling; `scripts/test-verify-sbgn.py` proves both polarities per ADR 0005.
 
@@ -31,6 +31,6 @@ Process squares are 32×32 so they stay below the geometry-checker's 60×40 node
 
 ## Consequences
 
-- The verifiable count moves to 45 in `verify-docs-sync.py`, `verify-semantic-motion.py`, the screenshot catalog scripts, and ADR 0002's amendment log — a conscious edit, by design.
-- The plugin native descriptions were at the 500-character limit. They now name SBGN, keep a distinct Architecture token so Architecture delta stays independently discoverable, and the Codex `longDescription` keeps the full names.
+- The verifiable count moves to 46 in `verify-docs-sync.py`, `verify-semantic-motion.py`, the screenshot catalog scripts, and ADR 0002's amendment log — a conscious edit, by design.
+- The plugin native descriptions were at the 500-character limit. They now name SBGN, keep a distinct Architecture token so Architecture delta stays independently discoverable, and the Codex `longDescription` keeps the full names. To stay under the limit once Service blueprint landed, the native descriptions write `UML class` as `UML`, registered in `verify-docs-sync.py`'s `DESCRIPTION_ALIASES` the same way `dependency graph` and `service blueprint` already are.
 - Architecture, Nested, Flowchart, and Sankey needed no scope edit: `type-sbgn.md` routes those cases back to them, so the router stays unambiguous.
