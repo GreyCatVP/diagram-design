@@ -283,7 +283,8 @@ def load_blocks(path: Path) -> list[SourceBlock]:
                 capture = match.group(2).strip().casefold() == "mermaid"
                 content = []
             continue
-        if re.match(rf"^\s*{re.escape(fence[0])}{{{len(fence)},}}\s*$", line):
+        if (re.match(rf"^\s*{re.escape(fence[0])}{{{len(fence)},}}\s*$", line)
+                and (capture or re.match(r"^ {0,3}[`~]", line))):
             if capture:
                 blocks.append(SourceBlock(len(blocks), "\n".join(content), start))
             start = None

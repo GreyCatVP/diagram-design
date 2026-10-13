@@ -614,6 +614,10 @@ def check_outer_markdown_fences(tmp: Path) -> None:
     payload = json.loads(run_extract([str(indented), "--json"]))
     if {node["id"] for node in payload["diagrams"][0]["nodes"]} != {"A", "B"}:
         fail("indented code example hid the following live Mermaid block")
+    indented.write_text("```text\n    ```\nstill inside\n```\n\n```mermaid\nflowchart TD\nA --> B\n```\n", encoding="utf-8")
+    payload = json.loads(run_extract([str(indented), "--json"]))
+    if {node["id"] for node in payload["diagrams"][0]["nodes"]} != {"A", "B"}:
+        fail("indented closing fence ended an ordinary block early")
     # Existing Mermaid indentation remains supported, including four spaces.
     indented.write_text("    ```mermaid\nflowchart TD\nA --> B\n    ```\n", encoding="utf-8")
     payload = json.loads(run_extract([str(indented), "--json"]))
