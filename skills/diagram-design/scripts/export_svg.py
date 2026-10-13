@@ -542,7 +542,21 @@ def retarget_root_selector(selector: str, original_id: str, root_id: str) -> str
 def diagram_css_from_html(html: str, root_id: str, original_root_id: str = "") -> str:
     """Filter page <style> rules down to diagram rules, scoped under root_id."""
     kept: list[str] = []
-    for block in STYLE_BLOCK_RE.findall(mask_opaque_html(html)):
+    svg_tags = iter(SVG_TAG_RE.finditer(mask_opaque_html(html, styles=True)))
+    svg_tag = next(svg_tags, None)
+    svg_depth = 0
+    for style in STYLE_BLOCK_RE.finditer(mask_opaque_html(html)):
+        while svg_tag is not None and svg_tag.start() < style.start():
+            tag = svg_tag.group(0)
+            if tag.startswith("</"):
+                svg_depth -= 1
+            elif not tag.endswith("/>"):
+                svg_depth += 1
+            svg_tag = next(svg_tags, None)
+        block = style.group(1)
+        # CDATA is markup in SVG, but literal raw text in HTML <style>.
+        if svg_depth > 0:
+            block = CDATA_SECTION_RE.sub(lambda match: match.group(1), block)
         # A comment before a rule would otherwise become part of its selector
         # (`/* Tokens */ :root` is not recognised as `:root`).
         block = CSS_COMMENT_RE.sub("", block)

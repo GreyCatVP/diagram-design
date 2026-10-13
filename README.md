@@ -455,7 +455,7 @@ What never carries over: source or renderer coordinates, source palette, source 
 
 ## Export to PNG / SVG
 
-Diagrams ship as self-contained HTML, but you can export the diagram itself for Figma, slides, or social cards. Use the slash command for your agent:
+Diagrams ship as self-contained HTML, but you can export the diagram itself for Figma, slides, or social cards. SVG export also carries CDATA-wrapped diagram CSS, including selectors bound to the original SVG root. Use the slash command for your agent:
 
 **Pi:**
 

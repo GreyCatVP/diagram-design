@@ -678,6 +678,40 @@ class ExportSvgStandaloneTests(unittest.TestCase):
         self.assertEqual(root[1].text, "Keep description")
         self.assertEqual(root[2].tag, "{http://www.w3.org/2000/svg}defs")
 
+    def test_cli_carries_cdata_styles_after_root_rename(self) -> None:
+        styles = (
+            '<![CDATA[#original .paint { fill: red; }]]>',
+            '<![CDATA[/* colors */ #original .paint { fill: red; }]]>'
+            '<![CDATA[#original .outline { stroke: blue; }]]>',
+            '#original .outline { stroke: blue; }'
+            '<![CDATA[#original .paint { fill: red; }]]>',
+        )
+        for style in styles:
+            with self.subTest(style=style), tempfile.TemporaryDirectory() as tmp:
+                source = Path(tmp) / "cdata.html"
+                source.write_text(
+                    '<svg id="original" viewBox="0 0 10 10">'
+                    f'<style>{style}</style>'
+                    '<rect class="paint outline" width="5" height="5"/></svg>',
+                    encoding="utf-8",
+                )
+                self.assertEqual(self.mod.main([str(source), "--system-fonts"]), 0)
+                document = ET.fromstring(source.with_suffix(".svg").read_text(encoding="utf-8"))
+                carried = document.find(
+                    "{http://www.w3.org/2000/svg}defs/{http://www.w3.org/2000/svg}style"
+                ).text
+                self.assertIn("#cdata-root .paint { fill: red; }", carried)
+                self.assertNotIn("<![CDATA[", carried)
+                self.assertNotIn("]]>", carried)
+                if ".outline" in style:
+                    self.assertIn("#cdata-root .outline { stroke: blue; }", carried)
+
+    def test_html_style_cdata_looking_literal_is_not_unwrapped(self) -> None:
+        source = ('<style>.paint::after { content: "<![CDATA[literal]]>"; }</style>'
+                  '<svg viewBox="0 0 10 10"><rect class="paint"/></svg>')
+        carried = self.mod.diagram_css_from_html(source, "literal-root")
+        self.assertIn('content: "&lt;![CDATA[literal]]>"', carried)
+
     def test_cli_writes_default_path(self) -> None:
         source = ASSETS / "example-loop.html"
         with tempfile.TemporaryDirectory() as tmp:
