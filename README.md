@@ -315,7 +315,7 @@ Axonometric plan uses the same projection for one floor or one site: walls cut a
 
 SBGN draws a biological process as a bipartite species/process map: macromolecules and process squares inside a compartment, with consumption, production, reversible, and modulation arcs. See the [carotenoid cleavage example](skills/diagram-design/assets/example-sbgn.html) and its [reference](skills/diagram-design/references/type-sbgn.md). Architecture and Nested remain the types for runtime systems and containment without reactions.
 
-**Browse the live gallery:** [cathrynlavery.github.io/diagram-design](https://cathrynlavery.github.io/diagram-design/), or open [`skills/diagram-design/assets/index.html`](skills/diagram-design/assets/index.html) locally to flip through every diagram with light / dark / full-editorial tabs. Each type has one number, 01 to 46; its variants and worked examples carry the same number with a letter.
+**Browse the live gallery:** [cathrynlavery.github.io/diagram-design](https://cathrynlavery.github.io/diagram-design/), or open [`skills/diagram-design/assets/index.html`](skills/diagram-design/assets/index.html) locally to flip through every diagram with light / dark / full-editorial tabs. Each type has one number, 01 to 46; its variants and worked examples carry the same number with a letter. The searchable diagram navigation starts open; click the preview to collapse it and use **Diagrams** to reopen it. The active diagram name and variant controls stay visible.
 
 ---
 
