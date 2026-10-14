@@ -71,6 +71,57 @@ def expect_status(check, status: str, needle: str) -> None:
         )
 
 
+def ready_timeout_probe(module, command: list[str], child_marker: Path):
+    """Separate fixture startup from the unchanged short cleanup wait."""
+    real_popen = module.subprocess.Popen
+    ready_at, child_pid, setup_error = None, None, None
+
+    def fixture_popen(probe_command, **kwargs):
+        setup_deadline = time.monotonic() + 5
+        process = real_popen(probe_command, **kwargs)
+        if probe_command != command:
+            return process  # e.g. Windows taskkill during owned-tree cleanup
+        real_wait = process.wait
+        setup_checked = False
+
+        def wait_after_ready(timeout=None):
+            nonlocal setup_checked, ready_at, child_pid, setup_error
+            if setup_checked:
+                return real_wait(timeout=timeout)
+            setup_checked = True
+            while time.monotonic() < setup_deadline:
+                try:
+                    pid = int(child_marker.read_text())
+                except (OSError, ValueError):
+                    pid = 0  # the file may not exist yet or still be written
+                if pid > 0:
+                    child_pid, ready_at = pid, time.monotonic()
+                    return real_wait(timeout=timeout)
+                if process.poll() is not None:
+                    setup_error = f"parent exited {process.returncode} before writing a child PID"
+                    break
+                time.sleep(0.01)
+            if setup_error is None:
+                setup_error = "child PID was not ready within the separate 5-second startup budget"
+            # Enter the real verifier's owned-tree cleanup even when setup
+            # failed; never raise out of it with a freshly spawned tree alive.
+            raise subprocess.TimeoutExpired(command, timeout)
+
+        process.wait = wait_after_ready
+        return process
+
+    module.subprocess.Popen = fixture_popen
+    try:
+        result = module.run_command(command, timeout=0.5)
+    finally:
+        module.subprocess.Popen = real_popen
+    if setup_error is not None:
+        raise AssertionError(f"Cleanup fixture setup failed: {setup_error}; {result.stderr}")
+    if ready_at is None or child_pid is None:
+        raise AssertionError("Cleanup fixture did not reach the readiness handshake")
+    return result, child_pid, time.monotonic() - ready_at
+
+
 def main() -> int:
     verify = load_verify_module()
 
@@ -296,16 +347,13 @@ def main() -> int:
             f"child = subprocess.Popen([sys.executable, '-c', {child_code!r}]); "
             f"Path({str(child_marker)!r}).write_text(str(child.pid)); time.sleep(10)"
         )
-        started = time.monotonic()
-        descendant_probe = verify.run_command(
-            [sys.executable, "-c", parent_code], timeout=0.5,
+        descendant_probe, child_pid, elapsed = ready_timeout_probe(
+            verify, [sys.executable, "-c", parent_code], child_marker,
         )
-        elapsed = time.monotonic() - started
         if descendant_probe.returncode == 0 or "timed out" not in descendant_probe.stderr:
             raise AssertionError(f"descendant probe did not time out: {descendant_probe}")
         if elapsed > 5:
             raise AssertionError(f"inherited output handles stalled cleanup: {elapsed:.2f}s")
-        child_pid = int(child_marker.read_text())
         if os.name == "posix":
             state = subprocess.run(
                 ["ps", "-p", str(child_pid), "-o", "stat="],
