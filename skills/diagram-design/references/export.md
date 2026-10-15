@@ -38,6 +38,18 @@ python3 scripts/export_svg.py <html-file> [<out.svg>] [--system-fonts]
 
 Source read and output write failures return exit 2 with an error diagnostic. The viewport must contain four finite SVG numbers with positive width and height; empty or disabled viewports are refused. The class-without-style gate inspects nonempty actual `class` attributes; comments, visible text, empty class values, and `data-class` metadata do not require a stylesheet. Export selects a live SVG and carries live style blocks; HTML comments and script literals do not contribute diagrams or CSS. The selected SVG ends at its own closing tag, so nested icon `<svg>` elements stay inside it. Comments inside the selected SVG remain intact, except that XML forbids `--` inside a comment and a comment ending in `-`: each `--` becomes `- -` and a trailing `-` gets a space. That script is the source of truth for the transform below (CSS carry-forward, defs ID namespacing, rgba normalization, and the class-without-style gate). Reimplement only when the helper is unavailable; keep the behaviour identical.
 
+Sanitization is disabled by default. When the user requests an SVG sanitized for untrusted content, pass `--sanitize`:
+
+```
+python3 scripts/export_svg.py --sanitize <html-file> [<out.svg>]
+```
+
+The flag replaces the exporter-controlled Google Fonts import with one valid empty CSS canary rule, imports `py_svg_hush.filter_svg`, and filters the completed SVG. It keeps image data URLs only for PNG, GIF, and JPEG content. After filtering, it requires exactly one canary and replaces only that canary with the fixed Google Fonts import. No source-derived content is reintroduced, but the sanitized output intentionally retains that known cross-origin font request. It may remove unsupported diagram features, so use it only when requested. Never silently fall back to the unsanitized output.
+
+Before running a sanitized export, check `python3 -c "import py_svg_hush"` (or `python -c "import py_svg_hush"` when that is the active interpreter). If the import fails, surface this exact instruction and stop:
+
+> py-svg-hush is not available. Sanitized SVG export requires an approved installation in the active Python environment (`python3 -m pip install py-svg-hush`); the skill never installs runtime dependencies automatically. Then ask me to export again with `--sanitize`.
+
 ### Manual algorithm (what the helper does)
 
 1. Read the source HTML file.
@@ -276,7 +288,8 @@ Source read and output write failures return exit 2 with an error diagnostic. Th
    Channels and alpha are clamped to the CSS ranges 0–255 and 0–1 so out-of-range rgba values retain their browser paint when converted. The `\s*` around each channel tolerates a spaced `rgba(45, 49, 66, 0.03)` as well as the compact `rgba(45,49,66,0.03)` the templates normally use; `\d*\.?\d+` accepts an alpha value with or without a leading zero (both `0.03` and `.03` appear in shipped tokens). Matching is scoped to the `fill="..."` / `stroke="..."` presentation attribute. Class-styled diagrams may still carry `rgba(...)` inside the embedded `<style>` block via custom properties (e.g. `--accent-tint`); that form is correct in browsers and in Figma/Illustrator, and is out of scope for this presentation-attribute pass. (A brand's onboarded palette in `style-guide.md` could in principle add a third notation such as `hsl()`; none exists in any shipped token today, so this pass doesn't handle it — extend the regex if one is ever introduced.)
 8. **Gate:** if the exported SVG still contains `class=` but no diagram CSS rules, stop and fix the CSS carry step — that fragment will render as black boxes. A fonts-only `<style>` (Google Fonts `@import` with no rules) does **not** satisfy the gate.
 9. Prepend `<?xml version="1.0" encoding="UTF-8"?>\n` so the file is well-formed XML.
-10. Write to `<basename>.svg` next to the source (e.g. `example-architecture.html` → `example-architecture.svg`). Honour an explicit output path if the user provides one.
+10. If `--sanitize` was requested, put the valid CSS canary in place of the fixed Google Fonts import, then pass the completed UTF-8 document bytes through `py_svg_hush.filter_svg`. Require exactly one canary before and after filtering, then replace that canary with the fixed Google Fonts import as the final operation. If any step fails, stop without writing a file.
+11. Write to `<basename>.svg` next to the source (e.g. `example-architecture.html` → `example-architecture.svg`). Honour an explicit output path if the user provides one.
 
 ### Caveat to surface to the user
 
