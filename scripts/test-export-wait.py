@@ -7,6 +7,8 @@ Drives ``skills/diagram-design/scripts/export_png.py`` against local fixtures:
   warns about fallback typography, and capture completes quickly;
 - an actual stalled font download is cancelled and font readiness finishes;
 - a normal load captures cleanly with no warning;
+- fractional scales produce exact viewBox-sized PNGs; invalid scales and
+  viewBoxes fail;
 - non-timeout errors are not swallowed by the fallback.
 
 Requires Playwright (and its Chromium); skips otherwise, matching the export
@@ -289,6 +291,52 @@ def require_encoded_paths(exporter, tmp: Path) -> None:
     print("OK: legal filename characters are encoded in the file URL")
 
 
+def run_cli_with_scale(src: Path, out: Path, scale: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, str(EXPORT_PNG), str(src), str(out), scale],
+        capture_output=True,
+        text=True,
+        timeout=FALLBACK_BUDGET_SECONDS,
+    )
+
+
+def require_fractional_scales(exporter, tmp: Path) -> None:
+    source = tmp / "normal-fixture.html"  # 400 by 240 viewBox units
+    # Page layout must not change dimensions promised by the viewBox contract.
+    source.write_text(source.read_text(encoding="utf-8").replace("</head>", "<style>svg { width:1200px; min-width:1200px; height:auto; }</style></head>"), encoding="utf-8")
+    for scale, dimensions in (("1", (400, 240)), ("1.25", (500, 300)),
+                               ("1.5", (600, 360)), ("3", (1200, 720)), ("4", (1600, 960))):
+        output = tmp / f"scale-{scale}.png"
+        run = run_cli_with_scale(source, output, scale)
+        if run.returncode != 0:
+            raise AssertionError(f"scale {scale}: packaged renderer failed\n{run.stderr}")
+        require_png(output, scale)
+        actual = struct.unpack(">II", output.read_bytes()[16:24])
+        if actual != dimensions:
+            raise AssertionError(f"scale {scale}: expected {dimensions}, got {actual}")
+    for viewbox in ("0 0 0 240", "0 0 400 0", "not-a-viewbox"):
+        broken = tmp / "invalid-viewbox.html"
+        broken.write_text(source.read_text(encoding="utf-8").replace("viewBox='0 0 400 240'", f"viewBox='{viewbox}'"), encoding="utf-8")
+        output = tmp / "invalid-viewbox.png"
+        try:
+            run_export(exporter, broken, output)
+        except Exception as exc:
+            if "viewBox" not in str(exc) or output.exists():
+                raise AssertionError(f"invalid viewBox failed incorrectly: {exc}")
+        else:
+            raise AssertionError(f"invalid viewBox {viewbox!r} was accepted")
+    for scale in ("0.5", "4.1", "nan", "inf", "not-a-number"):
+        output = tmp / "invalid-scale.png"
+        run = run_cli_with_scale(source, output, scale)
+        if run.returncode == 0:
+            raise AssertionError(f"invalid scale {scale} was accepted")
+        if "scale" not in run.stderr:
+            raise AssertionError(f"invalid scale {scale} failed without a scale diagnostic\n{run.stderr}")
+        if output.exists():
+            raise AssertionError(f"invalid scale {scale} wrote a PNG")
+    print("OK: fractional scales produce exact dimensions; invalid scales fail")
+
+
 def require_other_errors_propagate(exporter, tmp: Path) -> None:
     missing = tmp / "does-not-exist.html"
     out = tmp / "never.png"
@@ -347,6 +395,7 @@ def main() -> int:
         require_stalled_font_fallback(tmp)
         require_normal_load(exporter, tmp)
         require_encoded_paths(exporter, tmp)
+        require_fractional_scales(exporter, tmp)
         require_other_errors_propagate(exporter, tmp)
         require_static_motion_frame(exporter, tmp)
     print("All export-wait cases passed.")

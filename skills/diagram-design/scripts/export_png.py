@@ -58,6 +58,17 @@ def rasterize(
             ):
                 raise RuntimeError("motion export requires a complete static frame")
             svg = page.locator("svg").first
+            # Capture at one CSS pixel per viewBox unit before applying the multiplier.
+            svg.evaluate(
+                """el => {
+                    const box = el.viewBox.baseVal;
+                    if (![box.width, box.height].every(n => Number.isFinite(n) && n > 0))
+                        throw new Error('PNG export requires a nonzero finite viewBox');
+                    for (const [axis, size] of [['width', box.width], ['height', box.height]])
+                        for (const prefix of ['', 'min-', 'max-'])
+                            el.style.setProperty(prefix + axis, size + 'px', 'important');
+                }"""
+            )
             # Release every clipping ancestor so a wide SVG is captured whole.
             svg.evaluate(
                 "el => { for (let a = el.parentElement; a; a = a.parentElement) "
