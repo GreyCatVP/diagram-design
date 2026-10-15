@@ -66,15 +66,11 @@ SVG_NUMBER_RE = re.compile(SVG_NUMBER)
 SVG_PLAIN_NUMBER_RE = re.compile(rf"^\s*{SVG_NUMBER}\s*$")
 TRANSLATE_RE = re.compile(rf"^\s*translate\(\s*({SVG_NUMBER})(?:[\s,]+({SVG_NUMBER}))?\s*\)\s*$")
 REPLACEMENT_CHAR = "\ufffd"
-# Container elements a generated diagram always closes. Counting each pair catches the
-# damage a truncated write or a careless edit leaves behind: a file that stops mid-element,
-# a dropped </text>, a stray </span>. Void and optional-end-tag elements are deliberately
-# absent, and comments and script/style bodies are masked before counting, so valid HTML
-# cannot trip the count.
+# Container elements whose end tag HTML requires, so an unmatched count is real damage: a
+# file that stops mid-element, a dropped </text>, a stray </span>. Void elements and the
+# optional-end-tag elements (html, head, body, p, li, ...) stay out, so valid HTML cannot
+# trip the count; the closing </html> of the generated shell is checked separately.
 PAIRED_CONTAINER_TAGS = (
-    "html",
-    "head",
-    "body",
     "title",
     "desc",
     "div",
@@ -95,8 +91,6 @@ PAIRED_CONTAINER_TAGS = (
     "text",
     "tspan",
 )
-COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
-CDATA_RE = re.compile(r"<!\[CDATA\[.*?\]\]>", re.DOTALL)
 # Their children are not painted where they are declared, or use another coordinate system.
 UNPAINTED_TAGS = {
     "defs",
@@ -536,31 +530,25 @@ def canonical_controller() -> str:
     return normalized_controller("".join(body))
 
 
-def masked_for_counting(source: str) -> str:
-    """Source with comments, CDATA and script/style bodies blanked, keeping their tags.
+class BalanceParser(HTMLParser):
+    """Counts start and end tags as parsed, so attribute values and CDATA stay opaque.
 
-    A generated file can hold markup inside a comment or a string, so counting the raw
-    source would report an imbalance the document does not have.
+    Reading the raw source with a regular expression instead would count tag-like text
+    inside a quoted attribute or a stylesheet as markup, and report an imbalance the
+    document does not have. A self-closing tag arrives as both a start and an end tag,
+    so it balances itself.
     """
-    masked = CDATA_RE.sub("", COMMENT_RE.sub("", source))
-    for tag in ("script", "style"):
-        masked = re.sub(
-            rf"(<{tag}\b[^>]*>).*?(</{tag}\s*>)", r"\1\2", masked,
-            flags=re.IGNORECASE | re.DOTALL,
-        )
-    return masked
 
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.opens: Counter[str] = Counter()
+        self.closes: Counter[str] = Counter()
 
-def count_tag_pairs(source: str, tag: str) -> tuple[int, int]:
-    """Open and close counts for one element, ignoring self-closing tags."""
-    opens = closes = 0
-    pattern = re.compile(rf"<(/?){tag}(?=[\s/>])[^>]*?(/?)>", re.IGNORECASE | re.DOTALL)
-    for match in pattern.finditer(source):
-        if match.group(1) == "/":
-            closes += 1
-        elif match.group(2) != "/":
-            opens += 1
-    return opens, closes
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self.opens[tag] += 1
+
+    def handle_endtag(self, tag: str) -> None:
+        self.closes[tag] += 1
 
 
 def check_document_completeness(source: str, errors: list[str]) -> None:
@@ -582,9 +570,11 @@ def check_document_completeness(source: str, errors: list[str]) -> None:
             " the file has mojibake or a truncated multi-byte character"
         )
 
-    masked = masked_for_counting(source)
+    parser = BalanceParser()
+    parser.feed(source)
+    parser.close()
     for tag in PAIRED_CONTAINER_TAGS:
-        opens, closes = count_tag_pairs(masked, tag)
+        opens, closes = parser.opens[tag], parser.closes[tag]
         if opens != closes:
             errors.append(
                 f"<{tag}> opens {opens} time(s) and closes {closes} time(s);"

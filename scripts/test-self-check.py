@@ -59,8 +59,8 @@ def main() -> int:
     static = STATIC_EXAMPLE.read_text(encoding="utf-8")
     animated = EXAMPLE.read_text(encoding="utf-8")
 
-    # Document completeness: truncation, mojibake and unbalanced markup must all fail,
-    # while valid HTML that omits an optional end tag or uses a void element still passes.
+    # Document completeness: truncation, mojibake and unbalanced markup must all fail.
+    # The negative controls below are valid HTML that the balance count must not flag.
     def check_mutation_fail(
         label: str, find: str, replace: str, needle: str, limit: int = 1
     ) -> None:
@@ -79,8 +79,26 @@ def main() -> int:
     check_fail("mojibake", "\ufffd" + static, "U+FFFD")
     check_mutation_fail("dropped closing tag", "</text>", "", "<text> opens")
     check_mutation_fail("stray closing tag", "</div>", "</span>", "<div> opens")
+    check_mutation_fail("incomplete shell", "</html>", "", "does not end with </html>")
     check_mutation_pass("optional end tag", "</p>", "")
+    check_mutation_pass("optional head end tag", "</head>", "")
+    check_mutation_pass("optional body end tag", "</body>", "")
     check_mutation_pass("void element", "<body>", "<body><br>")
+    check_mutation_pass(
+        "opening tag text in an attribute",
+        "<body>",
+        '<body><span title="<div>">tip</span>',
+    )
+    check_mutation_pass(
+        "closing tag text in an attribute",
+        "<body>",
+        '<body><span title="</div>">tip</span>',
+    )
+    check_mutation_pass(
+        "markup and an unclosed CSS comment in a stylesheet",
+        "</style>",
+        "/* <!-- */ .probe { fill: red }</style>",
+    )
 
     for location, markup in (
         ("heading before SVG", '<h2 id="architecture-title">Monthly traffic summary</h2>'),
