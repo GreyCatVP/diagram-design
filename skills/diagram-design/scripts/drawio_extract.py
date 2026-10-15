@@ -941,7 +941,10 @@ def main(argv: list[str] | None = None) -> int:
         else digest(path, pages, selected, args.max_rows)
     )
     if args.out:
-        Path(args.out).write_text(text, encoding="utf-8")
+        try:
+            Path(args.out).write_text(text, encoding="utf-8")
+        except OSError as error:
+            _fail(f"cannot write {args.out}: {error}")
         print(f"wrote {args.out} ({len(text)} bytes)")
     else:
         sys.stdout.write(text if text.endswith("\n") else text + "\n")

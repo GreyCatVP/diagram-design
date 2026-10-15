@@ -68,13 +68,15 @@ def run_extract(args: list[str]) -> str:
     return proc.stdout
 
 
-def expect_extract_error(args: list[str], message: str) -> None:
+def expect_extract_error(args: list[str], message: str, *, quiet_stdout: bool = False) -> None:
     proc = invoke(args)
     if proc.returncode != 2 or message not in proc.stderr:
         fail(
             f"expected exit 2 containing {message!r} for {args}; got "
             f"{proc.returncode}: {proc.stderr.strip()!r}"
         )
+    if quiet_stdout and proc.stdout:
+        fail(f"expected no stdout for failed write {args}; got {proc.stdout.strip()!r}")
 
 
 def check_legacy_stdout_encoding(tmp: Path) -> None:
@@ -166,6 +168,31 @@ def png_chunk(ctype: bytes, data: bytes) -> bytes:
         + data
         + struct.pack(">I", zlib.crc32(ctype + data) & 0xFFFFFFFF)
     )
+
+
+def check_out_write_errors(tmp: Path) -> None:
+    # A missing parent directory is the common caller mistake; an existing
+    # directory or a regular file in the parent slot are the hostile cases.
+    missing_dir = tmp / "missing-output-directory"
+    expect_extract_error(
+        [str(FIXTURE), "--out", str(missing_dir / "digest.md")],
+        f"cannot write {missing_dir / 'digest.md'}",
+        quiet_stdout=True,
+    )
+    expect_extract_error(
+        [str(FIXTURE), "--json", "--out", str(missing_dir / "digest.json")],
+        f"cannot write {missing_dir / 'digest.json'}",
+        quiet_stdout=True,
+    )
+    expect_extract_error(
+        [str(FIXTURE), "--out", str(tmp)], "cannot write", quiet_stdout=True
+    )
+    parent_file = tmp / "regular-file.md"
+    parent_file.write_text("not a directory", encoding="utf-8")
+    expect_extract_error(
+        [str(FIXTURE), "--out", str(parent_file / "digest.md")], "cannot write", quiet_stdout=True
+    )
+    ok("draw.io --out write failures report a clear diagnostic and exit 2")
 
 
 def check_files() -> None:
@@ -818,6 +845,7 @@ def main() -> int:
         check_bom_prefixed(tmp)
         check_containers(tmp)
         check_legacy_stdout_encoding(tmp)
+        check_out_write_errors(tmp)
         check_digest_escaping(tmp)
         check_security_and_limits(tmp)
         check_docs()
