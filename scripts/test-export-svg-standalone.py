@@ -150,6 +150,30 @@ class ExportSvgStandaloneTests(unittest.TestCase):
                         expected = expected.replace("url(#paint)", "url(#space-paint)")
                     self.assertEqual(actual.get("style"), expected)
 
+    def test_css_comment_delimiters_inside_literals_survive_export(self) -> None:
+        selectors = [
+            'rect[data-label="net/*retained*/revenue"]',
+            "rect[data-label='net/*retained*/revenue']",
+            r'rect[data-label="net\"/*retained*/revenue"]',
+            r'.net\/\*retained\*\/revenue',
+        ]
+        for selector in selectors:
+            with self.subTest(selector=selector):
+                source = '<style>' + selector + ' {fill:red}</style>'
+                source += '<svg viewBox="0 0 20 20"><rect width="20" height="20"/></svg>'
+                exported = self.mod.export_svg_document(source, Path("literal.html"), system_fonts=True)
+                self.assertIn('#literal-root ' + selector + ' { fill:red }', embedded_css(exported))
+
+    def test_real_css_comments_still_leave_tokens_and_rules_intact(self) -> None:
+        source = '<style>/* heading */ :root {--paint:red} rect/* between */.paint {fill:var(--paint)}</style>'
+        source += '<svg viewBox="0 0 20 20"><rect class="paint" width="20" height="20"/></svg>'
+        exported = self.mod.export_svg_document(source, Path("literal.html"), system_fonts=True)
+        css = embedded_css(exported)
+        self.assertIn('#literal-root { --paint:red }', css)
+        self.assertIn('#literal-root rect.paint { fill:var(--paint) }', css)
+        self.assertNotIn('heading', css)
+        self.assertNotIn('between', css)
+
     def test_selector_lists_preserve_quoted_and_escaped_literals(self) -> None:
         selectors = [
             'rect[data-label="Revenue, net"]',
