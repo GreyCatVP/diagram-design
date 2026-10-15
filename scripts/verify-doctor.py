@@ -12,8 +12,10 @@ import json
 import os
 import platform
 import shutil
+import signal
 import subprocess
 import sys
+import tempfile
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -65,7 +67,9 @@ class CheckResult:
     fix: str | None = None
 
 
-def run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
+def run_command(
+    command: list[str], *, timeout: float | None = None
+) -> subprocess.CompletedProcess[str]:
     """Run a command, reporting a failure to launch the way a bad exit is reported.
 
     A name on PATH is not always a runnable program: an App Execution Alias for
@@ -75,14 +79,55 @@ def run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
     it unwind the whole doctor.
     """
     try:
-        return subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            check=False,
-        )
+        if timeout is None:
+            return subprocess.run(
+                command, capture_output=True, text=True, encoding="utf-8",
+                errors="replace", check=False,
+            )
+        # Descendants can inherit capture pipes. Temporary files let waiting and
+        # cleanup stay bounded even when a child keeps its output handle open.
+        with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+            process = subprocess.Popen(
+                command, stdout=stdout, stderr=stderr,
+                start_new_session=(os.name == "posix"),
+            )
+            try:
+                process.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                cleanup_error = ""
+                if os.name == "posix":
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                else:
+                    # /T targets only descendants of this freshly owned probe.
+                    try:
+                        cleanup = subprocess.run(
+                            ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                            timeout=2, check=False,
+                        )
+                        if cleanup.returncode != 0:
+                            cleanup_error = " Process-tree cleanup failed."
+                    except (OSError, subprocess.TimeoutExpired):
+                        cleanup_error = " Process-tree cleanup failed."
+                    process.kill()
+                try:
+                    process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    cleanup_error += " Probe cleanup did not finish."
+                return subprocess.CompletedProcess(
+                    command, 1, "",
+                    f"Command timed out after {timeout:g} seconds.{cleanup_error}",
+                )
+            stdout.seek(0)
+            stderr.seek(0)
+            return subprocess.CompletedProcess(
+                command, process.returncode,
+                stdout.read().decode("utf-8", errors="replace"),
+                stderr.read().decode("utf-8", errors="replace"),
+            )
     except OSError as exc:
         return subprocess.CompletedProcess(command, 1, "", str(exc))
 
@@ -196,16 +241,16 @@ def check_playwright(python_cmd: str | None) -> CheckResult:
             name="Playwright PNG export readiness",
             status=FAIL,
             message="Playwright check skipped because no Python command was available.",
-            fix="Resolve Python first; then install with: pip install playwright && playwright install chromium",
+            fix="Provision an approved Playwright renderer after resolving Python, then re-run this check.",
         )
 
-    import_probe = run_command([python_cmd, "-c", "import playwright; print(playwright.__version__)"])
+    import_probe = run_command([python_cmd, "-c", "import playwright"])
     if import_probe.returncode != 0:
         return CheckResult(
             name="Playwright PNG export readiness",
             status=WARN,
             message="Playwright package is not available in the active Python interpreter.",
-            fix="pip install playwright && playwright install chromium",
+            fix="Provision an approved Playwright renderer in the host environment, then re-run this check.",
         )
 
     chromium_probe = run_command(
@@ -213,28 +258,30 @@ def check_playwright(python_cmd: str | None) -> CheckResult:
             python_cmd,
             "-c",
             (
-                "from pathlib import Path\n"
                 "from playwright.sync_api import sync_playwright\n"
                 "with sync_playwright() as p:\n"
-                "    path = Path(p.chromium.executable_path)\n"
-                "    print(path)\n"
-                "    raise SystemExit(0 if path.is_file() else 3)\n"
+                "    browser = p.chromium.launch(timeout=5000)\n"
+                "    try:\n"
+                "        print(browser.version)\n"
+                "    finally:\n"
+                "        browser.close()\n"
             ),
-        ]
+        ],
+        timeout=10,
     )
     if chromium_probe.returncode == 0:
         return CheckResult(
             name="Playwright PNG export readiness",
             status=PASS,
-            message=f"Playwright is installed and Chromium is present at {chromium_probe.stdout.strip()}.",
+            message=f"Playwright is installed and Chromium {chromium_probe.stdout.strip()} launches for PNG export.",
         )
 
-    detail = chromium_probe.stderr.strip() or "Chromium executable was not detected"
+    detail = chromium_probe.stderr.strip() or "Chromium could not be launched"
     return CheckResult(
         name="Playwright PNG export readiness",
         status=WARN,
         message=f"Playwright is installed but Chromium is not ready: {detail}",
-        fix="pip install playwright && playwright install chromium",
+        fix="Provision an approved browser for the existing Playwright installation, then re-run this check.",
     )
 
 
