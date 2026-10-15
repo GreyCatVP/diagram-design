@@ -17,6 +17,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 sys.dont_write_bytecode = True
@@ -1187,6 +1188,88 @@ def check_legacy_stdout_encoding(tmp: Path) -> None:
     ok("PlantUML stdout stays lossless UTF-8 under a legacy Windows encoding")
 
 
+def check_kind_ignores_message_labels(tmp: Path) -> None:
+    """Kind comes from arrow form, not from whether a message has a label."""
+    mixed = extract_json(
+        write_puml(tmp, "kind-class-label.puml", "Base <|-- Child\nChild --> Service : calls")
+    )
+    edges = [(edge["source"], edge["target"], edge["arrowhead"]) for edge in mixed["edges"]]
+    if mixed["kind"] != "class" or edges != [
+        ("Child", "Base", "inheritance"),
+        ("Child", "Service", "association"),
+    ]:
+        fail(f"a labeled arrow overrode a class relationship: {mixed['kind']} {edges}")
+    plain = extract_json(write_puml(tmp, "kind-seq-unlabeled.puml", "Alice -> Bob"))
+    pair = [(edge["source"], edge["target"], edge["label"]) for edge in plain["edges"]]
+    if plain["kind"] != "sequence" or pair != [("Alice", "Bob", "")]:
+        fail(f"an unlabeled sequence arrow was not a sequence: {plain['kind']} {pair}")
+    ok("kind detection uses arrow form, so class relationships win and unlabeled messages count")
+
+
+def check_forward_package_links(tmp: Path) -> None:
+    """A link before its declarations stays on the package classes."""
+    forward = "package p {\n  A --> B : uses\n  class A {\n    +id\n  }\n  class B\n}"
+    backward = "package p {\n  class A {\n    +id\n  }\n  class B\n  A --> B : uses\n}"
+
+    def shape(name: str, body: str) -> tuple[list, list]:
+        diagram = extract_json(write_puml(tmp, name, body))
+        nodes = [(node["id"], node["parent"], node["fields"]) for node in diagram["nodes"]]
+        edges = [(edge["source"], edge["target"], edge["label"]) for edge in diagram["edges"]]
+        return nodes, edges
+
+    fwd, back = shape("fwd-link.puml", forward), shape("back-link.puml", backward)
+    if fwd != back or fwd[1] != [("p.A", "p.B", "uses")] or ("A", None, []) in fwd[0]:
+        fail(f"forward package link diverged from the declaration-first form: {fwd} vs {back}")
+    ok("forward and backward package links attach to the same package classes")
+
+
+def check_diamond_navigability(tmp: Path) -> None:
+    """A diamond with an arrowhead does not collapse into the diamond alone."""
+    def rel(name: str, body: str) -> tuple[str, str, str, str]:
+        edge = extract_json(write_puml(tmp, name, "class A\nclass B\n" + body))["edges"][0]
+        return edge["arrowhead"], edge["source"], edge["target"], edge.get("navigable", "")
+
+    if rel("comp.puml", "A *-- B") == rel("comp-dir.puml", "A *--> B"):
+        fail("composition lost the navigability of *-->")
+    if rel("agg.puml", "A o-- B") == rel("agg-dir.puml", "A o--> B"):
+        fail("aggregation lost the navigability of o-->")
+    if rel("comp-dir.puml", "A *--> B") != ("composition", "A", "B", "target"):
+        fail(f"*--> did not keep composition and direction: {rel('comp-dir.puml', 'A *--> B')}")
+    if rel("comp-rev.puml", "A <--* B") != ("composition", "B", "A", "target"):
+        fail(f"<--* did not keep the navigable end: {rel('comp-rev.puml', 'A <--* B')}")
+    digest = run_extract([str(write_puml(tmp, "comp-digest.puml", "class A\nclass B\nA *--> B"))])
+    if "navigable target" not in digest:
+        fail(f"digest dropped navigability: {digest!r}")
+    ok("diamond arrows keep navigability apart from the diamond in JSON and the digest")
+
+
+def check_oversized_dash_line(tmp: Path) -> None:
+    """A dash-only line over the statement cap errors before the arrow scan."""
+    cap = load_extractor_module().MAX_STATEMENT_CHARS
+    source = tmp / "dash-line.puml"
+    source.write_text("@startuml\n" + ("-" * (128 * 1024)) + "\n@enduml\n", encoding="utf-8")
+    started = time.monotonic()
+    expect_error([str(source)], f"statement at line 2 exceeds the {cap}-character limit")
+    if time.monotonic() - started > 2.0:
+        fail("oversized dash line did not fail before the arrow scan")
+    ok("oversized dash lines hit the statement cap before kind detection")
+
+
+def check_cache_note_example() -> None:
+    """The attached cache note stays plain text in the IR, the example, and the row."""
+    diagram = json.loads(run_extract([str(SEQUENCE), "--json"]))["diagrams"][0]
+    note = next(item for item in diagram["note_details"] if "cache" in item["text"])
+    if note["text"] != "keep the cache cold" or note["participants"] != ["api"]:
+        fail(f"extractor did not keep the cache note as plain text on api: {note}")
+    example = EXAMPLE.read_text(encoding="utf-8")
+    if "keep the cache cold" not in example or "<b>cache</b>" in example:
+        fail("worked example does not show the cache note as plain text")
+    row = next(line for line in IMPORT_REF.read_text(encoding="utf-8").splitlines() if "<b>cache</b>" in line)
+    if "keep the cache cold" not in row or "dropped" in row:
+        fail(f"fidelity row does not record the kept cache note: {row}")
+    ok("attached cache note stays plain text in the IR, the example, and the fidelity row")
+
+
 def check_docs_and_wiring() -> None:
     import_text = IMPORT_REF.read_text(encoding="utf-8")
     expected_slash_command = f"/diagram-design:{COMMAND.stem}"
@@ -1335,6 +1418,11 @@ def main() -> int:
         check_class()
         check_multi_diagram()
         check_review_regressions(tmp)
+        check_kind_ignores_message_labels(tmp)
+        check_forward_package_links(tmp)
+        check_diamond_navigability(tmp)
+        check_oversized_dash_line(tmp)
+        check_cache_note_example()
         check_kind_detection_skips_bodies(tmp)
         check_digest_edges_use_ids(tmp)
         check_unselected_comment_isolated(tmp)

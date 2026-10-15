@@ -23,7 +23,7 @@
     <div class="diagram-container">
     <svg viewBox="0 0 960 600" role="img" aria-labelledby="import-plantuml-title import-plantuml-desc" xmlns="http://www.w3.org/2000/svg">
       <title id="import-plantuml-title">Token refresh on a bearer call</title>
-      <desc id="import-plantuml-desc">Client calls a resource API, then an alt fragment shows either a valid body or a 401 path that refreshes via Auth and retries.</desc>
+      <desc id="import-plantuml-desc">Client calls a resource API, then an alt fragment shows either a valid body or a 401 path that refreshes via Auth and retries. A note on the API says to keep the cache cold.</desc>
       <defs>
         <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#4f5d75"/></marker>
         <marker id="arrow-accent" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#bf4520"/></marker>
@@ -77,6 +77,8 @@
       <text x="432" y="65" fill="#4f5d75" font-size="7" font-family="'Geist Mono',monospace" text-anchor="middle" letter-spacing=".08em">API</text>
       <text x="480" y="80" fill="#2d3142" font-size="12" font-family="'Geist',sans-serif" font-weight="600" text-anchor="middle">Resource API</text>
       <text x="480" y="94" fill="#4f5d75" font-size="8" font-family="'Geist Mono',monospace" text-anchor="middle">Bearer gate</text>
+      <rect x="576" y="67" width="128" height="18" rx="2" fill="#f5f5f5" stroke="rgba(45,49,66,0.22)"/>
+      <text x="640" y="79" fill="#4f5d75" font-size="8" font-family="'Geist Mono',monospace" text-anchor="middle">keep the cache cold</text>
 
       <rect x="728" y="48" width="144" height="56" rx="6" fill="#ffffff" stroke="#2d3142"/>
       <rect x="736" y="56" width="36" height="12" rx="2" fill="transparent" stroke="rgba(45,49,66,0.30)"/>

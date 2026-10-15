@@ -226,6 +226,9 @@ class Edge:
     cardinality: str = ""
     source_cardinality: str = ""
     target_cardinality: str = ""
+    # Which end a diamond relationship can refer to when the arrow also has
+    # a plain head (`*-->`, `o-->`). Empty when the diamond stands alone.
+    navigable: str = ""
     order: int = 0
 
 
@@ -359,6 +362,7 @@ class Diagram:
         undirected: bool = False,
         source_cardinality: str = "",
         target_cardinality: str = "",
+        navigable: str = "",
     ) -> Edge:
         if len(self.edges) >= MAX_EDGES:
             _fail(f"edge limit exceeded (max {MAX_EDGES})")
@@ -378,6 +382,7 @@ class Diagram:
             ),
             source_cardinality=source_cardinality,
             target_cardinality=target_cardinality,
+            navigable=navigable,
             order=len(self.edges) + 1,
         )
         self.edges.append(edge)
@@ -739,11 +744,16 @@ def _edge_split(text: str, kind: str) -> tuple[str, re.Match[str], str] | None:
 
 
 def _detect_kind(lines: list[tuple[int, str]]) -> tuple[str, dict[int, str]]:
-    """Return the diagram kind and the role of each statement line for it."""
+    """Return the diagram kind and the role of each statement line for it.
+
+    Arrow and declaration forms decide the kind. A message label does not:
+    a structural class relationship wins over a later plain arrow, and an
+    unlabeled ``->`` is still a sequence message.
+    """
     has_class = False
     has_seq_decl = False
     has_class_rel = False
-    has_seq_msg = False
+    has_seq_arrow = False
     unsupported: str | None = None
     readings: list[tuple[int, bool, bool, bool, bool]] = []
     for line_number, text in _statement_lines(lines):
@@ -754,8 +764,8 @@ def _detect_kind(lines: list[tuple[int, str]]) -> tuple[str, dict[int, str]]:
             # Arrow first: an edge line is never a declaration.
             if class_split and _is_structural_link(class_split[1]):
                 has_class_rel = True
-            if seq_split and _partition_unquoted(seq_split[2], ":")[1].strip():
-                has_seq_msg = True
+            if seq_split:
+                has_seq_arrow = True
         else:
             is_class_decl = bool(CLASS_DECL_RE.match(text))
             is_seq_decl = bool(SEQ_DECL_RE.match(text))
@@ -769,9 +779,10 @@ def _detect_kind(lines: list[tuple[int, str]]) -> tuple[str, dict[int, str]]:
         _fail("mixed or unknown kind")
     if unsupported and not has_class and not has_seq_decl:
         _fail(_unsupported_kind_message(unsupported))
-    if has_class or (has_class_rel and not has_seq_decl and not has_seq_msg):
+    # A structural relationship is class even when a later plain arrow is labeled.
+    if has_class or (has_class_rel and not has_seq_decl):
         kind = "class"
-    elif has_seq_decl or has_seq_msg:
+    elif has_seq_decl or has_seq_arrow:
         kind = "sequence"
     elif unsupported:
         _fail(_unsupported_kind_message(unsupported))
@@ -1082,11 +1093,13 @@ def _split_cardinality(side: str, *, before_arrow: bool) -> tuple[str, str]:
 
 def _class_relationship(
     match: re.Match[str], line_number: int
-) -> tuple[str, str, bool, bool, bool, bool]:
-    """Return (arrowhead, style, reverse, bidirectional, undirected, hidden).
+) -> tuple[str, str, bool, bool, bool, bool, str]:
+    """Return (arrowhead, style, reverse, bidirectional, undirected, hidden, navigable).
 
     The source of an edge is the child for inheritance, the whole (diamond
     side) for composition and aggregation, and the tail for an association.
+    ``navigable`` is ``source`` or ``target`` in pre-swap coordinates when a
+    diamond shares the arrow with a plain head, and empty when it does not.
     """
     style_hint = (match.group("style") or "").casefold()
     dashed = match.group("char") == "." or "dashed" in style_hint or "dotted" in style_hint
@@ -1097,23 +1110,23 @@ def _class_relationship(
     if left is None or right is None:
         _fail(f"unsupported relationship arrow `{match.group(0)}` at line {line_number}")
     if not left and not right:
-        return "association", style, False, False, True, hidden
+        return "association", style, False, False, True, hidden, ""
     if left == "plain" and right == "plain":
-        return "association", style, False, True, False, hidden
+        return "association", style, False, True, False, hidden, ""
     if left and right:
-        # A diamond with a navigability arrow keeps the diamond's meaning.
+        # The diamond keeps ownership; the plain head says which end is navigable.
         if left in {"composition", "aggregation"} and right == "plain":
-            return left, style, False, False, False, hidden
+            return left, style, False, False, False, hidden, "target"
         if right in {"composition", "aggregation"} and left == "plain":
-            return right, style, True, False, False, hidden
+            return right, style, True, False, False, hidden, "source"
         _fail(f"unsupported relationship arrow `{match.group(0)}` at line {line_number}")
     head = left or right
     if head == "plain":
-        return "association", style, bool(left), False, False, hidden
+        return "association", style, bool(left), False, False, hidden, ""
     if head == "inheritance":
-        return "inheritance", style, bool(left), False, False, hidden
+        return "inheritance", style, bool(left), False, False, hidden, ""
     # Composition and aggregation: the diamond side is the source.
-    return head, style, bool(right), False, False, hidden
+    return head, style, bool(right), False, False, hidden, ""
 
 
 def _sequence_arrow(match: re.Match[str]) -> tuple[str, str, bool, bool]:
@@ -1474,20 +1487,23 @@ def _parse_class(diagram: Diagram, lines: list[tuple[int, str]]) -> None:
     def scope() -> list[str]:
         return [block for block, _line in blocks if block is not None]
 
-    def add_link(split: tuple[str, re.Match[str], str], line_number: int) -> None:
+    def add_link(
+        split: tuple[str, re.Match[str], str], line_number: int, link_scope: list[str]
+    ) -> None:
         left, arrow, right = split
         right, label = _partition_unquoted(right, ":")
         left_name, left_card = _split_cardinality(left, before_arrow=True)
         right_name, right_card = _split_cardinality(right, before_arrow=False)
         edge_error = f"malformed edge at line {line_number}"
-        source = class_ref(left_name, edge_error)
-        target = class_ref(right_name, edge_error)
-        arrowhead, style, reverse, bidirectional, undirected, hidden = _class_relationship(
+        source = class_ref(left_name, edge_error, link_scope)
+        target = class_ref(right_name, edge_error, link_scope)
+        arrowhead, style, reverse, bidirectional, undirected, hidden, navigable = _class_relationship(
             arrow, line_number
         )
         if reverse:
             source, target = target, source
             left_card, right_card = right_card, left_card
+            navigable = {"source": "target", "target": "source"}.get(navigable, navigable)
         if hidden:
             # `-[hidden]-` is a layout hint with no drawn link.
             diagram.discarded["skin"] += 1
@@ -1502,19 +1518,23 @@ def _parse_class(diagram: Diagram, lines: list[tuple[int, str]]) -> None:
             undirected=undirected,
             source_cardinality=clean_label(left_card),
             target_cardinality=clean_label(right_card),
+            navigable=navigable,
         )
 
-    def class_ref(token: str, error: str) -> str:
+    def class_ref(token: str, error: str, link_scope: list[str] | None = None) -> str:
         """Get or create the class a reference names, by its code."""
         parsed = _endpoint_code(token)
         if parsed is None:
             _fail(error)
         code, display = parsed
-        node_id = diagram.resolve(code, scope())
+        node_id = diagram.resolve(code, scope() if link_scope is None else link_scope)
         if node_id not in diagram.node_map:
             diagram.add_node(node_id, clean_label(display) or node_id, "class")
         return node_id
 
+    # Declarations register first. A link before `class A` inside the same
+    # package then resolves to that class instead of a new top-level one.
+    pending_links: list[tuple[tuple[str, re.Match[str], str], int, list[str]]] = []
     skin = _SkinBlocks()
     for line_number, raw in lines:
         text = raw.strip()
@@ -1537,7 +1557,7 @@ def _parse_class(diagram: Diagram, lines: list[tuple[int, str]]) -> None:
         split = _edge_split(text, "class")
         if split:
             diagram.parsed_roles[line_number] = "edge"
-            add_link(split, line_number)
+            pending_links.append((split, line_number, list(scope())))
             continue
         diagram.parsed_roles[line_number] = "statement"
         title = re.match(r"^title\s+(.+)$", text, re.I)
@@ -1618,6 +1638,8 @@ def _parse_class(diagram: Diagram, lines: list[tuple[int, str]]) -> None:
         if first in UNSUPPORTED_CLASS:
             _fail(f"unsupported class construct: {first}")
         _fail(f"malformed statement at line {line_number}")
+    for split, line_number, link_scope in pending_links:
+        add_link(split, line_number, link_scope)
     if current is not None:
         _fail(f"unterminated class body at line {current_line}")
     if blocks:
@@ -1636,6 +1658,10 @@ def parse_block(block: SourceBlock) -> Diagram:
         (block.source_line + offset, text)
         for offset, text in enumerate(_blank_comments(block.text.splitlines()))
     ]
+    # Before kind detection: a dash-only line makes the arrow scan quadratic.
+    for line_number, text in lines:
+        if len(text.strip()) > MAX_STATEMENT_CHARS:
+            _statement_too_long(line_number)
     _refuse_includes(lines)
     kind, roles = _detect_kind(lines)
     diagram = Diagram(block.index, kind, block.source_line, direction="LR" if kind == "sequence" else "TD")
@@ -1960,6 +1986,8 @@ def digest(
                 marks.append("bidir")
             if edge.undirected:
                 marks.append("undirected")
+            if edge.navigable:
+                marks.append(f"navigable {edge.navigable}")
             if edge.source_cardinality or edge.target_cardinality:
                 ends = []
                 if edge.source_cardinality:
