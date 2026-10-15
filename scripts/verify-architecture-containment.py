@@ -3,8 +3,9 @@
 
 Checks unique IDs, resolving parents, no cycles, geometric containment,
 innermost-scope parents (only the outermost scope may omit data-parent),
-<rect> bounds, admin-band vs traffic-box shapes with stroke-dasharray resolved
-as rendered, PaaS placement, endpoint targets, declared peerings, sibling axes
+<rect> bounds, admin-band vs traffic-box shapes with supported literal
+stroke-dasharray declarations resolved by priority (unresolved computed values
+are findings), PaaS placement, endpoint targets, declared peerings, sibling axes
 (nested children perpendicular to their parent's), and the 4px grid. Geometry
 is read from raw x/y/width/height, so a transform, moving inline CSS, nested
 <svg> viewport, matching <style> rule, or geometry animation on a checked
@@ -166,10 +167,49 @@ def identity_ok(raw: str) -> bool:
     return bool(raw) and ID_RE.fullmatch(raw) is not None
 
 
+def css_without_comments(text: str, *, replacement: str = " ", mask: bool = False) -> str:
+    """Remove actual comments without joining tokens or touching strings.
+
+    A width-preserving mask lets the rule scanner find delimiters while keeping
+    indices into the original declaration body, where comment boundaries matter.
+    """
+    output, quote, index = [], "", 0
+    while index < len(text):
+        char = text[index]
+        if char == "\\":
+            output.append(text[index:index + 2])
+            index += 2
+            continue
+        if quote:
+            output.append(char)
+            if char == quote:
+                quote = ""
+        elif char in "\"'":
+            quote = char
+            output.append(char)
+        elif text.startswith("/*", index):
+            close = text.find("*/", index + 2)
+            end = len(text) if close < 0 else close + 2
+            output.append(" " * (end - index) if mask else replacement)
+            index = end
+            continue
+        else:
+            output.append(char)
+        index += 1
+    return "".join(output)
+
+
 def split_top(text: str, separators: str) -> list[str]:
     """Split on separators outside quotes, brackets and parentheses."""
     parts, depth, quote, start = [], 0, "", 0
+    escaped = False
     for index, char in enumerate(text):
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\":
+            escaped = True
+            continue
         if quote:
             if char == quote:
                 quote = ""
@@ -186,14 +226,56 @@ def split_top(text: str, separators: str) -> list[str]:
     return parts
 
 
+DASH_KEYWORDS = {"none", "inherit", "initial", "unset", "revert", "revert-layer"}
+DASH_UNITS = {"", "px", "%", "em", "rem", "ex", "ch", "pt", "pc", "mm", "cm", "in", "vw", "vh"}
+
+
+def dash_declaration_valid(raw: str) -> bool | None:
+    """True for supported literals, False for invalid ones, None if unresolved.
+
+    A valid computed value (for example var() or calc()) must not be discarded
+    as though it were a syntactically invalid declaration. Keep it in the
+    cascade and report that the checker cannot resolve it if it wins.
+    """
+    value = raw.strip().lower()
+    if value in DASH_KEYWORDS:
+        return True
+    if any(char in value for char in "()\\"):
+        return None
+    if not value or re.search(r"^,|,$|,\s*,", value):
+        return False
+    unresolved = False
+    for token in re.split(r"[\s,]+", value):
+        match = re.fullmatch(f"({NUMBER})([a-z%]*)", token)
+        if match is None:
+            return False
+        amount = float(match.group(1))
+        if amount < 0:
+            return False
+        if not math.isfinite(amount) or match.group(2) not in DASH_UNITS:
+            unresolved = True
+    return None if unresolved else True
+
+
 def declarations(text: str) -> dict[str, str]:
-    """Parse a CSS declaration block; later declarations win, as in CSS."""
+    """Resolve declarations by importance, then by their order in the block."""
     result = {}
-    for part in split_top(re.sub(r"/\*.*?\*/", "", text, flags=re.S), ";"):
+    important = set()
+    for part in split_top(css_without_comments(text), ";"):
         name, colon, value = part.partition(":")
         name = name.strip().lower()
         if colon and name and not name.startswith("--"):
-            result[name] = re.sub(r"!\s*important\s*$", "", value.strip(), flags=re.I).strip()
+            priority = re.search(r"!\s*important\s*$", value, flags=re.I)
+            value = value[:priority.start()].strip() if priority else value.strip()
+            # Invalid declarations must not hide a later valid value or erase
+            # an earlier one merely because they carry !important.
+            if (not value
+                    or (name == "stroke-dasharray" and dash_declaration_valid(value) is False)
+                    or (name in important and priority is None)):
+                continue
+            result[name] = value
+            if priority:
+                important.add(name)
     return result
 
 
@@ -203,11 +285,15 @@ GROUP_AT_RULES = {"media", "supports", "layer", "container", "scope", "document"
 def css_rules(text: str) -> list[tuple[str, dict[str, str]]]:
     """Return (selector list, declarations) for every style rule, recursing into
     conditional group at-rules and skipping @keyframes, @font-face and the like."""
-    text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+    original = text
+    text = css_without_comments(text, mask=True)
     rules: list[tuple[str, dict[str, str]]] = []
     index, start, quote = 0, 0, ""
     while index < len(text):
         char = text[index]
+        if char == "\\":
+            index += 2
+            continue
         if quote:
             if char == quote:
                 quote = ""
@@ -219,6 +305,9 @@ def css_rules(text: str) -> list[tuple[str, dict[str, str]]]:
             depth, close, inner_quote = 1, index + 1, ""
             while close < len(text) and depth:
                 inner = text[close]
+                if inner == "\\":
+                    close += 2
+                    continue
                 if inner_quote:
                     if inner == inner_quote:
                         inner_quote = ""
@@ -229,7 +318,8 @@ def css_rules(text: str) -> list[tuple[str, dict[str, str]]]:
                 elif inner == "}":
                     depth -= 1
                 close += 1
-            prelude, body = text[start:index].strip(), text[index + 1:close - 1]
+            prelude = css_without_comments(original[start:index], replacement="").strip()
+            body = original[index + 1:close - 1]
             if prelude.startswith("@"):
                 name = prelude[1:].split(None, 1)[0].lower() if len(prelude) > 1 else ""
                 if name in GROUP_AT_RULES:
@@ -465,9 +555,9 @@ def rule_may_match(selector: str, node: Node, parent_of) -> bool:
 def dash_value(raw: str) -> bool | None:
     """True dashed, False solid, None when unspecified, inherited or invalid."""
     value = raw.strip().lower()
-    if value in ("", "inherit"):
+    if value in ("", "inherit", "unset", "revert", "revert-layer"):
         return None
-    if value in ("none", "initial", "unset", "revert"):
+    if value in ("none", "initial"):
         return False
     lengths = []
     for token in re.split(r"[\s,]+", value):
@@ -483,9 +573,22 @@ def is_dashed(node: Node, root: Node) -> bool:
     and the property inherits from ancestors up to the diagram SVG."""
     current: Node | None = node
     while current is not None:
-        for raw in (declarations(current.attrs.get("style", "")).get("stroke-dasharray"),
-                    current.attrs.get("stroke-dasharray")):
+        inline = declarations(current.attrs.get("style", "")).get("stroke-dasharray")
+        keyword = inline.strip().lower() if inline is not None else ""
+        if keyword in {"inherit", "unset", "revert"}:
+            # These inherit the parent's computed value rather than resurrect
+            # this element's lower-priority presentation attribute.
+            values = ()
+        elif keyword == "revert-layer":
+            # Matching stylesheet rules are refused below, so reverting the
+            # inline layer exposes the presentation attribute or inheritance.
+            values = (current.attrs.get("stroke-dasharray"),)
+        else:
+            values = (inline, current.attrs.get("stroke-dasharray"))
+        for raw in values:
             if raw is not None:
+                if dash_declaration_valid(raw) is None:
+                    raise ValueError(f"unsupported stroke-dasharray value: {raw!r}")
                 resolved = dash_value(raw)
                 if resolved is not None:
                     return resolved
