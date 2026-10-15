@@ -59,6 +59,29 @@ def main() -> int:
     static = STATIC_EXAMPLE.read_text(encoding="utf-8")
     animated = EXAMPLE.read_text(encoding="utf-8")
 
+    # Document completeness: truncation, mojibake and unbalanced markup must all fail,
+    # while valid HTML that omits an optional end tag or uses a void element still passes.
+    def check_mutation_fail(
+        label: str, find: str, replace: str, needle: str, limit: int = 1
+    ) -> None:
+        if find not in static:
+            failures.append(f"{label}: fixture has no {find!r} to mutate")
+            return
+        check_fail(label, static.replace(find, replace, limit), needle)
+
+    def check_mutation_pass(label: str, find: str, replace: str, limit: int = 1) -> None:
+        if find not in static:
+            failures.append(f"{label}: fixture has no {find!r} to mutate")
+            return
+        check_source_pass(label, static.replace(find, replace, limit))
+
+    check_fail("truncated document", static[: len(static) // 2], "does not end with </html>")
+    check_fail("mojibake", "\ufffd" + static, "U+FFFD")
+    check_mutation_fail("dropped closing tag", "</text>", "", "<text> opens")
+    check_mutation_fail("stray closing tag", "</div>", "</span>", "<div> opens")
+    check_mutation_pass("optional end tag", "</p>", "")
+    check_mutation_pass("void element", "<body>", "<body><br>")
+
     for location, markup in (
         ("heading before SVG", '<h2 id="architecture-title">Monthly traffic summary</h2>'),
         ("description duplicate", '<p id="architecture-desc">Unrelated description</p>'),

@@ -7,7 +7,9 @@ Ships inside the skill so an installed agent can verify its own output:
 
 Checks the accessible-SVG contract, the single-file safety rules (no remote
 assets beyond the approved Google Fonts stylesheet, no executable attributes,
-no scripts other than the one canonical motion controller), painted content
+no scripts other than the one canonical motion controller), document
+completeness (a truncated or mojibake file is rejected rather than passed),
+painted content
 staying inside each SVG's viewBox, and — when motion markup is present — the
 structural motion contract. This is a distilled
 subset of the repository gates (`lint-skin.py`, `verify-motion.py`), which
@@ -63,6 +65,38 @@ SVG_NUMBER = r"[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?"
 SVG_NUMBER_RE = re.compile(SVG_NUMBER)
 SVG_PLAIN_NUMBER_RE = re.compile(rf"^\s*{SVG_NUMBER}\s*$")
 TRANSLATE_RE = re.compile(rf"^\s*translate\(\s*({SVG_NUMBER})(?:[\s,]+({SVG_NUMBER}))?\s*\)\s*$")
+REPLACEMENT_CHAR = "\ufffd"
+# Container elements a generated diagram always closes. Counting each pair catches the
+# damage a truncated write or a careless edit leaves behind: a file that stops mid-element,
+# a dropped </text>, a stray </span>. Void and optional-end-tag elements are deliberately
+# absent, and comments and script/style bodies are masked before counting, so valid HTML
+# cannot trip the count.
+PAIRED_CONTAINER_TAGS = (
+    "html",
+    "head",
+    "body",
+    "title",
+    "desc",
+    "div",
+    "section",
+    "main",
+    "article",
+    "header",
+    "footer",
+    "figure",
+    "figcaption",
+    "svg",
+    "g",
+    "defs",
+    "pattern",
+    "marker",
+    "style",
+    "script",
+    "text",
+    "tspan",
+)
+COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
+CDATA_RE = re.compile(r"<!\[CDATA\[.*?\]\]>", re.DOTALL)
 # Their children are not painted where they are declared, or use another coordinate system.
 UNPAINTED_TAGS = {
     "defs",
@@ -502,6 +536,62 @@ def canonical_controller() -> str:
     return normalized_controller("".join(body))
 
 
+def masked_for_counting(source: str) -> str:
+    """Source with comments, CDATA and script/style bodies blanked, keeping their tags.
+
+    A generated file can hold markup inside a comment or a string, so counting the raw
+    source would report an imbalance the document does not have.
+    """
+    masked = CDATA_RE.sub("", COMMENT_RE.sub("", source))
+    for tag in ("script", "style"):
+        masked = re.sub(
+            rf"(<{tag}\b[^>]*>).*?(</{tag}\s*>)", r"\1\2", masked,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+    return masked
+
+
+def count_tag_pairs(source: str, tag: str) -> tuple[int, int]:
+    """Open and close counts for one element, ignoring self-closing tags."""
+    opens = closes = 0
+    pattern = re.compile(rf"<(/?){tag}(?=[\s/>])[^>]*?(/?)>", re.IGNORECASE | re.DOTALL)
+    for match in pattern.finditer(source):
+        if match.group(1) == "/":
+            closes += 1
+        elif match.group(2) != "/":
+            opens += 1
+    return opens, closes
+
+
+def check_document_completeness(source: str, errors: list[str]) -> None:
+    """Reject a document that is not whole: truncation, mojibake, unbalanced markup.
+
+    The other checks read a document's contents; none of them notices that the document
+    stopped early. A generated file that was cut off mid-write still satisfies the
+    accessible-SVG contract for the part that survived, so this check reads the shape of
+    the whole file instead.
+    """
+    if not source.casefold().rstrip().endswith("</html>"):
+        errors.append("document does not end with </html>; the file looks truncated")
+
+    replacements = source.count(REPLACEMENT_CHAR)
+    if replacements:
+        line = source[: source.index(REPLACEMENT_CHAR)].count("\n") + 1
+        errors.append(
+            f"contains {replacements} U+FFFD replacement character(s), first on line {line}:"
+            " the file has mojibake or a truncated multi-byte character"
+        )
+
+    masked = masked_for_counting(source)
+    for tag in PAIRED_CONTAINER_TAGS:
+        opens, closes = count_tag_pairs(masked, tag)
+        if opens != closes:
+            errors.append(
+                f"<{tag}> opens {opens} time(s) and closes {closes} time(s);"
+                " the document is not balanced"
+            )
+
+
 def check_svgs(parser: DiagramParser, errors: list[str]) -> None:
     checkable = [
         svg
@@ -678,6 +768,7 @@ def verify(path: Path, offline: bool = False) -> list[str]:
     parser = parsed_document(source)
     errors: list[str] = []
     errors.extend(parser.unsafe)
+    check_document_completeness(source, errors)
     check_css_references(parser, errors)
     for tag, rel, value in parser.references:
         finding = reference_error(tag, rel, value)
