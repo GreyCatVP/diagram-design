@@ -400,6 +400,35 @@ def check_bom_prefixed(tmp: Path) -> None:
     ok("UTF-8 BOM-prefixed raw XML and bare compressed payload parse like their unprefixed input")
 
 
+def check_hidden_cells(tmp: Path) -> None:
+    # visible="0" on a cell, a group, or a layer hides it in draw.io; the import must not resurrect it.
+    def vertex(cid: str, parent: str, x: int, extra: str = "") -> str:
+        return (f'<mxCell id="{cid}" value="{cid.upper()}" vertex="1" parent="{parent}"{extra}>'
+                f'<mxGeometry x="{x}" width="60" height="40" as="geometry"/></mxCell>')
+
+    def edge(cid: str, parent: str, extra: str = "") -> str:
+        return (f'<mxCell id="{cid}" value="{cid}" edge="1" parent="{parent}" source="a" target="b"{extra}>'
+                '<mxGeometry relative="1" as="geometry"/></mxCell>')
+
+    source = tmp / "hidden-cells.drawio"
+    source.write_text(
+        '<mxGraphModel><root><mxCell id="0"/><mxCell id="1" parent="0"/>'
+        '<mxCell id="layer2" value="Draft" parent="0" visible="0"/>'
+        + vertex("a", "1", 0) + vertex("b", "1", 100)
+        + vertex("hidden", "1", 200, ' visible="0"')
+        + vertex("draft", "layer2", 300)
+        + vertex("grp", "1", 400, ' visible="0"') + vertex("inside", "grp", 5)
+        + edge("shown", "1") + edge("hiddenedge", "1", ' visible="0"') + edge("draftedge", "layer2")
+        + "</root></mxGraphModel>",
+        encoding="utf-8",
+    )
+    page = json.loads(run_extract([str(source), "--json"]))["pages"][0]
+    nodes, edges = sorted(n["id"] for n in page["nodes"]), sorted(e["id"] for e in page["edges"])
+    if (nodes, edges) != (["a", "b"], ["shown"]):
+        fail(f"hidden cells, groups or layers leaked into the IR: nodes={nodes} edges={edges}")
+    ok("cells hidden directly, through a group, or through a layer are dropped from the IR")
+
+
 def check_containers(tmp: Path) -> None:
     model = re.search(
         r"<mxGraphModel.*?</mxGraphModel>", FIXTURE.read_text(encoding="utf-8"), re.S
@@ -843,6 +872,7 @@ def main() -> int:
         check_nested_geometry(tmp)
         check_nested_relative_geometry(tmp)
         check_bom_prefixed(tmp)
+        check_hidden_cells(tmp)
         check_containers(tmp)
         check_legacy_stdout_encoding(tmp)
         check_out_write_errors(tmp)
