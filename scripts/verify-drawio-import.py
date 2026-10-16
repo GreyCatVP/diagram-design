@@ -426,6 +426,24 @@ def check_hidden_cells(tmp: Path) -> None:
     nodes, edges = sorted(n["id"] for n in page["nodes"]), sorted(e["id"] for e in page["edges"])
     if (nodes, edges) != (["a", "b"], ["shown"]):
         fail(f"hidden cells, groups or layers leaked into the IR: nodes={nodes} edges={edges}")
+    # Put the deepest descendant first: memoization cannot shorten the first
+    # ancestor walk, and input order must not resurrect a hidden descendant.
+    deep = tmp / "hidden-child-first.drawio"
+    count = 8000
+    deep.write_text(
+        '<mxGraphModel><root>'
+        + ''.join(
+            f'<mxCell id="n{i}" parent="n{i + 1}" vertex="1"'
+            + (' visible="0"' if i == count - 1 else '')
+            + '><mxGeometry x="0" y="0" width="40" height="40" as="geometry"/></mxCell>'
+            for i in range(count)
+        )
+        + '</root></mxGraphModel>',
+        encoding="utf-8",
+    )
+    deep_page = json.loads(run_extract([str(deep), "--json"]))["pages"][0]
+    if deep_page["nodes"] or deep_page["edges"]:
+        fail("Child-first deep descendants escaped their hidden ancestor")
     ok("cells hidden directly, through a group, or through a layer are dropped from the IR")
 
 

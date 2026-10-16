@@ -422,12 +422,14 @@ def parse_page(diagram: ET.Element, index: int) -> Page:
 
     def is_hidden(cid: str) -> bool:
         chain: list[str] = []
+        visited: set[str] = set()
         current, result = cid, False
-        while current in raw and current not in chain:
+        while current in raw and current not in visited:
             if current in hidden:
                 result = hidden[current]
                 break
             chain.append(current)
+            visited.add(current)
             if raw[current]["cell"].get("visible") == "0":
                 result = True
                 break
