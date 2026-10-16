@@ -34,7 +34,8 @@ Full argument string: `$ARGUMENTS`
 3. **Source has no `<svg>` block** → refuse and tell the user; don't write anything.
 4. **PNG requested but Playwright not installed** → surface the install instruction from the reference verbatim and stop. Do **not** auto-install.
 5. **PNG requested with a non-numeric or non-finite `--scale`, or a value outside the inclusive 1–4 range** → reject. Fractional values within that range are valid.
-6. **`--registry` requested but source has no `data-block-id` attributes** → refuse and tell the user; don't emit an empty or partial registry file. Per the export-registry reference's edge-case section.
-7. **`--registry` is the only flag given** (no `--svg-only`/`--png-only`) → emit only the registry JSON. Do not also produce SVG/PNG, and do not check for Playwright — a registry-only call must succeed on a host that doesn't have it installed at all.
+6. **Both `--svg-only` and `--png-only` supplied** → reject them as mutually exclusive.
+7. **`--registry` requested but source has no `data-block-id` attributes** → refuse and tell the user; don't emit an empty or partial registry file. Per the export-registry reference's edge-case section.
+8. **`--registry` is the only flag given** (no `--svg-only`/`--png-only`) → emit only the registry JSON. Do not also produce SVG/PNG, and do not check for Playwright — a registry-only call must succeed on a host that doesn't have it installed at all.
 
 After producing the outputs, report the file paths and sizes back to the user.

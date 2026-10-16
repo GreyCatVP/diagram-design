@@ -551,6 +551,38 @@ def split_route_error(heading: str, target: str) -> str:
     )
 
 
+def check_export_surface_parity(verify) -> None:
+    export_cmd = Path("commands/export-diagram.md")
+    original_cmd = mutate(
+        export_cmd,
+        "Both `--svg-only` and `--png-only` supplied",
+        "Both format flags supplied",
+    )
+    try:
+        errors: list[str] = []
+        verify.check_export_surface_parity(errors, Path("."))
+        if not any("commands/export-diagram.md" in err for err in errors):
+            raise AssertionError(f"missing commands/export-diagram.md parity error: {errors}")
+        print("OK export surface parity: missing command rule caught")
+    finally:
+        export_cmd.write_bytes(original_cmd)
+
+    export_prompt = Path("prompts/export-diagram.md")
+    original_prompt = mutate(
+        export_prompt,
+        "Both `--svg-only` and `--png-only` supplied",
+        "Both format flags supplied",
+    )
+    try:
+        errors = []
+        verify.check_export_surface_parity(errors, Path("."))
+        if not any("prompts/export-diagram.md" in err for err in errors):
+            raise AssertionError(f"missing prompts/export-diagram.md parity error: {errors}")
+        print("OK export surface parity: missing prompt rule caught")
+    finally:
+        export_prompt.write_bytes(original_prompt)
+
+
 def check_split_routes(verify) -> None:
     """Each SKILL.md section the ADR 0004 split thinned still routes to its content."""
     skill = verify.SKILL.read_text(encoding="utf-8")
@@ -2031,6 +2063,7 @@ diagram-design/
     check_size_preset_surfaces(verify)
     check_split_type_ramp(verify)
     check_split_routes(verify)
+    check_export_surface_parity(verify)
 
     print(
         "PASS: docs sync checks references, style-guide anchors, asset citations, "
