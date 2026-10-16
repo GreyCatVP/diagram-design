@@ -552,35 +552,52 @@ def split_route_error(heading: str, target: str) -> str:
 
 
 def check_export_surface_parity(verify) -> None:
-    export_cmd = Path("commands/export-diagram.md")
-    original_cmd = mutate(
-        export_cmd,
-        "Both `--svg-only` and `--png-only` supplied",
-        "Both format flags supplied",
-    )
-    try:
+    with tempfile.TemporaryDirectory(prefix="verify-docs-sync-export-") as temp_dir:
+        fake_root = Path(temp_dir)
+        fake_cmd = fake_root / "commands/export-diagram.md"
+        fake_prompt = fake_root / "prompts/export-diagram.md"
+        fake_cmd.parent.mkdir(parents=True)
+        fake_prompt.parent.mkdir(parents=True)
+
+        fake_cmd.write_text(
+            (ROOT / "commands/export-diagram.md").read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+        fake_prompt.write_text(
+            (ROOT / "prompts/export-diagram.md").read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+
         errors: list[str] = []
-        verify.check_export_surface_parity(errors, Path("."))
+        verify.check_export_surface_parity(errors, fake_root)
+        if errors:
+            raise AssertionError(f"shipped export surfaces failed: {errors}")
+
+        broken_cmd = fake_cmd.read_text(encoding="utf-8").replace(
+            "Both `--svg-only` and `--png-only` supplied",
+            "Both format flags supplied",
+        )
+        fake_cmd.write_text(broken_cmd, encoding="utf-8")
+        errors = []
+        verify.check_export_surface_parity(errors, fake_root)
         if not any("commands/export-diagram.md" in err for err in errors):
             raise AssertionError(f"missing commands/export-diagram.md parity error: {errors}")
         print("OK export surface parity: missing command rule caught")
-    finally:
-        export_cmd.write_bytes(original_cmd)
 
-    export_prompt = Path("prompts/export-diagram.md")
-    original_prompt = mutate(
-        export_prompt,
-        "Both `--svg-only` and `--png-only` supplied",
-        "Both format flags supplied",
-    )
-    try:
+        fake_cmd.write_text(
+            (ROOT / "commands/export-diagram.md").read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+        broken_prompt = fake_prompt.read_text(encoding="utf-8").replace(
+            "Both `--svg-only` and `--png-only` supplied",
+            "Both format flags supplied",
+        )
+        fake_prompt.write_text(broken_prompt, encoding="utf-8")
         errors = []
-        verify.check_export_surface_parity(errors, Path("."))
+        verify.check_export_surface_parity(errors, fake_root)
         if not any("prompts/export-diagram.md" in err for err in errors):
             raise AssertionError(f"missing prompts/export-diagram.md parity error: {errors}")
         print("OK export surface parity: missing prompt rule caught")
-    finally:
-        export_prompt.write_bytes(original_prompt)
 
 
 def check_split_routes(verify) -> None:
