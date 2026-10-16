@@ -1372,18 +1372,18 @@ def check_standalone_state_regression(tmp: Path) -> None:
     notes.write_text(
         "stateDiagram-v2\nstate Idle\nnote left of Idle\nGhost\nend note\n"
         "note right of Idle\nPhantom\nend note\n"
-        "note left of Idle: inline annotation\n"
-        "note right of Idle: inline annotation\nActive\nnote\nend\nnotebook\n",
+        "note left of Idle: first inline annotation\n"
+        "note right of Idle: second inline annotation\nActive\nnote\nend\nnotebook\n",
         encoding="utf-8",
     )
     payload = json.loads(run_extract([str(notes), "--json"]))["diagrams"][0]
     if {node["id"] for node in payload["nodes"]} != {"Idle", "Active", "note", "end", "notebook"}:
         fail("State note boundaries swallowed real states or retained annotation bodies")
 
-    if payload["notes"] != ["inline annotation", "inline annotation"]:
+    if payload["notes"] != ["first inline annotation", "second inline annotation"]:
         fail("Single-line state notes were not retained in source order")
     digest = run_extract([str(notes)])
-    if "notes: inline annotation; inline annotation" not in digest:
+    if "notes: first inline annotation; second inline annotation" not in digest:
         fail("Single-line state notes were not printed in the digest")
 
     for side in ("left", "right"):
