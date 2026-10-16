@@ -695,7 +695,7 @@ def _edge_operators(text: str) -> list[_Operator]:
         r"(?P<closing>\.-+[>xo]|\.-+)"
     )
     trailing_operator = re.compile(
-        r"(?:\.-+[>xo]|\.-+|-{2,}>|--[xo]|=+>|={2,}|-{3,})"
+        r"(?:\.-+[>xo]|\.-+|-{2,}>|--[xo]|=+>|={2,}|-{3,}|~{3,})"
         r"(?:\|[^|\n]*\|)?\s*$"
     )
     for edge_pattern in (text_edge, dotted_edge):

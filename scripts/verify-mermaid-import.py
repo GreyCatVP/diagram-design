@@ -1286,6 +1286,30 @@ def check_invisible_links(tmp: Path) -> None:
         fail(f"invisible links must be reported: {diagram['notes']!r}")
     ok("invisible ~~~ links declare their nodes without becoming edges")
 
+    for endpoint in ("x", "o"):
+        for operator, style in (("--go-->", "solid"), ("==go==>", "thick"), ("-.go.->", "dashed")):
+            for invisible in ("~~~", "~~~~"):
+                flow.write_text(f"flowchart TD\nA {invisible} {endpoint}{operator}B\n", encoding="utf-8")
+                mixed = json.loads(run_extract([str(flow), "--json"]))["diagrams"][0]
+                if {node["id"] for node in mixed["nodes"]} != {"A", endpoint, "B"}:
+                    fail("an invisible link must preserve a following x/o endpoint")
+                edges = [(edge["source"], edge["target"], edge["label"], edge["style"])
+                         for edge in mixed["edges"]]
+                if edges != [(endpoint, "B", "go", style)]:
+                    fail(f"mixed invisible/labeled chain changed its visible edge: {edges!r}")
+                if mixed["notes"] != ["1 invisible layout links ignored"]:
+                    fail("mixed invisible/labeled chains must report only their layout link")
+
+    flow.write_text("flowchart TD\nA ~~~ x--go-->B ~~~ o-.next.->C\n", encoding="utf-8")
+    mixed = json.loads(run_extract([str(flow), "--json"]))["diagrams"][0]
+    if {node["id"] for node in mixed["nodes"]} != {"A", "x", "B", "o", "C"}:
+        fail("a repeated mixed chain must preserve every endpoint")
+    if [(edge["source"], edge["target"], edge["label"]) for edge in mixed["edges"]] != [
+        ("x", "B", "go"), ("o", "C", "next")
+    ] or mixed["notes"] != ["2 invisible layout links ignored"]:
+        fail("a repeated mixed chain must retain both labeled edges and no invisible edges")
+    ok("invisible links keep x/o endpoint identity in solid, thick, dotted and repeated chains")
+
 
 def check_unicode_state_regression(tmp: Path) -> None:
     path = tmp / "unicode-state.mmd"
