@@ -735,7 +735,7 @@ def _css_rule_tree(css: str) -> list[_CssRule]:
             parentheses += 1
         elif char == ")":
             parentheses = max(0, parentheses - 1)
-        elif char == "{":
+        elif char == "{" and parentheses == 0:
             if len(stack) >= 1024:
                 raise ValueError("diagram CSS nesting exceeds the supported limit of 1024 blocks")
             rule = _CssRule(css, starts[-1], index)
@@ -743,7 +743,7 @@ def _css_rule_tree(css: str) -> list[_CssRule]:
             nodes.append(rule)
             stack.append(rule)
             starts.append(index + 1)
-        elif char == "}":
+        elif char == "}" and parentheses == 0:
             if stack:
                 stack.pop().end = index
                 starts.pop()

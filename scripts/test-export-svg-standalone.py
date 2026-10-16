@@ -1703,6 +1703,17 @@ class ExportSvgStandaloneTests(unittest.TestCase):
             self.assertNotIn("Traceback", errors.getvalue())
             self.assertFalse(output.exists())
 
+    def test_url_braces_are_value_text_in_css_rule_tree(self) -> None:
+        for url in ("image{.png", "image}.png"):
+            with self.subTest(url=url):
+                css = f'@supports (background: url({url})) {{ .paint {{fill:red;}} }}'
+                html = '<style>' + css + '</style><svg viewBox="0 0 10 10"><rect class="paint" width="5" height="5"/></svg>'
+                rendered = self.mod.export_svg_document(html, Path("url-braces.html"), system_fonts=True)
+                self.assertIn(css.split(" {")[0], rendered)
+                self.assertIn('#url-braces-root .paint', rendered)
+                self.assertIn('fill:red;', rendered)
+                ET.fromstring(rendered)
+
     def test_unknown_css_group_nesting_scans_source_once(self) -> None:
         for depth in (200, 400):
             with self.subTest(depth=depth):
