@@ -372,3 +372,5 @@ CSS grouping rules are scanned once and preserved without recursively rescanning
 
 `@scope` groups containing ordinary paint rules are refused with a clear exit-2 diagnostic before output is written; definition-only scopes retain their keyframes and font faces. `@layer` order statements remain in source order with their layer blocks, including inside grouping rules, so cascade priority is preserved.
 The exporter keeps optional defs in comments namespaced so they can be uncommented later. Only referenceable defs element types have their IDs renamed; live titles and other elements retain their IDs and accessibility references.
+
+Animation property names are compared after CSS escape decoding, while their authored spelling is preserved. Page styles and inline attributes keep their binding to namespaced keyframes, including `anim\61 tion` and vendor-prefixed properties. Nested animation declarations and SVG-local animation stylesheets remain unsupported and fail clearly, including escaped property names.

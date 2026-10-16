@@ -868,6 +868,46 @@ class ExportSvgStandaloneTests(unittest.TestCase):
             result = ET.fromstring(self.mod.export_svg_document(html, Path("escaped.html")))
             self.assertEqual(result.find("{http://www.w3.org/2000/svg}rect").get(prop), "rgba(255,0,0,0.5)")
 
+    def test_escaped_animation_properties_keep_keyframe_bindings(self) -> None:
+        properties = (r'anim\61 tion', r'animation\2d name', r'-webkit-anim\61 tion',
+                      r'\61 nimation-name', r'\000061nimation', r'ANIM\41 TION')
+        for prop in properties:
+            with self.subTest(prop=prop):
+                value = 'pulse' if 'name' in prop else 'pulse 1s'
+                html = '<style>@keyframes pulse {to {opacity:1}} .paint {' + prop + ':' + value + ';}</style>'
+                html += '<svg viewBox="0 0 40 40"><rect class="paint" style="' + prop + ':' + value + '"/></svg>'
+                result = self.mod.export_svg_document(html, Path('escaped-property.html'))
+                self.assertIn(prop + ':' + value.replace('pulse', 'escaped-property-root-pulse'), embedded_css(result))
+                shape = next(element for element in ET.fromstring(result).iter() if element.tag.endswith('}rect'))
+                self.assertEqual(shape.get('style'), prop + ':' + value.replace('pulse', 'escaped-property-root-pulse'))
+                self.assertIn('@keyframes escaped-property-root-pulse', embedded_css(result))
+
+    def test_escaped_nested_animation_properties_are_refused(self) -> None:
+        for prop in (r'anim\61 tion', r'animation\2d name', r'-webkit-anim\61 tion'):
+            for nested in ('& {' + prop + ':pulse;}', '& {fill:red;} ' + prop + ':pulse;',
+                           '@media print {' + prop + ':pulse;}'):
+                with self.subTest(prop=prop, nested=nested):
+                    html = '<style>@keyframes pulse {to {opacity:1}} .paint {' + nested + '}</style>'
+                    html += '<svg viewBox="0 0 40 40"><rect class="paint"/></svg>'
+                    with self.assertRaisesRegex(ValueError, 'unsupported nested CSS animation declaration'):
+                        self.mod.export_svg_document(html, Path('nested-escaped.html'))
+
+    def test_escaped_svg_local_animation_properties_are_refused(self) -> None:
+        for prop in (r'anim\61 tion', r'animation\2d name', r'-webkit-anim\61 tion'):
+            with self.subTest(prop=prop):
+                html = '<style>@keyframes pulse {to {opacity:1}}</style><svg viewBox="0 0 40 40">'
+                html += '<style>.paint {' + prop + ':pulse;}</style><rect class="paint"/></svg>'
+                with self.assertRaisesRegex(ValueError, 'unsupported SVG-local animation stylesheet'):
+                    self.mod.export_svg_document(html, Path('local-escaped.html'))
+
+    def test_animation_property_looking_literals_remain_literal(self) -> None:
+        declaration = r'content:";anim\61 tion:pulse;";--anim\61 tion:pulse;anim\;ation:pulse;anim\:ation:pulse;fill:red;'
+        html = '<style>@keyframes pulse {to {opacity:1}} .paint {' + declaration + '}</style>'
+        html += '<svg viewBox="0 0 40 40"><style>.paint {' + declaration + '}</style><rect class="paint"/></svg>'
+        result = self.mod.export_svg_document(html, Path('literal-property.html'))
+        self.assertIn(declaration, embedded_css(result))
+        self.assertIn(declaration, result)
+
     def test_reserved_animation_values_stay_disabled_or_reset(self) -> None:
         for value in ("none", "inherit", "initial", "unset", "revert", "revert-layer"):
             with self.subTest(value=value):

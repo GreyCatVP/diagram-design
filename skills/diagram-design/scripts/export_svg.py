@@ -870,6 +870,22 @@ def _animation_component(value: str, names: dict[str, str], shorthand: bool) -> 
     return value
 
 
+def _animation_property(prop: str) -> str:
+    # Compare decoded identifiers, retaining the authored spelling in output.
+    return decoded_css_url_fragment(strip_css_comments(prop).strip()).lower().removeprefix("-webkit-")
+
+
+def _has_animation_property(css: str) -> bool:
+    # Consume strings before declaration boundaries so property-looking text in
+    # content values remains literal. Hex escapes may include one terminator.
+    escape = r"\\(?:[0-9a-fA-F]{1,6}(?:\r\n|[ \t\r\n\f])?|[^\r\n\f])"
+    tokens = re.compile(CSS_COMMENT_OR_LITERAL_RE.pattern
+                        + rf"|(?:^|[;{{])\s*(?P<prop>(?:{escape}|[\w-])+)\s*:", re.DOTALL)
+    return any(match.group("prop") is not None
+               and _animation_property(match.group("prop")) in ("animation", "animation-name")
+               for match in tokens.finditer(css))
+
+
 def _animation_declarations(body: str, names: dict[str, str]) -> str:
     if not names:
         return body
@@ -877,7 +893,7 @@ def _animation_declarations(body: str, names: dict[str, str]) -> str:
     for index, segment in enumerate(segments):
         parts = _css_segments(segment, ":")
         prop, colon, value = parts[0], ":" if len(parts) > 1 else "", ":".join(parts[1:])
-        key = strip_css_comments(prop).strip().lower().removeprefix("-webkit-")
+        key = _animation_property(prop)
         if colon and key in ("animation", "animation-name"):
             value = ",".join(_animation_component(part, names, key == "animation") for part in _css_segments(value, ","))
             segments[index] = prop + colon + value
@@ -887,7 +903,7 @@ def _animation_declarations(body: str, names: dict[str, str]) -> str:
 def namespace_inline_animations(svg: str, names: dict[str, str]) -> str:
     if not names:
         return svg
-    if any(re.search(r"@(?:-webkit-)?keyframes\b|(?:^|[;{])\s*(?:-webkit-)?animation(?:-name)?\s*:", block, re.IGNORECASE)
+    if any(re.search(r"@(?:-webkit-)?keyframes\b", block, re.IGNORECASE) or _has_animation_property(block)
                      for block in (strip_css_comments(block) for block in STYLE_BLOCK_RE.findall(svg))):
         raise ValueError("unsupported SVG-local animation stylesheet in SVG export")
 
@@ -969,7 +985,7 @@ def _diagram_css_leaf(rule: _CssRule, root_id: str, names: dict[str, str], origi
             segments.extend(_css_segments(nested.css[cursor:nested.end], ";"))
             for segment in segments:
                 parts = _css_segments(segment, ":")
-                key = strip_css_comments(parts[0]).strip().lower().removeprefix("-webkit-")
+                key = _animation_property(parts[0])
                 if len(parts) > 1 and key in ("animation", "animation-name"):
                     raise ValueError("unsupported nested CSS animation declaration in SVG export")
     body = _animation_declarations(body, names)
