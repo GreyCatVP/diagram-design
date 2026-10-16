@@ -457,7 +457,7 @@ What never carries over: source or renderer coordinates, source palette, source 
 
 ## Export to PNG / SVG
 
-Diagrams ship as self-contained HTML, but you can export the diagram itself for Figma, slides, or social cards. SVG export also carries CDATA-wrapped diagram CSS, including selectors bound to the original SVG root. Use the slash command for your agent:
+Diagrams ship as self-contained HTML, but you can export the diagram itself for Figma, slides, or social cards. SVG export also carries CDATA-wrapped diagram CSS, including selectors bound to the original SVG root, and preserves quoted selector values containing comment delimiters. Use the slash command for your agent:
 
 **Pi:**
 
@@ -589,6 +589,7 @@ diagram-design/
 │       │   ├── mermaid_extract.py    # Mermaid → structured IR
 │       │   ├── excalidraw_extract.py  # Excalidraw → structured IR
 │       │   ├── export_svg.py         # standalone SVG export
+│       │   ├── export_png.py         # Playwright PNG renderer
 │       │   └── self_check.py         # packaged output self-check (runs installed)
 │       └── assets/
 │           ├── index.html            # live gallery, tabbed

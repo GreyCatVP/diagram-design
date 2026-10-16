@@ -1274,6 +1274,20 @@ def check_node_shape_updates(tmp: Path) -> None:
     ok("node declarations update shapes while bare references preserve them")
 
 
+def check_spaced_pipe_labels(tmp: Path) -> None:
+    flow = tmp / "spaced-pipe-labels.mmd"
+    flow.write_text(
+        "flowchart TD\nA --> |solid| B\nB -.-> |dotted| C\nC ==> |thick| D\nD --- |plain| E\nE -->|tight| F\n",
+        encoding="utf-8",
+    )
+    diagram = json.loads(run_extract([str(flow), "--json"]))["diagrams"][0]
+    edges = [(edge["source"], edge["target"], edge["label"]) for edge in diagram["edges"]]
+    expected = [("A", "B", "solid"), ("B", "C", "dotted"), ("C", "D", "thick"), ("D", "E", "plain"), ("E", "F", "tight")]
+    if edges != expected:
+        fail(f"a pipe label after whitespace must stay a label: {edges!r}")
+    ok("pipe labels may follow whitespace after the link operator")
+
+
 def check_unicode_state_regression(tmp: Path) -> None:
     path = tmp / "unicode-state.mmd"
     path.write_text('stateDiagram-v2\n待机 : 等待输入\n待机 --> 完成\n', encoding="utf-8")
@@ -1400,6 +1414,7 @@ def main() -> int:
         check_flowchart()
         check_bidirectional_analysis(tmp)
         check_node_shape_updates(tmp)
+        check_spaced_pipe_labels(tmp)
         check_entity_label_codes(tmp)
         check_shape_and_edge_vocabulary(tmp)
         check_frontmatter(tmp)
