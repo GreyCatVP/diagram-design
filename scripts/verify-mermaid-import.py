@@ -1274,6 +1274,19 @@ def check_node_shape_updates(tmp: Path) -> None:
     ok("node declarations update shapes while bare references preserve them")
 
 
+def check_invisible_links(tmp: Path) -> None:
+    flow = tmp / "invisible-links.mmd"
+    flow.write_text("flowchart TD\nJ ~~~ K\nP --> Q ~~~ R\n", encoding="utf-8")
+    diagram = json.loads(run_extract([str(flow), "--json"]))["diagrams"][0]
+    if sorted(node["id"] for node in diagram["nodes"]) != ["J", "K", "P", "Q", "R"]:
+        fail("endpoints of an invisible link must still become nodes")
+    if [(edge["source"], edge["target"]) for edge in diagram["edges"]] != [("P", "Q")]:
+        fail("an invisible link must not become an edge")
+    if diagram["notes"] != ["2 invisible layout links ignored"]:
+        fail(f"invisible links must be reported: {diagram['notes']!r}")
+    ok("invisible ~~~ links declare their nodes without becoming edges")
+
+
 def check_unicode_state_regression(tmp: Path) -> None:
     path = tmp / "unicode-state.mmd"
     path.write_text('stateDiagram-v2\n待机 : 等待输入\n待机 --> 完成\n', encoding="utf-8")
@@ -1400,6 +1413,7 @@ def main() -> int:
         check_flowchart()
         check_bidirectional_analysis(tmp)
         check_node_shape_updates(tmp)
+        check_invisible_links(tmp)
         check_entity_label_codes(tmp)
         check_shape_and_edge_vocabulary(tmp)
         check_frontmatter(tmp)
