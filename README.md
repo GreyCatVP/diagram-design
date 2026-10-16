@@ -142,6 +142,17 @@ Run `/reload` in an open Pi session. Pi makes the skill available for matching d
 </details>
 
 <details>
+<summary><b>oh-my-pi (OMP)</b></summary>
+
+```bash
+omp plugin install github:cathrynlavery/diagram-design
+```
+
+OMP installs the repository as a Git package through the root `package.json` manifest, then loads the skill, the `commands/` slash commands, and the `prompts/` templates from the plugin's conventional directories. Run `/reload-plugins` in an open session. Git installs have no automatic refresh, so re-run the install command to pull merged updates. Marketplace installs work too: `/marketplace add cathrynlavery/diagram-design`, then `/marketplace install diagram-design@diagram-design`.
+
+</details>
+
+<details>
 <summary><b>Kiro</b></summary>
 
 Import the Agent Skill from the repository subdirectory URL:
@@ -172,6 +183,9 @@ git clone git@github.com:cathrynlavery/diagram-design.git ~/code/diagram-design
 # Pi: register the checkout as a local package
 pi install ~/code/diagram-design
 
+# OMP: link the checkout as a local plugin
+omp plugin link ~/code/diagram-design
+
 # Claude Code: symlink the inner skill
 ln -s ~/code/diagram-design/skills/diagram-design ~/.claude/skills/diagram-design
 
@@ -185,7 +199,7 @@ ln -s ~/code/diagram-design/skills/diagram-design ~/.config/opencode/skills/diag
 ln -s ~/code/diagram-design/skills/diagram-design ~/.copilot/skills/diagram-design
 ```
 
-The shared skill lives at `skills/diagram-design/`. Pi discovers it through the repo's standard `skills/` package directory; Claude Code, GitHub Copilot, Codex, Factory Droid, Cursor, and other Agent Skills-compatible tools use the same files.
+The shared skill lives at `skills/diagram-design/`. Pi and OMP discover it through the repo's standard `skills/` package directory; Claude Code, GitHub Copilot, Codex, Factory Droid, Cursor, and other Agent Skills-compatible tools use the same files.
 
 </details>
 
@@ -505,6 +519,7 @@ diagram-design/
 ├── .claude-plugin/                   # Claude marketplace + plugin manifest
 ├── .codex-plugin/                    # Codex plugin manifest
 ├── .factory-plugin/                  # Factory Droid marketplace + plugin manifest
+├── package.json                      # OMP native plugin manifest (skills/commands/prompts)
 ├── commands/
 │   ├── export-diagram.md             # plugin export command
 │   ├── import-drawio.md              # plugin draw.io import command

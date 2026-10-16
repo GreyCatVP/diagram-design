@@ -1464,6 +1464,7 @@ MANIFEST_DESCRIPTIONS = (
     (Path(".claude-plugin/marketplace.json"), ("description",)),
     (Path(".codex-plugin/plugin.json"), ("description", "longDescription")),
     (FACTORY_MANIFEST, ("description",)),
+    (Path("package.json"), ("description",)),
 )
 
 
