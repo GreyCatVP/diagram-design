@@ -737,10 +737,15 @@ def _edge_operators(text: str) -> list[_Operator]:
         token = match.group()
         end = match.end()
         label = ""
-        if end < len(text) and text[end] == "|":
-            close = text.find("|", end + 1)
+        # Mermaid allows whitespace between the link and its pipe label:
+        # `A --> |yes| B` reads the same as `A -->|yes| B`.
+        opening_pipe = end
+        while opening_pipe < len(text) and text[opening_pipe] in " \t":
+            opening_pipe += 1
+        if opening_pipe < len(text) and text[opening_pipe] == "|":
+            close = text.find("|", opening_pipe + 1)
             if close != -1:
-                label = clean_label(text[end + 1 : close])
+                label = clean_label(text[opening_pipe + 1 : close])
                 end = close + 1
         style, arrowhead, bidirectional, undirected = _operator_style(token)
         operators.append(
