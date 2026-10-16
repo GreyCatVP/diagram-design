@@ -1712,7 +1712,11 @@ def check_export_surface_parity(errors: list[str], root: Path) -> None:
     """commands/export-diagram.md and prompts/export-diagram.md must both carry the mutual-exclusion rule."""
     command_path = root / "commands/export-diagram.md"
     prompt_path = root / "prompts/export-diagram.md"
-    if not command_path.is_file() or not prompt_path.is_file():
+    if not command_path.is_file():
+        errors.append("export surface is missing: commands/export-diagram.md")
+        return
+    if not prompt_path.is_file():
+        errors.append("export surface is missing: prompts/export-diagram.md")
         return
     command_text = command_path.read_text(encoding="utf-8")
     prompt_text = prompt_path.read_text(encoding="utf-8")
