@@ -862,6 +862,70 @@ def test_version_history() -> None:
             raise AssertionError("valid but unequal versions were treated as synchronized")
         print("OK: version history ignores manifest metadata-only commits")
 
+    with package_repo() as root:
+        base = git(root, "rev-parse", "HEAD")
+        missing_path = root / ".codex-plugin/plugin.json"
+        missing_path.unlink()
+        deleted = commit_all(root, "delete an established Codex manifest")
+        try:
+            VERSION_HISTORY.versions_changed(root, base, deleted)
+        except VERSION_HISTORY.VersionHistoryError as exc:
+            if ".codex-plugin/plugin.json is missing" not in str(exc):
+                raise AssertionError(f"wrong established-manifest error: {exc}") from exc
+        else:
+            raise AssertionError("an established Codex manifest deletion was ignored")
+        print("OK: version history rejects deletion of an established manifest")
+
+    with tempfile.TemporaryDirectory() as scratch:
+        root = Path(scratch)
+        seed_package(root)
+        qoder_path = root / ".qoder-plugin/plugin.json"
+        qoder_payload = json.loads(qoder_path.read_text(encoding="utf-8"))
+        qoder_path.unlink()
+        subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+        subprocess.run(["git", "config", "user.name", "Package Test"], cwd=root, check=True)
+        subprocess.run(
+            ["git", "config", "user.email", "package-test@example.invalid"],
+            cwd=root,
+            check=True,
+        )
+        pre_qoder = commit_all(root, "package before Qoder support")
+        main_branch = git(root, "symbolic-ref", "--short", "HEAD")
+        write_json(qoder_path, qoder_payload)
+        introduction = commit_all(root, "add Qoder manifest")
+
+        if VERSION_HISTORY.versions_changed(root, pre_qoder, introduction):
+            raise AssertionError("adding a synchronized Qoder manifest looked like a release")
+
+        git(root, "checkout", "-q", "-b", "pre-qoder-drift", pre_qoder)
+        codex_path = root / ".codex-plugin/plugin.json"
+        codex_payload = json.loads(codex_path.read_text(encoding="utf-8"))
+        codex_payload["version"] = "1.2.4"
+        write_json(codex_path, codex_payload)
+        drifted = commit_all(root, "desynchronize Codex before Qoder support")
+        try:
+            VERSION_HISTORY.versions_at(root, drifted)
+        except VERSION_HISTORY.VersionHistoryError as exc:
+            message = str(exc)
+            expected = ".codex-plugin/plugin.json=1.2.4"
+            if expected not in message:
+                raise AssertionError(f"drift error lost its path/version pairing: {message}") from exc
+        else:
+            raise AssertionError("pre-Qoder manifest drift was accepted")
+
+        git(root, "checkout", "-q", main_branch)
+
+        qoder_path.unlink()
+        deleted = commit_all(root, "delete the established Qoder manifest")
+        try:
+            VERSION_HISTORY.versions_changed(root, introduction, deleted)
+        except VERSION_HISTORY.VersionHistoryError as exc:
+            if ".qoder-plugin/plugin.json is missing" not in str(exc):
+                raise AssertionError(f"wrong Qoder deletion error: {exc}") from exc
+        else:
+            raise AssertionError("an established Qoder manifest deletion was ignored")
+        print("OK: only pre-introduction Qoder absence is accepted")
+
 
 def main() -> int:
     test_verifier()
