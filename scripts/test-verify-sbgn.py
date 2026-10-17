@@ -246,6 +246,25 @@ class ContractTests(unittest.TestCase):
         curved = crossing.replace('d="M 140,90 V 112"', 'd="M 248,80 H 148 Q 140,80 140,88 V 112"')
         self.rejects(GOOD.replace("</svg>", curved), "cross at (140, 100)")
 
+    def test_moved_arcs_are_rejected(self):
+        # Greptile P1 on #402: the crossing check reads raw path data, so a
+        # transform or positional CSS could draw an unbridged crossing at
+        # (140, 100) that the measured routes never show.
+        apart = ('<path data-kind="modulation" data-from="a" data-to="p" d="M 120,100 H 172"/>'
+                 '<path data-kind="modulation" data-from="b" data-to="p" d="M 140,128 V 148"/></svg>')
+        self.clean(GOOD.replace("</svg>", apart))
+        second = '<path data-kind="modulation" data-from="b"'
+        moved = apart.replace(second, second + ' transform="translate(0,-30)"', 1)
+        self.rejects(GOOD.replace("</svg>", moved), "transform attribute")
+        styled = apart.replace(second, second + ' style="translate: 0 -30px"', 1)
+        self.rejects(GOOD.replace("</svg>", styled), "inline style")
+        grouped = apart.replace(second, '<g transform="translate(0,-30)">' + second, 1)
+        grouped = grouped.replace("</svg>", "</g></svg>", 1)
+        self.rejects(GOOD.replace("</svg>", grouped), "ancestor <g> of arc b to p")
+        sheet = GOOD.replace("<html><body>", "<html><head><style>path { transform: translateY(-30px); }"
+                                              "</style></head><body>", 1)
+        self.rejects(sheet.replace("</svg>", apart), "stylesheet")
+
     def test_bridged_crossing_is_clean(self):
         # The hop from type-architecture.md leaves a gap at the crossing.
         bridged = ('<path data-kind="modulation" data-from="a" data-to="p" '

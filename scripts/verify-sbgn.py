@@ -4,7 +4,8 @@
 Checks unique IDs, arc kinds, bipartite species/process arcs, compartment
 containment, glyph kinds, and the Bruno ceiling. Containment reads x, y, width
 and height, so a transform or positional CSS on a glyph, its bounds or an
-ancestor group inside the map is a finding. Every connector drawn in the map
+ancestor group inside the map is a finding. The crossing check reads raw path
+data, so the same holds for an arc and its ancestor groups. Every connector drawn in the map
 must be a declared arc, except legend samples inside <g data-role="legend">.
 Arcs are flattened to their drawn stroke (curves and elliptical arcs sampled)
 and may not cross, touch, overlap, or end on another arc, except at a shared
@@ -877,7 +878,8 @@ def check_source(path: Path, source: str) -> list[str]:
     position_checked: set[int] = set()
     positioned: list[Node] = []
 
-    def check_position(node: Node, where: str, owner: str | None = None) -> None:
+    def check_position(node: Node, where: str, owner: str | None = None,
+                       remedy: str = "place glyphs with x, y, width and height only") -> None:
         """Containment reads x/y/width/height; nothing may move what is drawn.
 
         owner names what an ancestor holds, so a nested <svg> can be reported.
@@ -887,19 +889,18 @@ def check_source(path: Path, source: str) -> list[str]:
         position_checked.add(id(node))
         positioned.append(node)
         if "transform" in node.attrs:
-            fail(node, f"{where} has a transform attribute; place glyphs with x, y, width and height only")
+            fail(node, f"{where} has a transform attribute; {remedy}")
         moved = positional_properties(node.attrs.get("style", ""))
         if moved:
-            fail(node, f"{where} has a positional inline style ({', '.join(moved)}); "
-                       "place glyphs with x, y, width and height only")
+            fail(node, f"{where} has a positional inline style ({', '.join(moved)}); {remedy}")
         if owner and node.tag in {"svg", "symbol"}:
             fail(node, f"{owner} sits inside a nested <{node.tag}>, which offsets and scales it")
 
-    def check_ancestors(node: Node, owner: str) -> None:
+    def check_ancestors(node: Node, owner: str, **kwargs: str) -> None:
         for ancestor in node.ancestors():
             if ancestor is root:
                 break
-            check_position(ancestor, f"ancestor <{ancestor.tag}> of {owner}", owner)
+            check_position(ancestor, f"ancestor <{ancestor.tag}> of {owner}", owner, **kwargs)
 
     for node in scanner.nodes:
         if node is not root and root not in node.ancestors():
@@ -927,6 +928,17 @@ def check_source(path: Path, source: str) -> list[str]:
                         break
             compartment = node.attrs.get("data-compartment") or None
             glyphs[identity] = Box(node, identity, kind, x, y, w, h, compartment)
+
+    # The crossing check below compares raw path data, so a transform or
+    # positional CSS on an arc or its ancestors would move the drawn stroke
+    # without moving what is measured.
+    arc_remedy = "draw arcs in map coordinates with path data only"
+    for node in scanner.nodes:
+        if root not in node.ancestors() or node.attrs.get("data-kind") not in ARC_KINDS:
+            continue
+        owner = f'arc {node.attrs.get("data-from", "?")} to {node.attrs.get("data-to", "?")}'
+        check_position(node, f"<{node.tag}> of {owner}", owner, remedy=arc_remedy)
+        check_ancestors(node, owner, remedy=arc_remedy)
 
     blockers = [g for g in glyphs.values() if g.kind != "compartment"]
     for node in scanner.nodes:
@@ -1000,7 +1012,7 @@ def check_source(path: Path, source: str) -> list[str]:
                 at = line + sheet[:match.start(2)].count("\n")
                 findings.append(
                     f"{path.name}:{at}: stylesheet rule {', '.join(reaching)!r} sets {', '.join(moved)} "
-                    "on elements the diagram's glyphs can match; place glyphs with x, y, width and height only")
+                    "on elements the diagram's glyphs or arcs can match; place glyphs with x, y, width and height only")
 
     compartment_ids = {g.identity for g in compartments}
     for box in glyphs.values():
