@@ -88,6 +88,7 @@ PAIRED_CONTAINER_TAGS = (
     "marker",
     "style",
     "script",
+    "span",
     "text",
     "tspan",
 )
