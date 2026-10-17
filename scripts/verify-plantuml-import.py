@@ -1203,6 +1203,13 @@ def check_kind_ignores_message_labels(tmp: Path) -> None:
     pair = [(edge["source"], edge["target"], edge["label"]) for edge in plain["edges"]]
     if plain["kind"] != "sequence" or pair != [("Alice", "Bob", "")]:
         fail(f"an unlabeled sequence arrow was not a sequence: {plain['kind']} {pair}")
+    # PlantUML reads a leading `o` on one dash as a circle, not aggregation.
+    circle = extract_json(write_puml(tmp, "kind-seq-circle.puml", "Alice -> Bob : hi\nBob o-> Alice : back"))
+    circled = [(edge["source"], edge["target"], edge["label"], edge["arrowhead"]) for edge in circle["edges"]]
+    if circle["kind"] != "sequence" or [node["shape"] for node in circle["nodes"]] != ["lifeline", "lifeline"]:
+        fail(f"`o->` turned a sequence into a class diagram: {circle['kind']} {circle['nodes']}")
+    if circled != [("Alice", "Bob", "hi", "arrow"), ("Bob", "Alice", "back", "circle")]:
+        fail(f"`o->` was not a sequence circle: {circled}")
     ok("kind detection uses arrow form, so class relationships win and unlabeled messages count")
 
 
@@ -1220,6 +1227,21 @@ def check_forward_package_links(tmp: Path) -> None:
     fwd, back = shape("fwd-link.puml", forward), shape("back-link.puml", backward)
     if fwd != back or fwd[1] != [("p.A", "p.B", "uses")] or ("A", None, []) in fwd[0]:
         fail(f"forward package link diverged from the declaration-first form: {fwd} vs {back}")
+    early = "package p {\n  note right of A : x\n  class A\n  class B\n  A --> B\n}"
+    late = "package p {\n  class A\n  class B\n  note right of A : x\n  A --> B\n}"
+
+    def noted(name: str, body: str) -> tuple[list, list, list]:
+        diagram = extract_json(write_puml(tmp, name, body))
+        nodes = [(node["id"], node["parent"]) for node in diagram["nodes"]]
+        edges = [(edge["source"], edge["target"]) for edge in diagram["edges"]]
+        notes = [(item["text"], item["participants"]) for item in diagram["note_details"]]
+        return nodes, edges, notes
+
+    fwd_note, back_note = noted("fwd-note.puml", early), noted("back-note.puml", late)
+    if fwd_note != back_note or fwd_note[1] != [("p.A", "p.B")] or ("A", None) in fwd_note[0]:
+        fail(f"forward package note diverged from the declaration-first form: {fwd_note} vs {back_note}")
+    if fwd_note[2] != [("x", ["p.A"])]:
+        fail(f"forward package note did not stay on p.A: {fwd_note[2]}")
     ok("forward and backward package links attach to the same package classes")
 
 

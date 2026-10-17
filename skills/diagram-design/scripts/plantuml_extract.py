@@ -90,9 +90,9 @@ CLASS_REL_RE = re.compile(r"<\|--|-\|>|\*--|o--|<\|\.\.|\.\.\|>")
 SEQ_ARROW_RE = re.compile(r"(->>|<<-|<->|-->|<--|<-|->)")
 # One whole arrow, matched at a candidate position. Sequence arrows are a
 # dash run with an optional `[#color]` style and `<`/`<<` or `>`/`>>` heads,
-# plus an `x` (lost) or `o` (circle) decoration after the head.
+# plus a leading `o` or a trailing `x`/`o` (lost or circle) decoration.
 SEQ_ARROW_AT = re.compile(
-    r"(?P<left><<?)?(?P<body1>-+)(?P<style>\[[^\[\]]*\])?(?P<body2>-*)(?P<right>>>?)?"
+    r"(?P<lead>o(?=[-<]))?(?P<left><<?)?(?P<body1>-+)(?P<style>\[[^\[\]]*\])?(?P<body2>-*)(?P<right>>>?)?"
     r"(?P<decoration>[ox](?=[\s:]|$))?"
 )
 # Class arrows are a `-` or `.` run with an optional `[style]` or direction
@@ -1040,6 +1040,9 @@ def _scan_arrow(text: str, kind: str) -> tuple[str, re.Match[str], str] | None:
         left_head, right_head = match.group("left"), match.group("right")
         before = text[index - 1] if index else " "
         if kind == "sequence":
+            # `o->` is a circle on the arrow. `Bo->Alice` keeps the `o` in the name.
+            if match.group("lead") and not (before.isspace() or before == '"'):
+                continue
             if not (left_head or right_head):
                 continue
         else:
@@ -1056,8 +1059,15 @@ def _scan_arrow(text: str, kind: str) -> tuple[str, re.Match[str], str] | None:
 
 def _is_structural_link(match: re.Match[str]) -> bool:
     """True for an inheritance, composition, or aggregation head, which only
-    a class diagram draws (a plain `-->` is shared with sequence messages)."""
+    a class diagram draws (a plain `-->` is shared with sequence messages).
+
+    A one-dash circle (`o->`, `<-o`) is a sequence decoration. Aggregation
+    keeps two marks (`o--`, `o-->`).
+    """
     heads = {match.group("left") or "", match.group("right") or ""}
+    body = len(match.group("body1")) + len(match.group("body2"))
+    if "o" in heads and match.group("char") == "-" and body < 2:
+        heads = heads - {"o", "<", ">"}
     return bool(heads & {"<|", "|>", "^", "*", "o"})
 
 
@@ -1135,7 +1145,7 @@ def _sequence_arrow(match: re.Match[str]) -> tuple[str, str, bool, bool]:
     style_hint = (match.group("style") or "").casefold()
     dashes = len(match.group("body1")) + len(match.group("body2"))
     dashed = dashes >= 2 or "dashed" in style_hint or "dotted" in style_hint
-    decoration = match.group("decoration")
+    decoration = match.group("decoration") or match.group("lead")
     if decoration == "x":
         arrowhead = "lost"
     elif decoration == "o":
@@ -1532,9 +1542,10 @@ def _parse_class(diagram: Diagram, lines: list[tuple[int, str]]) -> None:
             diagram.add_node(node_id, clean_label(display) or node_id, "class")
         return node_id
 
-    # Declarations register first. A link before `class A` inside the same
-    # package then resolves to that class instead of a new top-level one.
+    # Declarations register first. A link or note before `class A` inside the
+    # same package then resolves to that class instead of a new top-level one.
     pending_links: list[tuple[tuple[str, re.Match[str], str], int, list[str]]] = []
+    pending_notes: list[tuple[str, str, str, int, list[str]]] = []
     skin = _SkinBlocks()
     for line_number, raw in lines:
         text = raw.strip()
@@ -1617,20 +1628,8 @@ def _parse_class(diagram: Diagram, lines: list[tuple[int, str]]) -> None:
             raw_target = _strip_trailing_colors(of_prefix.group(1) if of_prefix else rest)
             if body is None or position in {"over", "across"}:
                 _fail(f"malformed statement at line {line_number}")
-            target = class_ref(raw_target, f"malformed statement at line {line_number}")
-            cleaned = clean_label(body)
-            if cleaned:
-                _record_note(
-                    diagram,
-                    {
-                        "position": position,
-                        "participants": [target],
-                        "after_message": None,
-                        "message": None,
-                        "line": line_number,
-                    },
-                    cleaned,
-                )
+            # Resolve after declarations, with the package scope of this line.
+            pending_notes.append((position, raw_target, body, line_number, list(scope())))
             continue
         if CLASS_REL_RE.search(text) or "--" in text or ".." in text:
             _fail(f"malformed edge at line {line_number}")
@@ -1638,6 +1637,21 @@ def _parse_class(diagram: Diagram, lines: list[tuple[int, str]]) -> None:
         if first in UNSUPPORTED_CLASS:
             _fail(f"unsupported class construct: {first}")
         _fail(f"malformed statement at line {line_number}")
+    for position, raw_target, body, line_number, note_scope in pending_notes:
+        target = class_ref(raw_target, f"malformed statement at line {line_number}", note_scope)
+        cleaned = clean_label(body)
+        if cleaned:
+            _record_note(
+                diagram,
+                {
+                    "position": position,
+                    "participants": [target],
+                    "after_message": None,
+                    "message": None,
+                    "line": line_number,
+                },
+                cleaned,
+            )
     for split, line_number, link_scope in pending_links:
         add_link(split, line_number, link_scope)
     if current is not None:
