@@ -41,6 +41,7 @@ Exit: 0 clean, 1 findings, 2 usage.
 from __future__ import annotations
 
 import argparse
+import html
 import math
 import re
 import sys
@@ -108,8 +109,11 @@ WCAG_NON_TEXT = 3.0
 # its line is kept as well - a line feed, carriage return or form feed ends it - so
 # the checker still fails closed on it. Every other character of a string becomes a space and its newlines
 # stay, so each offset and line number still points into the CSS as written.
+# CSS the browser may read differently comes back unblanked: a character reference
+# (decoded before CSS sees it inside <svg> and in every attribute value) or an escape
+# left outside a string (`u\72 l(` is `url(`).
 CSS_STRING_RE = re.compile(
-    r"""/\*.*?(?:\*/|\Z)|url\(\s*(?!["'])(?:\\[\s\S]|[^)\\])*\)|\\[\s\S]"""
+    r"""/\*.*?(?:\*/|\Z)|url\((?![ \t\n\r\f]*["'])(?:\\[\s\S]|[^)\\])*\)|\\[\s\S]"""
     r"""|(?P<string>"(?:\\[\s\S]|[^"\\\n\r\f])*"|'(?:\\[\s\S]|[^'\\\n\r\f])*')""",
     re.DOTALL | re.IGNORECASE,
 )
@@ -117,10 +121,11 @@ CSS_STRING_RE = re.compile(
 
 def blank_css_strings(css: str) -> str:
     """CSS with the contents of every quoted string blanked, same length and lines."""
-    return CSS_STRING_RE.sub(
+    blanked = CSS_STRING_RE.sub(
         lambda found: re.sub(r"[^\n]", " ", found.group()) if found.group("string") else found.group(),
         css,
     )
+    return css if "\\" in blanked or html.unescape(css) != css else blanked
 
 
 def attrs_of(tag_attrs: str) -> dict[str, str]:
