@@ -123,8 +123,8 @@
     ],
     "required_check_names": [],
     "review": {
-      "provider": "none",
-      "minimum_score": "",
+      "provider": "greptile",
+      "minimum_score": "4",
       "require_same_head": true
     },
     "require_current_base": true,

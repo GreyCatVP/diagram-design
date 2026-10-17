@@ -84,6 +84,11 @@ TAG_ATTR_RE = re.compile(
     r"(\s+)([^\s\"'<>/=]+)(?:(\s*=\s*)(\"[^\"]*\"|'[^']*'|[^\s\"'=<>`]+))?"
 )
 
+CSS_URL_ATTRIBUTES = {
+    "fill", "stroke", "filter", "clip-path", "mask", "cursor", "marker",
+    "marker-start", "marker-mid", "marker-end",
+}
+
 DEFS_ID_TAGS = (
     "marker",
     "pattern",
@@ -492,6 +497,23 @@ def css_escape(text: str, pos: int) -> tuple[str, int] | None:
     return value, end
 
 
+def decoded_css_url_fragment(fragment: str) -> str:
+    """Decode valid CSS escapes before comparing a local fragment with an ID."""
+    decoded: list[str] = []
+    pos = 0
+    while pos < len(fragment):
+        if fragment[pos] == "\\":
+            escaped = css_escape(fragment, pos)
+            if escaped is None:
+                return fragment
+            value, pos = escaped
+            decoded.append(value)
+        else:
+            decoded.append(fragment[pos])
+            pos += 1
+    return "".join(decoded)
+
+
 def css_id_token(text: str, pos: int) -> tuple[str, int] | None:
     """Read a whole valid CSS ID selector after '#', decoding identifier escapes."""
     def starts_name(index: int) -> bool:
@@ -790,30 +812,86 @@ def namespace_defs_ids(svg: str, prefix: str) -> str:
     replacements = {old: html_entities.escape(f"{prefix}-{old}", quote=True) for old in ids}
     live_replacements = {old: replacements[old] for old in live_reference_ids}
     url_ref = re.compile(
-        r"(?i:url)\(\s*(?P<quote>[\"']|&quot;|&apos;|)\s*#\s*"
+        r"(?<![A-Za-z0-9_\\\-\u0080-\U0010ffff])(?i:url)\(\s*(?P<quote>[\"']|&quot;|&apos;|)\s*#\s*"
         r"(?P<ident>.*?)\s*(?P=quote)\s*\)", re.DOTALL,
     )
 
     raw_url_ref = re.compile(
-        r"(?i:url)\(\s*(?P<quote>[\"']|)\s*#\s*(?P<ident>.*?)\s*(?P=quote)\s*\)", re.DOTALL,
+        r"(?<![A-Za-z0-9_\\\-\u0080-\U0010ffff])(?i:url)\(\s*(?P<quote>[\"']|)\s*#\s*(?P<ident>.*?)\s*(?P=quote)\s*\)", re.DOTALL,
     )
 
-    def rewrite_raw_url(match: re.Match[str]) -> str:
+    css_string = re.compile(
+        r'''(?:"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*')''', re.DOTALL,
+    )
+
+    def rewrite_css_urls(css: str, commented: bool = False) -> str:
+        """Consume complete identifiers before considering literal URL functions."""
+        out: list[str] = []
+        pos = 0
+        while pos < len(css):
+            if css[pos] in "\"'":
+                literal = css_string.match(css, pos)
+                end = literal.end() if literal else len(css)
+            elif css.startswith("/*", pos):
+                closing = css.find("*/", pos + 2)
+                end = closing + 2 if closing >= 0 else len(css)
+            else:
+                token = css_id_token(css, pos)
+                if token is not None:
+                    _, end = token
+                    # Only literal ASCII url(...) is in the supported grammar.
+                    # Escape terminator whitespace is part of the identifier.
+                    if css[pos:end].lower() == "url" and css[end:end + 1] == "(":
+                        reference = raw_url_ref.match(css, pos)
+                        if reference is not None:
+                            out.append(rewrite_raw_url(reference, commented))
+                            pos = reference.end()
+                            continue
+                else:
+                    escaped = css_escape(css, pos) if css[pos] == "\\" else None
+                    end = escaped[1] if escaped else pos + 1
+            out.append(css[pos:end])
+            pos = end
+        return "".join(out)
+
+    def rewrite_raw_url(match: re.Match[str], commented: bool = False) -> str:
         # CSS text with XML references already resolved (or CDATA, which has
-        # none): compare and write the ID unescaped; the caller escapes.
-        if match.group("ident") not in live_reference_ids:
+        # none): compare the decoded CSS identity, preserving its escape
+        # spelling when prefixing the reference. The caller XML-escapes.
+        ident = decoded_css_url_fragment(match.group("ident"))
+        if ident not in (ids if commented else live_reference_ids):
             return match.group(0)
         return f"url({match.group('quote')}#{prefix}-{match.group('ident')}{match.group('quote')})"
 
     def rewrite_url(match: re.Match[str], commented: bool = False) -> str:
         mapping = replacements if commented else live_replacements
-        new = mapping.get(decode_xml_references(match.group("ident")))
+        new = mapping.get(decoded_css_url_fragment(decode_xml_references(match.group("ident"))))
         if new is None:
             return match.group(0)
-        return f"url({match.group('quote')}#{new}{match.group('quote')})"
+        return f"url({match.group('quote')}#{prefix}-{match.group('ident')}{match.group('quote')})"
 
     def rewrite_tag(tag: re.Match[str], commented: bool = False) -> str:
         mapping = replacements if commented else live_replacements
+        # SMIL values describe the animated attribute, not the animation tag's
+        # own paint. Only supported paint/reference targets carry CSS URLs.
+        animation_values = {"set": {"to"}, "animate": {"from", "to", "values", "by"}}
+        target = next((decode_xml_references(attr.group(4)[1:-1])
+                       for attr in TAG_ATTR_RE.finditer(tag.group(2))
+                       if attr.group(2) == "attributeName" and attr.group(4) is not None
+                       and attr.group(4)[0] in "\"'"), "")
+        animated_attributes = (animation_values.get(tag.group(1), set())
+                               if target in CSS_URL_ATTRIBUTES else set())
+
+        def rewrite_css_attribute(raw: str) -> str:
+            # XML normalizes original literal whitespace before expanding
+            # character references. References to controls must survive the
+            # next parse; an amp-escaped reference must stay literal text.
+            value = decode_xml_references(re.sub(r"\r\n?|[\n\t]", " ", raw))
+            rewritten = rewrite_css_urls(value, commented)
+            if rewritten == value:
+                return raw
+            return (escape_css_for_xml(rewritten).replace('"', "&quot;").replace("'", "&apos;")
+                    .replace("\t", "&#9;").replace("\n", "&#10;").replace("\r", "&#13;"))
 
         def attribute(match: re.Match[str]) -> str:
             space, name, equals, quoted = match.groups()
@@ -828,7 +906,9 @@ def namespace_defs_ids(svg: str, prefix: str) -> str:
                 raw = replacements[value]
             elif name.lower() in {"href", "xlink:href"} and value.startswith("#") and value[1:] in mapping:
                 raw = "#" + mapping[value[1:]]
-            else:
+            elif name.lower() == "style" or name in animated_attributes:
+                raw = rewrite_css_attribute(raw)
+            elif name.lower() in CSS_URL_ATTRIBUTES:
                 raw = url_ref.sub(lambda reference: rewrite_url(reference, commented), raw)
             return space + name + equals + quoted[0] + raw + quoted[-1]
 
@@ -864,7 +944,7 @@ def namespace_defs_ids(svg: str, prefix: str) -> str:
                     + "{" + rule.group(2) + "}",
                     css,
                 )
-            return raw_url_ref.sub(rewrite_raw_url, css)
+            return rewrite_css_urls(css)
 
         # CDATA content is raw text: rewrite it inside its markers without XML
         # decoding or escaping. Only the text outside CDATA is XML-decoded and

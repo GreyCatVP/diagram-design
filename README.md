@@ -617,6 +617,7 @@ diagram-design/
 │       │   ├── mermaid_extract.py    # Mermaid → structured IR
 │       │   ├── excalidraw_extract.py  # Excalidraw → structured IR
 │       │   ├── export_svg.py         # standalone SVG export
+│       │   ├── export_png.py         # Playwright PNG renderer
 │       │   └── self_check.py         # packaged output self-check (runs installed)
 │       └── assets/
 │           ├── index.html            # live gallery, tabbed
