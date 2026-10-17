@@ -374,6 +374,44 @@ def main() -> int:
             else:
                 print("OK: partial Japanese label fails printed check")
 
+            # Greptile gap: the split must NOT stitch across cells. The target
+            # cell (Welcome email, x=96) prints only 歓迎, and the next cell
+            # (Product UI, x=320) prints メール. The cell-scoped join collects
+            # each cell's text by its own x/y, so メール in the Product UI cell
+            # never reaches the Welcome email cell — the printed check must
+            # still report 歓迎メール as missing. Pin this so a regression to a
+            # global whitespace strip is caught.
+            product_ui_text = (
+                '<text x="424" y="108" fill="#2d3142" font-size="12" '
+                'font-family="\'Geist\', sans-serif" text-anchor="middle">Product UI</text>'
+            )
+            if product_ui_text not in source:
+                failures.append(
+                    "could not build the cross-cell split fixture (Product UI anchor missing)"
+                )
+            else:
+                cross_cell = (
+                    source.replace(
+                        welcome_rect,
+                        welcome_rect.replace(
+                            'data-name="Welcome email"', 'data-name="歓迎メール"'
+                        ),
+                        1,
+                    )
+                    .replace(welcome_text, welcome_text.replace("Welcome email", "歓迎"), 1)
+                    .replace(product_ui_text, product_ui_text.replace("Product UI", "メール"), 1)
+                )
+                code, output = run(
+                    str(write(directory, "japanese-cross-cell-split.html", cross_cell))
+                )
+                if code == 0 or "printed: cell '歓迎メール'" not in output:
+                    failures.append(
+                        f"cross-cell split should fail printed check (cell-scoped join must "
+                        f"not stitch 歓迎 + メール across cells), got:\n{output}"
+                    )
+                else:
+                    print("OK: cross-cell split fails printed check (cell-scoped join holds)")
+
         # Fixture under scripts/fixtures covers the same Japanese / tspan cases
         # on a minimal blueprint (see #438).
         fixture = ROOT / "scripts/fixtures/service-blueprint-japanese-two-line.html"
