@@ -52,8 +52,9 @@ The canonical `doc-wide` canvas is `1280×720`. All structural coordinates sit o
 outer_x          = 80
 rail_y           = 240
 rail_h           = 48
-stage_w          = 224
 n                = len(steps)
+usable_w         = 1280 - 2 * outer_x
+stage_w          = min(224, 4 * floor(usable_w / (4 * n)))
 content_w        = n * stage_w
 start_x          = (1280 - content_w) / 2
 stage_x(i)       = start_x + i * stage_w
@@ -68,7 +69,7 @@ legend_rule_y    = 600
 legend_y         = 636
 ```
 
-For 3, 4, 6, or 7 steps, keep `stage_w` on the 4px grid, center the combined rail, and preserve at least 24px between description columns. If the descriptions collide, widen the canvas or reduce the count; do not reduce the type ramp.
+This yields a 224px stage for 3–5 steps, 184px for 6, and 160px for 7. Keep `stage_w` on the 4px grid, center the combined rail, and preserve at least 24px between description columns. If copy does not fit the narrower six- or seven-stage columns, widen the canvas or rewrite the copy; do not reduce the type ramp.
 
 ### Rail
 

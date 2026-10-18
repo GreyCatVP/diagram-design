@@ -13,6 +13,26 @@ CHECKER = ROOT / "scripts/verify-steps.py"
 GOOD = ROOT / "skills/diagram-design/assets/example-steps.html"
 
 
+def stage_fixture(count: int, stage_width: int | None = None) -> str:
+    """Build a minimal legal fixture from the documented 1280px formula."""
+    usable = 1280 - 2 * 80
+    width = stage_width or min(224, 4 * (usable // (4 * count)))
+    start = (1280 - count * width) / 2
+    parts = ['<svg viewBox="0 0 1280 720">', '<g aria-hidden="true">']
+    for index in range(1, count + 1):
+        x = start + (index - 1) * width
+        focal = ' data-focal="true"' if index == 3 else ""
+        parts.append(f'<rect x="{x:g}" y="240" width="{width:g}" height="48" data-role="rail" data-step="s{index}" data-index="{index}"{focal}/>')
+    parts.append('</g>')
+    for index in range(1, count + 1):
+        cx = start + (index - 0.5) * width
+        focal = ' data-focal="true"' if index == 3 else ""
+        parts.append(f'<circle cx="{cx:g}" cy="264" r="36" data-role="medallion" data-step="s{index}"{focal}/>')
+        parts.append(f'<text x="{cx:g}" y="164" data-role="number" data-step="s{index}">{index:02d}</text>')
+    parts.append('</svg>')
+    return "".join(parts)
+
+
 def run(path: Path) -> tuple[int, str]:
     result = subprocess.run([sys.executable, str(CHECKER), str(path)], capture_output=True, text=True)
     return result.returncode, result.stdout + result.stderr
@@ -38,6 +58,21 @@ def main() -> int:
     )
     with tempfile.TemporaryDirectory() as raw:
         directory = Path(raw)
+        for count in (6, 7):
+            path = directory / f"good-{count}.html"
+            path.write_text(stage_fixture(count), encoding="utf-8")
+            code, output = run(path)
+            if code:
+                failures.append(f"documented {count}-stage fixture failed\n{output}")
+            else:
+                print(f"OK: documented {count}-stage fixture passes")
+        clipped = directory / "bad-clipped-seven.html"
+        clipped.write_text(stage_fixture(7, stage_width=224), encoding="utf-8")
+        code, output = run(clipped)
+        if code == 0 or "outside the viewBox" not in output:
+            failures.append(f"old clipped seven-stage formula was not rejected\n{output}")
+        else:
+            print("OK: old clipped seven-stage formula rejected")
         for index, (name, old, new, expected) in enumerate(cases):
             if source.count(old) != 1:
                 failures.append(f"fixture {name!r} anchor occurs {source.count(old)} times")
@@ -47,6 +82,22 @@ def main() -> int:
             code, output = run(path)
             if code == 0 or expected not in output:
                 failures.append(f"{name}: expected rejection containing {expected!r}\n{output}")
+            else:
+                print(f"OK: {name} rejected")
+        transform_cases = (
+            ("rail transform", 'data-role="rail"', 'transform="translate(16 0)" data-role="rail"'),
+            ("rail ancestor transform", '<g aria-hidden="true">', '<g aria-hidden="true" transform="translate(16 0)">'),
+            ("rail CSS transform", '</head>', '<style>[data-role="rail"] { transform: translateX(16px); }</style></head>'),
+        )
+        for index, (name, old, new) in enumerate(transform_cases, len(cases)):
+            if source.count(old) < 1:
+                failures.append(f"fixture {name!r} anchor is missing")
+                continue
+            path = directory / f"bad-{index}.html"
+            path.write_text(source.replace(old, new, 1), encoding="utf-8")
+            code, output = run(path)
+            if code == 0 or "transform:" not in output:
+                failures.append(f"{name}: expected transform rejection\n{output}")
             else:
                 print(f"OK: {name} rejected")
     if failures:

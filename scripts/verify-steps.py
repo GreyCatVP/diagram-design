@@ -16,6 +16,7 @@ import argparse
 import math
 import re
 import sys
+from html.parser import HTMLParser
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -25,7 +26,47 @@ CIRCLE_RE = re.compile(r"<circle\b(?P<attrs>[^>]*)/?>", re.I)
 TEXT_RE = re.compile(r"<text\b(?P<attrs>[^>]*)>(?P<body>.*?)</text>", re.I | re.S)
 ATTR_RE = re.compile(r'''(?P<name>[\w:-]+)\s*=\s*(?:"(?P<dq>[^"]*)"|'(?P<sq>[^']*)')''')
 TAG_STRIP_RE = re.compile(r"<[^>]+>")
+VIEWBOX_RE = re.compile(r"<svg\b[^>]*\bviewBox\s*=\s*['\"]([^'\"]+)['\"]", re.I)
+CSS_MOVEMENT_RE = re.compile(r"(?:^|[;{])\s*(?:transform|translate|x|y)\s*:", re.I)
 TOLERANCE = 0.01
+CHECKED_ROLES = {"rail", "medallion", "number"}
+
+
+def moving_style(attrs: dict[str, str]) -> bool:
+    return "transform" in attrs or bool(CSS_MOVEMENT_RE.search("{" + attrs.get("style", "")))
+
+
+class CheckedTransformScanner(HTMLParser):
+    """Find unsupported movement on checked marks or their SVG ancestors."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.stack: list[tuple[str, dict[str, str]]] = []
+        self.findings: list[str] = []
+
+    def handle_starttag(self, tag: str, pairs: list[tuple[str, str | None]]) -> None:
+        attrs = {name.lower(): value or "" for name, value in pairs}
+        if attrs.get("data-role") in CHECKED_ROLES:
+            if moving_style(attrs):
+                self.findings.append(f"transform: checked {attrs['data-role']} mark carries movement")
+            for ancestor_tag, ancestor_attrs in self.stack:
+                if ancestor_tag in {"g", "svg"} and moving_style(ancestor_attrs):
+                    self.findings.append(
+                        f"transform: checked {attrs['data-role']} mark has a transformed {ancestor_tag} ancestor"
+                    )
+                    break
+        self.stack.append((tag.lower(), attrs))
+
+    def handle_startendtag(self, tag: str, pairs: list[tuple[str, str | None]]) -> None:
+        self.handle_starttag(tag, pairs)
+        self.stack.pop()
+
+    def handle_endtag(self, tag: str) -> None:
+        tag = tag.lower()
+        for index in range(len(self.stack) - 1, -1, -1):
+            if self.stack[index][0] == tag:
+                del self.stack[index:]
+                break
 
 
 def attrs_of(raw: str) -> dict[str, str]:
@@ -62,6 +103,26 @@ def close(first: float | None, second: float | None) -> bool:
 def verify(path: Path) -> list[str]:
     source = path.read_text(encoding="utf-8")
     errors: list[str] = []
+    scanner = CheckedTransformScanner()
+    scanner.feed(source)
+    errors.extend(dict.fromkeys(scanner.findings))
+    for style in re.findall(r"<style\b[^>]*>(.*?)</style>", source, flags=re.I | re.S):
+        if CSS_MOVEMENT_RE.search(style):
+            errors.append("transform: stylesheet movement is unsupported for checked geometry")
+            break
+
+    viewbox_match = VIEWBOX_RE.search(source)
+    viewbox: tuple[float, float, float, float] | None = None
+    if viewbox_match:
+        try:
+            values = tuple(float(value) for value in re.split(r"[\s,]+", viewbox_match.group(1).strip()))
+            if len(values) == 4 and all(math.isfinite(value) for value in values):
+                viewbox = values
+        except ValueError:
+            pass
+    if viewbox is None:
+        errors.append("canvas: missing or invalid SVG viewBox")
+
     rails = marks(source, "rail")
     medallions = marks(source, "medallion")
     numbers = marks(source, "number")
@@ -113,6 +174,10 @@ def verify(path: Path) -> list[str]:
             errors.append(f"contiguous rail: step {step!r} starts at {x:g}, expected {previous_right:g}")
         previous_right = x + width
         centers[step] = x + width / 2
+        if viewbox is not None:
+            vx, vy, vw, vh = viewbox
+            if x < vx - TOLERANCE or x + width > vx + vw + TOLERANCE or y < vy - TOLERANCE or y + height > vy + vh + TOLERANCE:
+                errors.append(f"canvas: rail step {step!r} falls outside the viewBox")
 
     focal_rails = [attrs.get("data-step", "") for _tag, attrs, _ in rails if attrs.get("data-focal") == "true"]
     if len(focal_rails) != 1:
@@ -144,6 +209,10 @@ def verify(path: Path) -> list[str]:
                 errors.append(f"medallion: step {step!r} has an invalid radius")
             else:
                 radii.append(radius)
+                if viewbox is not None:
+                    vx, vy, vw, vh = viewbox
+                    if cx is None or cy is None or cx - radius < vx - TOLERANCE or cx + radius > vx + vw + TOLERANCE or cy - radius < vy - TOLERANCE or cy + radius > vy + vh + TOLERANCE:
+                        errors.append(f"canvas: medallion step {step!r} falls outside the viewBox")
         if step in labels:
             attrs, body = labels[step]
             index = step_names.index(step) + 1
