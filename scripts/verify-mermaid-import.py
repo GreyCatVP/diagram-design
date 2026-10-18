@@ -1325,6 +1325,23 @@ def check_spaced_pipe_labels(tmp: Path) -> None:
     ok("pipe labels may follow whitespace after the link operator")
 
 
+def check_edge_ids(tmp: Path) -> None:
+    flow = tmp / "edge-ids.mmd"
+    flow.write_text(
+        "flowchart LR\n  A e1@==>|go| B\n  B e2@-.-> C\n  e2@{ animate: true }\n"
+        "  e1@{ curve: linear }\n  X@{ label: \"Real\" }\n",
+        encoding="utf-8",
+    )
+    diagram = json.loads(run_extract([str(flow), "--json"]))["diagrams"][0]
+    nodes = sorted(node["id"] for node in diagram["nodes"])
+    if nodes != ["A", "B", "C", "X"]:
+        fail(f"edge IDs and their property statements must not become nodes: {nodes!r}")
+    edges = [(edge["source"], edge["target"], edge["label"], edge["style"]) for edge in diagram["edges"]]
+    if edges != [("A", "B", "go", "thick"), ("B", "C", "", "dashed")]:
+        fail(f"an edge ID before the operator must not change the edge: {edges!r}")
+    ok("Mermaid edge IDs and edge property statements are ignored")
+
+
 def check_unicode_state_regression(tmp: Path) -> None:
     path = tmp / "unicode-state.mmd"
     path.write_text('stateDiagram-v2\n待机 : 等待输入\n待机 --> 完成\n', encoding="utf-8")
@@ -1459,6 +1476,7 @@ def main() -> int:
         check_node_shape_updates(tmp)
         check_invisible_links(tmp)
         check_spaced_pipe_labels(tmp)
+        check_edge_ids(tmp)
         check_entity_label_codes(tmp)
         check_shape_and_edge_vocabulary(tmp)
         check_frontmatter(tmp)
