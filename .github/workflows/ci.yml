@@ -381,6 +381,16 @@ jobs:
         id: service_blueprint_tests
         run: python scripts/test-verify-service-blueprint.py
 
+      - name: Verify Steps ordered rail
+        if: always()
+        id: steps
+        run: python scripts/verify-steps.py --all
+
+      - name: Verify Steps checker
+        if: always()
+        id: steps_tests
+        run: python scripts/test-verify-steps.py
+
       - name: Verify ridgeline shared amplitude
         if: always()
         id: ridgeline

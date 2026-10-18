@@ -340,6 +340,15 @@
       "thumb_sha256": "3e25f72671fcfcd1cb39374e77f0819f960011c12ed491881ebd6977b74d7477"
     },
     {
+      "thumb": "steps.webp",
+      "source": "docs/screenshots/steps.png",
+      "source_sha256": "aff4572cb52a28f1ca15df2f66b70942fe22d3d658540d63a43555b384102758",
+      "width": 600,
+      "height": 338,
+      "quality": 82,
+      "thumb_sha256": "4f7bae07387679f18a9f630adffeba3f078a4766af785744c72e1bbbf9dd7437"
+    },
+    {
       "thumb": "story-map.webp",
       "source": "docs/screenshots/story-map.png",
       "source_sha256": "ec97db99f89730ed08779f90941e2e4884fb2a6aaea6e189713162044618038a",
