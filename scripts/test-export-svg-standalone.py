@@ -979,7 +979,10 @@ class ExportSvgStandaloneTests(unittest.TestCase):
             self.mod.export_svg_document(html, Path("local-comment.html"))
 
     def test_custom_property_value_blocks_are_not_nested_animation_rules(self) -> None:
-        for value in ('{animation:pulse 1s;}', '{ .nested {animation-name:pulse;} }'):
+        # A custom property's value is token data: semicolons inside its block
+        # do not end the declaration, so animation text there is not rewritten.
+        for value in ('{animation:pulse 1s;}', '{ .nested {animation-name:pulse;} }',
+                      '{fill:red;animation:pulse 1s;}', '{ .nested {fill:red;animation-name:pulse;} }'):
             with self.subTest(value=value):
                 html = '<style>@keyframes pulse {to {opacity:1}} .paint {'
                 html += '--unused:' + value + ';fill:red;animation:pulse 1s;}</style>'
@@ -994,6 +997,29 @@ class ExportSvgStandaloneTests(unittest.TestCase):
         html += '<svg viewBox="0 0 40 40"><rect class="paint"/></svg>'
         with self.assertRaisesRegex(ValueError, 'unsupported nested CSS animation declaration'):
             self.mod.export_svg_document(html, Path("custom-block.html"))
+        html = '<style>@keyframes pulse {to {opacity:1}}</style><svg viewBox="0 0 40 40">'
+        html += '<rect style="--unused:{fill:red;animation:pulse 1s;}; animation:pulse 1s"/></svg>'
+        result = self.mod.export_svg_document(html, Path("custom-inline.html"))
+        shape = ET.fromstring(result).find("{http://www.w3.org/2000/svg}rect")
+        self.assertEqual(shape.get("style"), '--unused:{fill:red;animation:pulse 1s;}; animation:custom-inline-root-pulse 1s')
+
+    def test_unbalanced_brackets_do_not_hide_animation_declarations(self) -> None:
+        # A stray closer, or a brace inside url(), must not stop declaration
+        # splitting and leave a later animation bound to the old name.
+        for style in ('--x:}; animation:pulse 1s', '--x:); animation:pulse 1s', 'fill:red}; animation:pulse 1s'):
+            with self.subTest(style=style):
+                html = '<style>@keyframes pulse {to {opacity:1}}</style><svg viewBox="0 0 40 40">'
+                html += f'<rect style="{style}"/></svg>'
+                result = self.mod.export_svg_document(html, Path("unbalanced.html"))
+                shape = ET.fromstring(result).find("{http://www.w3.org/2000/svg}rect")
+                self.assertIn('animation:unbalanced-root-pulse 1s', shape.get("style"))
+        html = '<style>@keyframes pulse {to {opacity:1}} .a {background:url(a{b.png); animation:pulse 1s}</style>'
+        html += '<svg viewBox="0 0 40 40"><rect class="a"/></svg>'
+        self.assertIn('animation:unbalanced-root-pulse 1s', embedded_css(self.mod.export_svg_document(html, Path("unbalanced.html"))))
+        html = '<style>@keyframes pulse {to {opacity:1}} .a {& {fill:blue} --z:url(a{b); animation:pulse 1s; & {fill:red}}</style>'
+        html += '<svg viewBox="0 0 40 40"><rect class="a"/></svg>'
+        with self.assertRaisesRegex(ValueError, 'unsupported nested CSS animation declaration'):
+            self.mod.export_svg_document(html, Path("unbalanced.html"))
 
     def test_nested_layer_statement_does_not_hide_animation_declaration(self) -> None:
         for declaration in ('animation:pulse 1s;', '-webkit-animation-name:pulse;'):

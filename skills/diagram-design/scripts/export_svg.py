@@ -796,9 +796,12 @@ def _keyframe_names(rules: list[_CssRule], root_id: str) -> dict[str, str]:
 
 
 def _css_segments(text: str, separator: str) -> list[str]:
-    # Separators inside strings, comments or functions do not split values.
+    # Separators inside strings, comments, functions or {} blocks do not split
+    # values; a custom property's {...} value is one token stream. Braces count
+    # only outside functions, as in _css_rule_tree. A stray closer is ignored;
+    # a negative depth would stop all later splitting.
     pieces: list[str] = []
-    start, depth = 0, 0
+    start, parentheses, braces = 0, 0, 0
     quote = ""
     escaped = False
     comment = False
@@ -822,10 +825,14 @@ def _css_segments(text: str, separator: str) -> list[str]:
         elif char in "\"'":
             quote = char
         elif char == "(":
-            depth += 1
+            parentheses += 1
         elif char == ")":
-            depth -= 1
-        elif char == separator and depth == 0:
+            parentheses = max(0, parentheses - 1)
+        elif char == "{" and parentheses == 0:
+            braces += 1
+        elif char == "}" and parentheses == 0:
+            braces = max(0, braces - 1)
+        elif char == separator and parentheses == 0 and braces == 0:
             pieces.append(text[start:index])
             start = index + 1
         index += 1
