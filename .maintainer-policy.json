@@ -19,6 +19,10 @@
       {
         "path": ".factory-plugin/plugin.json",
         "json_pointer": "/version"
+      },
+      {
+        "path": ".qoder-plugin/plugin.json",
+        "json_pointer": "/version"
       }
     ],
     "require_synchronized": true,
@@ -119,8 +123,8 @@
     ],
     "required_check_names": [],
     "review": {
-      "provider": "none",
-      "minimum_score": "",
+      "provider": "greptile",
+      "minimum_score": "4",
       "require_same_head": true
     },
     "require_current_base": true,

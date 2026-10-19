@@ -53,7 +53,7 @@ Use for any of the 45 visual types (§3) when a reader will learn more from a vi
 
 **Don't use for:**
 
-- Quick unicode diagrams → use **wiretext**.
+- Quick unicode diagrams → a separate plain-text tool such as wiretext. This skill doesn't ship one.
 - Lists of things → table or bullets.
 - Attribute-only before/after → table; topology changes → Architecture delta.
 - One-shape "diagrams" → just write the sentence.
@@ -320,7 +320,7 @@ Every diagram ships in three variants (see `assets/`):
 | **Minimal light** (default) | `assets/template.html`, `example-<type>.html` | Screenshot-ready. Diagram + title. Warm paper. |
 | **Minimal dark** | `assets/template-dark.html`, `example-<type>-dark.html` | Dark mode sites, slides, high-contrast posts. |
 | **Full editorial** | `assets/template-full.html`, `example-<type>-full.html` | Long-form posts where the diagram is the hero. |
-| **Consultant special** (quadrant only) | `example-quadrant-consultant.html` | BCG/McKinsey-style 2×2 scenario matrix. See [type-quadrant.md](references/type-quadrant.md#consultant-special-2x2-scenario-matrix). |
+| **Consultant special** (quadrant only) | `example-quadrant-consultant.html` | BCG/McKinsey-style 2×2 scenario matrix. See [type-quadrant.md](references/type-quadrant.md#consultant-special-22-scenario-matrix). |
 
 **Sketchy variant** (optional, applied to any of the above): a hand-drawn stroke filter for essays, not technical docs. See [primitive-sketchy.md](references/primitive-sketchy.md).
 
