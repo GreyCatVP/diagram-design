@@ -185,15 +185,19 @@ def verify(path: Path) -> list[str]:
 
     def one_per_step(items: list[tuple[str, dict[str, str], str]], role: str) -> dict[str, tuple[dict[str, str], str]]:
         result: dict[str, tuple[dict[str, str], str]] = {}
+        duplicates: list[str] = []
         for _tag, attrs, body in items:
             step = attrs.get("data-step", "")
             if step in result:
-                errors.append(f"census: step {step!r} has more than one {role}")
-            result[step] = (attrs, body)
+                duplicates.append(step)
+            else:
+                result[step] = (attrs, body)
         missing = sorted(set(step_names) - set(result))
         extra = sorted(set(result) - set(step_names))
         if missing or extra:
             errors.append(f"census: {role} steps differ from rail (missing={missing}, extra={extra})")
+        for step in duplicates:
+            errors.append(f"census: step {step!r} has more than one {role}")
         return result
 
     medals = one_per_step(medallions, "medallion")

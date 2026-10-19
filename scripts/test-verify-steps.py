@@ -84,6 +84,22 @@ def main() -> int:
                 failures.append(f"{name}: expected rejection containing {expected!r}\n{output}")
             else:
                 print(f"OK: {name} rejected")
+        old = 'data-role="medallion" data-step="decide"'
+        new = 'data-role="medallion" data-step="research"'
+        path = directory / "bad-duplicate-and-missing-medallion.html"
+        if source.count(old) != 1:
+            failures.append(f"fixture duplicate and missing medallion anchor occurs {source.count(old)} times")
+        else:
+            path.write_text(source.replace(old, new, 1), encoding="utf-8")
+            code, output = run(path)
+            mismatch = "census: medallion steps differ from rail"
+            duplicate = "census: step 'research' has more than one medallion"
+            if code == 0 or mismatch not in output or duplicate not in output:
+                failures.append(f"duplicate and missing medallion: expected both census findings\n{output}")
+            elif output.index(mismatch) > output.index(duplicate):
+                failures.append(f"duplicate and missing medallion: expected missing/extra finding first\n{output}")
+            else:
+                print("OK: duplicate and missing medallion reports the full census first")
         transform_cases = (
             ("rail transform", 'data-role="rail"', 'transform="translate(16 0)" data-role="rail"'),
             ("rail ancestor transform", '<g aria-hidden="true">', '<g aria-hidden="true" transform="translate(16 0)">'),
