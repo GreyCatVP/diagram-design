@@ -196,7 +196,7 @@ Not for: two continuous variables (that is the parent scatter); one distribution
 - **Same plot frame as the parent:** value axis at `y=420` inside `0 0 1000 500`. Category labels take a 160px left margin (right-aligned at `x=148`, `node-name` role 11px 600), so the scale starts at `x=160`. The shipped example uses `x = 160 + 2·ms` on a 0–400 domain.
 - **Series count: 3–8.** Below 3 a table says it shorter; above 8 split an overview from per-series detail.
 - **One box per series**, height 32px, centred on the row. Paper underlay immediately beneath so gridlines do not show through the translucent fill.
-- **Tukey fences, not the theoretical fence:** whiskers run to the last inlier (`data-wlo` / `data-whi`), with 16px caps. Outliers are `r=4` dots strictly outside those whiskers, bound with `data-x` on the circle — never `data-value`, which is the beeswarm contract.
+- **Tukey fences, not the theoretical fence:** whiskers run to the last inlier (`data-wlo` / `data-whi`) inside `q1 - 1.5·IQR` and `q3 + 1.5·IQR`, with 16px caps. Outliers are `r=4` dots strictly outside those whiskers and fences, bound with `data-x` on the circle — never `data-value`, which is the beeswarm contract.
 - **Median** is a vertical `ink` line through the box at `data-q2`, 1.5px. It is the only mark that may sit on the `ink` token at full strength; the box fill stays a tint.
 - **Labels:** the category name at the left of its row, bound with `data-name`. Value-axis ticks are bound with `data-tick="x"` and `data-value`. The category axis has no scale to tick.
 - **4px grid** applies to the designed constants — axis rule, gridlines, tick baselines, legend rows, box height, row centres. Positions on the value axis are data-scaled and exempt.
@@ -213,7 +213,7 @@ Not for: two continuous variables (that is the parent scatter); one distribution
 
 - **`wlo ≤ q1 ≤ q2 ≤ q3 ≤ whi`.** A median outside its box, or a whisker that grows inward, is not a five-number summary.
 - **Box left is q1, box right is q3, median is q2, whiskers are wlo/whi.** Width encodes the IQR — never pad a box to fit a label.
-- **Outliers sit strictly outside the whiskers.** Drawing an inlier as a dot, or parking an outlier on the fence, hides the tail.
+- **Outliers sit strictly outside the whiskers and the Tukey fences.** Drawing an inlier as a dot, or parking an outlier on the fence, hides the tail.
 - **Linear scale only, from a stated floor.** The shipped example includes zero. A truncated axis inflates every box the same way a truncated bar does.
 - **Round once, then draw from the rounded number**, so the declared value and the drawn geometry are two statements of one number.
 
@@ -230,7 +230,7 @@ Not for: two continuous variables (that is the parent scatter); one distribution
   <rect data-role="box" x="320" y="200" width="240" height="32" rx="2"
         fill="{accent @ 0.12}" stroke="{accent}" stroke-width="1.2"/>
   <line data-role="median" x1="400" y1="200" x2="400" y2="232"/>
-  <circle data-outlier="Checkout" data-x="340" cx="840" cy="216" r="4"/>
+  <circle data-outlier="Checkout" data-x="388" cx="936" cy="216" r="4"/>
 </g>
 <text data-tick="x" data-value="200" x="560" y="440">200</text>
 ```

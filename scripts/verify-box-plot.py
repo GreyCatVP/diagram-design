@@ -12,7 +12,7 @@ drawn inside the whisker turns a genuine extreme into a point on the fence.
 masks; neither compares a drawn coordinate against the five-number summary
 bound to it.
 
-Nine invariants:
+Ten invariants:
 
 1. SHARED VALUE SCALE - every mark's position on the value axis must sit
    where one linear scale puts its declared value. The scale is derived from
@@ -26,23 +26,30 @@ Nine invariants:
 3. BOX GEOMETRY - the stroked box rect's left edge is q1 and its right edge
    is q3 on that scale. Width is not decoration.
 
-4. MEDIAN GEOMETRY - the median is a vertical line through the box at q2.
+4. MEDIAN GEOMETRY - the median is a vertical line at q2, both ends, running
+   from the box's top edge to its bottom edge.
 
 5. WHISKER GEOMETRY - whisker-lo runs from wlo to q1 and whisker-hi from q3
-   to whi, both on the series' category coordinate.
+   to whi, horizontal through the box's row centre.
 
-6. OUTLIERS OUTSIDE THE WHISKERS - every outlier sits strictly outside
-   [wlo, whi] on the value axis, at its declared value. An inlier drawn as a
-   dot is a box plot wearing a beeswarm costume.
+6. TUKEY FENCES - whiskers stay inside [q1 - 1.5 IQR, q3 + 1.5 IQR], and
+   every outlier sits strictly outside both the whiskers and those fences,
+   at its declared value. A circle with data-outlier must bind data-x. An
+   inlier drawn as a dot is a box plot wearing a beeswarm costume.
 
-7. AT MOST ONE ACCENT SERIES - one focal claim per figure, on either skin.
+7. AT MOST ONE ACCENT SERIES - one focal claim per figure, on either skin,
+   counting box fill, box stroke and outliers.
 
-8. UNPOSITIONED GEOMETRY - every coordinate read here is a raw attribute.
+8. BOUND LABELS - each series carries exactly one <text data-name> whose
+   data-name and printed text both match the series, on the series' row.
+
+9. UNPOSITIONED GEOMETRY - every coordinate read here is a raw attribute.
    A `transform` attribute, an inline `style`, or a rule in a <style> block
    on a mark, a bound label or tick, or an ancestor is refused rather than
-   resolved, as in verify-beeswarm.py.
+   resolved, as in verify-beeswarm.py. CSS width/height on a box rect is
+   refused too (a <style> rule only when its selector can reach a box).
 
-9. FAIL CLOSED - a file that presents as a box plot but yields fewer than
+10. FAIL CLOSED - a file that presents as a box plot but yields fewer than
    three series on three distinct medians is a finding, never a pass. Three
    because the scale test is leave-one-out and each fit needs two intervals.
 
@@ -76,8 +83,8 @@ RECT_RE = re.compile(r"<rect\b(?P<attrs>[^>]*?)/?>", re.IGNORECASE)
 LINE_RE = re.compile(r"<line\b(?P<attrs>[^>]*?)/?>", re.IGNORECASE)
 TEXT_RE = re.compile(r"<text\b(?P<attrs>[^>]*)>(?P<body>.*?)</text>",
                      re.IGNORECASE | re.DOTALL)
-GROUP_RE = re.compile(r"<g\b(?P<attrs>[^>]*)>(?P<body>.*?)</g>",
-                      re.IGNORECASE | re.DOTALL)
+G_OPEN_RE = re.compile(r"<g\b(?P<attrs>[^>]*?)(?P<selfclose>/?)>", re.IGNORECASE)
+G_CLOSE_RE = re.compile(r"</g\s*>", re.IGNORECASE)
 COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
 NAMED_RE = re.compile(r"<(?P<tag>title|desc)\b[^>]*>(?P<body>.*?)</(?P=tag)>",
                       re.IGNORECASE | re.DOTALL)
@@ -89,11 +96,17 @@ STYLE_RE = re.compile(r"<style\b[^>]*>(?P<body>.*?)</style>",
 CSS_MOVES_MARK_RE = re.compile(
     r"(?:^|[{;}\n])\s*(?:-(?:webkit|moz|ms|o)-)?"
     r"(?P<prop>transform|translate|rotate|scale"
-    r"|cx|cy|r|x|y"
+    r"|cx|cy|r|x|y|width|height"
     r"|offset(?:-(?:path|distance|position|anchor|rotate))?)"
     r"\s*:",
     re.IGNORECASE,
 )
+# SVG 2 makes width/height CSS geometry properties on a <rect>, so they can
+# resize a box the checked attributes never state. Every shipped page sizes
+# its <svg> and HTML chrome with them in the stylesheet, so a <style> rule
+# with one is only reported when its selector can reach a box rect, as in
+# verify-marimekko.py; an inline style on a rect is reported outright.
+CSS_SIZE_PROPS = ("width", "height")
 TAG_RE = re.compile(r"<[^>]+>")
 NUMBER_RE = re.compile(
     r"[-+]?(?:\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?|\.\d+)(?:[eE][-+]?\d+)?"
@@ -104,6 +117,7 @@ ATTR_RE = re.compile(
     re.DOTALL,
 )
 DECLARES_Q1_RE = re.compile(r"\bdata-q1\s*=", re.IGNORECASE)
+TUKEY_K = 1.5
 ACCENT_RE = re.compile(
     r"#bf4520\b|#f08a59\b|rgba\(\s*191\s*,\s*69\s*,\s*32\b|"
     r"rgba\(\s*240\s*,\s*138\s*,\s*89\b",
@@ -121,13 +135,58 @@ MAX_OUTLIERS = 8
 class Series:
     __slots__ = (
         "name", "q1", "q2", "q3", "wlo", "whi", "cy", "box_x", "box_w",
-        "box_y", "box_h", "median_x", "wlo_x", "whi_x", "accent", "offset",
-        "outliers",
+        "box_y", "box_h", "median_x", "median_x2", "median_y", "wlo_x",
+        "wlo_inner", "whi_x", "whi_inner", "whisker_y", "accent", "offset",
+        "outliers", "labels",
     )
 
     def __init__(self, **kw):
         for key, value in kw.items():
             setattr(self, key, value)
+
+
+class GroupMatch:
+    """One <g> element with its full body, nested groups included."""
+    __slots__ = ("_start", "_attrs", "_body")
+
+    def __init__(self, start: int, attrs: str, body: str):
+        self._start, self._attrs, self._body = start, attrs, body
+
+    def start(self) -> int:
+        return self._start
+
+    def group(self, key: str) -> str:
+        return self._attrs if key == "attrs" else self._body
+
+
+def groups_of(source: str) -> list:
+    """Every <g> in document order, matched to its own closing tag.
+
+    A non-greedy `<g>.*?</g>` stops at the first close, so a plain wrapper
+    around the series would swallow the first series and hide it.
+    """
+    events = []
+    for match in G_OPEN_RE.finditer(source):
+        events.append((match.start(), 0, match))
+    for match in G_CLOSE_RE.finditer(source):
+        events.append((match.start(), 1, match))
+    events.sort(key=lambda event: (event[0], event[1]))
+    stack, found = [], []
+    for _position, kind, match in events:
+        if kind == 0:
+            if match.group("selfclose"):
+                found.append(GroupMatch(match.start(), match.group("attrs"), ""))
+            else:
+                stack.append(match)
+        elif stack:
+            opened = stack.pop()
+            found.append(GroupMatch(opened.start(), opened.group("attrs"),
+                                    source[opened.end():match.start()]))
+    for opened in stack:
+        found.append(GroupMatch(opened.start(), opened.group("attrs"),
+                                source[opened.end():]))
+    found.sort(key=lambda group: group.start())
+    return found
 
 
 def line_of(source: str, offset: int) -> int:
@@ -209,23 +268,64 @@ def looks_like_box_plot(path: Path, source: str) -> bool:
     if path.name.startswith("example-box-plot"):
         return True
     if DECLARES_Q1_RE.search(source):
-        for match in GROUP_RE.finditer(source):
+        for match in groups_of(source):
             if DECLARES_Q1_RE.search(match.group("attrs")):
                 return True
     text = named_text(source)
     return "box plot" in text or "boxplot" in text.replace("-", " ")
 
 
-def transform_carrier(attrs: dict):
+def transform_carrier(attrs: dict, sizes: bool = False):
     if "transform" in attrs:
         return "transform=%r" % attrs["transform"]
     style = attrs.get("style")
     if style is not None:
-        found = CSS_MOVES_MARK_RE.search(style)
-        if found is not None:
-            return "style=%r (the %s property)" % (
-                style, found.group("prop").lower()
-            )
+        for found in CSS_MOVES_MARK_RE.finditer(style):
+            prop = found.group("prop").lower()
+            if prop in CSS_SIZE_PROPS and not sizes:
+                continue
+            return "style=%r (the %s property)" % (style, prop)
+    return None
+
+
+def selector_reaches_box(selector: str, boxes: list) -> bool:
+    """Could this selector's subject be a box rect? Coarse on purpose.
+
+    A `rect` type selector or a `*` claims it; a subject naming any other
+    element cannot be a rect; a subject of classes, ids and attributes alone
+    reaches a box when some box rect carries one of them. Misreads err
+    towards a finding.
+    """
+    for alternative in selector.split(","):
+        if re.search(r"\brect\b|\*", alternative, re.IGNORECASE):
+            return True
+        compounds = [part for part in re.split(r"[\s>+~]+", alternative.strip()) if part]
+        if not compounds:
+            continue
+        subject = re.sub(r"::?[\w-]+(?:\([^)]*\))?", "", compounds[-1])
+        if re.match(r"[A-Za-z]", subject):
+            continue
+        classes = set(re.findall(r"\.([\w-]+)", subject))
+        ids = set(re.findall(r"#([\w-]+)", subject))
+        names = {name.lower() for name in re.findall(r"\[\s*([\w-]+)", subject)}
+        for attrs in boxes:
+            if (classes & set(attrs.get("class", "").split())
+                    or attrs.get("id") in ids
+                    or names & set(attrs)):
+                return True
+    return False
+
+
+def css_moves_mark(css: str, boxes: list):
+    for found in CSS_MOVES_MARK_RE.finditer(css):
+        if found.group("prop").lower() not in CSS_SIZE_PROPS:
+            return found
+        opened = css.rfind("{", 0, found.start("prop"))
+        if opened < 0:
+            continue
+        previous = max(css.rfind("}", 0, opened), css.rfind("{", 0, opened))
+        if selector_reaches_box(css[previous + 1:opened], boxes):
+            return found
     return None
 
 
@@ -259,22 +359,26 @@ def transformed_spans(source: str) -> list:
 
 
 def check_transforms(source: str, findings: list, name: str) -> None:
+    boxes = [attrs for attrs in (attrs_of(m.group("attrs"))
+                                 for m in RECT_RE.finditer(source))
+             if attrs.get("data-role") == "box"]
     for match in STYLE_RE.finditer(source):
-        if CSS_MOVES_MARK_RE.search(match.group("body")):
+        if css_moves_mark(match.group("body"), boxes) is not None:
             findings.append(
                 "%s:%d: a <style> rule positions a mark with CSS "
-                "(transform/translate/rotate/scale, a geometry property, or "
-                "a motion path) — bake the offset into the attributes; a "
+                "(transform/translate/rotate/scale, a geometry or box-size "
+                "property, or a motion path) — bake the offset into the attributes; a "
                 "partial transform stack is worse than an honest refusal"
                 % (name, line_of(source, match.start()))
             )
     spans = transformed_spans(source)
-    tagged = list(CIRCLE_RE.finditer(source)) + list(RECT_RE.finditer(source))
+    rects = list(RECT_RE.finditer(source))
+    tagged = list(CIRCLE_RE.finditer(source)) + rects
     tagged += list(LINE_RE.finditer(source)) + list(TEXT_RE.finditer(source))
-    tagged += list(GROUP_RE.finditer(source))
+    tagged += groups_of(source)
     for match in tagged:
         attrs = attrs_of(match.group("attrs"))
-        how = transform_carrier(attrs)
+        how = transform_carrier(attrs, sizes=match in rects)
         if how is not None:
             findings.append(
                 "%s:%d: %s positions a mark — the checker reads raw "
@@ -312,7 +416,7 @@ def first_rect(body: str, role: str):
 
 def parse_series(source: str, findings: list, name: str) -> list:
     series = []
-    for match in GROUP_RE.finditer(source):
+    for match in groups_of(source):
         raw = match.group("attrs")
         if not DECLARES_Q1_RE.search(raw):
             continue
@@ -365,14 +469,21 @@ def parse_series(source: str, findings: list, name: str) -> list:
                 % (where, attrs["data-name"])
             )
             continue
-        cy_candidates = [lo_nums[1], lo_nums[3], hi_nums[1], hi_nums[3],
-                         box_nums[1] + box_nums[3] / 2.0]
-        cy = median(cy_candidates)
+        cy = box_nums[1] + box_nums[3] / 2.0
+        accent = any(ACCENT_RE.search(box.get(key, "")) for key in ("fill", "stroke"))
         outliers = []
         for circle in CIRCLE_RE.finditer(body):
             cattrs = attrs_of(circle.group("attrs"))
             if "data-x" not in cattrs:
+                if "data-outlier" in cattrs:
+                    findings.append(
+                        "%s: an outlier on %r declares data-outlier but no "
+                        "data-x — a visible mark with no bound value is never "
+                        "checked" % (where, attrs["data-name"])
+                    )
                 continue
+            if any(ACCENT_RE.search(cattrs.get(key, "")) for key in ("fill", "stroke")):
+                accent = True
             cx = number(cattrs.get("cx"))
             ccy = number(cattrs.get("cy"))
             value = number(cattrs.get("data-x"))
@@ -384,6 +495,12 @@ def parse_series(source: str, findings: list, name: str) -> list:
                 )
                 continue
             outliers.append((value, cx, ccy))
+        labels = []
+        for text in TEXT_RE.finditer(body):
+            tattrs = attrs_of(text.group("attrs"))
+            if "data-name" in tattrs:
+                labels.append((tattrs["data-name"], plain(text.group("body")),
+                               number(tattrs.get("y"))))
         series.append(Series(
             name=attrs["data-name"],
             q1=parsed["q1"], q2=parsed["q2"], q3=parsed["q3"],
@@ -391,12 +508,17 @@ def parse_series(source: str, findings: list, name: str) -> list:
             cy=cy,
             box_x=box_nums[0], box_w=box_nums[2],
             box_y=box_nums[1], box_h=box_nums[3],
-            median_x=med_nums[0],
+            median_x=med_nums[0], median_x2=med_nums[2],
+            median_y=(med_nums[1], med_nums[3]),
             wlo_x=min(lo_nums[0], lo_nums[2]),
+            wlo_inner=max(lo_nums[0], lo_nums[2]),
             whi_x=max(hi_nums[0], hi_nums[2]),
-            accent=bool(ACCENT_RE.search(box.get("stroke", ""))),
+            whi_inner=min(hi_nums[0], hi_nums[2]),
+            whisker_y=(lo_nums[1], lo_nums[3], hi_nums[1], hi_nums[3]),
+            accent=accent,
             offset=match.start(),
             outliers=outliers,
+            labels=labels,
         ))
     return series
 
@@ -449,12 +571,16 @@ def check_scale(items: list, findings: list, source: str, name: str):
 
     for item in items:
         where = "%s:%d" % (name, source.count("\n", 0, item.offset) + 1)
+        median_drawn = max((item.median_x, item.median_x2),
+                           key=lambda drawn: abs(drawn - at(item.q2)))
         checks = [
             ("q1", item.q1, item.box_x, "the box's left edge"),
             ("q3", item.q3, item.box_x + item.box_w, "the box's right edge"),
-            ("q2", item.q2, item.median_x, "the median line"),
+            ("q2", item.q2, median_drawn, "the median line"),
             ("wlo", item.wlo, item.wlo_x, "the low whisker"),
+            ("q1", item.q1, item.wlo_inner, "the low whisker's box end"),
             ("whi", item.whi, item.whi_x, "the high whisker"),
+            ("q3", item.q3, item.whi_inner, "the high whisker's box end"),
         ]
         for label, value, drawn, role in checks:
             expected = at(value)
@@ -472,6 +598,8 @@ def check_scale(items: list, findings: list, source: str, name: str):
                 % (where, item.name, item.box_w,
                    abs(at(item.q3) - at(item.q1)))
             )
+        iqr = item.q3 - item.q1
+        fence_lo, fence_hi = item.q1 - TUKEY_K * iqr, item.q3 + TUKEY_K * iqr
         for value, cx, ccy in item.outliers:
             expected = at(value)
             if abs(cx - expected) > RESIDUAL_TOLERANCE:
@@ -492,6 +620,13 @@ def check_scale(items: list, findings: list, source: str, name: str):
                     "[%g, %g] — an outlier is strictly outside the fence"
                     % (where, item.name, value, item.wlo, item.whi)
                 )
+            elif fence_lo - VALUE_TOLERANCE <= value <= fence_hi + VALUE_TOLERANCE:
+                findings.append(
+                    "%s: series %r outlier %g sits inside the Tukey fences "
+                    "[%g, %g] (q1 − 1.5·IQR, q3 + 1.5·IQR) — it is an inlier, "
+                    "and the whisker should reach it"
+                    % (where, item.name, value, fence_lo, fence_hi)
+                )
     return (slope, intercept, at)
 
 
@@ -499,9 +634,64 @@ def check_focal(items: list, findings: list, name: str) -> None:
     accents = [item for item in items if item.accent]
     if len(accents) > 1:
         findings.append(
-            "%s: %d series wear the accent stroke — a box plot has at most "
+            "%s: %d series wear the accent (box fill, box stroke or an "
+            "outlier) — a box plot has at most "
             "one focal series" % (name, len(accents))
         )
+
+
+def check_shapes(items: list, findings: list, source: str, name: str) -> None:
+    """The perpendicular half of the geometry: the scale test reads only x."""
+    for item in items:
+        where = "%s:%d" % (name, line_of(source, item.offset))
+        top, bottom = item.box_y, item.box_y + item.box_h
+        if abs(min(item.median_y) - top) > SAME_ROW_TOLERANCE \
+                or abs(max(item.median_y) - bottom) > SAME_ROW_TOLERANCE:
+            findings.append(
+                "%s: series %r median runs y=%g..%g, but the box spans "
+                "y=%g..%g — the median crosses the box from edge to edge"
+                % (where, item.name, min(item.median_y), max(item.median_y),
+                   top, bottom)
+            )
+        if any(abs(y - item.cy) > SAME_ROW_TOLERANCE for y in item.whisker_y):
+            findings.append(
+                "%s: series %r has a whisker endpoint off the row centre "
+                "y=%g — whiskers are horizontal through the middle of the box"
+                % (where, item.name, item.cy)
+            )
+        iqr = item.q3 - item.q1
+        fence_lo, fence_hi = item.q1 - TUKEY_K * iqr, item.q3 + TUKEY_K * iqr
+        if item.wlo < fence_lo - VALUE_TOLERANCE or item.whi > fence_hi + VALUE_TOLERANCE:
+            findings.append(
+                "%s: series %r whiskers [%g, %g] reach past the Tukey fences "
+                "[%g, %g] — a value past the fence is an outlier, not the "
+                "whisker end" % (where, item.name, item.wlo, item.whi,
+                                 fence_lo, fence_hi)
+            )
+
+
+def check_labels(items: list, findings: list, source: str, name: str) -> None:
+    for item in items:
+        where = "%s:%d" % (name, line_of(source, item.offset))
+        if len(item.labels) != 1:
+            findings.append(
+                "%s: series %r has %d bound category labels (<text data-name>) "
+                "— each series names itself with exactly one"
+                % (where, item.name, len(item.labels))
+            )
+            continue
+        bound, shown, y = item.labels[0]
+        if bound.strip() != item.name.strip() or shown != item.name.strip():
+            findings.append(
+                "%s: series %r is labelled data-name=%r printing %r — the "
+                "visible label must name the series it sits beside"
+                % (where, item.name, bound, shown)
+            )
+        if y is None or abs(y - item.cy) > item.box_h / 2.0:
+            findings.append(
+                "%s: series %r label sits at y=%s, off its row at y=%g"
+                % (where, item.name, "?" if y is None else "%g" % y, item.cy)
+            )
 
 
 def check_names(items: list, findings: list, name: str) -> None:
@@ -615,6 +805,8 @@ def check_source(path: Path, raw: str) -> list:
                 )
         check_transforms(source, findings, name)
         scale = check_scale(items, findings, source, name)
+        check_shapes(items, findings, source, name)
+        check_labels(items, findings, source, name)
         check_focal(items, findings, name)
         check_ticks(scale, source, findings, name)
     elif items:

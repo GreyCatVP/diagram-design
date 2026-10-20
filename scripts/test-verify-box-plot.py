@@ -59,7 +59,8 @@ def x(value: float) -> float:
 
 def series(name, q1, q2, q3, wlo, whi, cy, *, focal=False, outliers=(),
            q1_x=None, q3_x=None, q2_x=None, wlo_x=None, whi_x=None,
-           omit=None, extra="", outlier_x=None, outlier_inside=False):
+           omit=None, extra="", outlier_x=None, outlier_inside=False,
+           label=None, label_y=None, median_x2=None, box_fill=None):
     omit = omit or set()
     box_x = x(q1) if q1_x is None else q1_x
     box_r = x(q3) if q3_x is None else q3_x
@@ -67,6 +68,8 @@ def series(name, q1, q2, q3, wlo, whi, cy, *, focal=False, outliers=(),
     lo = x(wlo) if wlo_x is None else wlo_x
     hi = x(whi) if whi_x is None else whi_x
     fill, stroke = (ACCENT_FILL, ACCENT_STROKE) if focal else (INK, STROKE)
+    if box_fill is not None:
+        fill = box_fill
     y = cy - 16
     attrs = []
     if "name" not in omit:
@@ -104,7 +107,7 @@ def series(name, q1, q2, q3, wlo, whi, cy, *, focal=False, outliers=(),
         body.append(
             '    <line data-role="median" x1="%g" y1="%g" x2="%g" y2="%g" '
             'stroke="#2d3142" stroke-width="1.5"/>'
-            % (med, y, med, y + 32)
+            % (med, y, med if median_x2 is None else median_x2, y + 32)
         )
     for ov in outliers:
         ox = x(ov) if outlier_x is None else outlier_x
@@ -114,6 +117,12 @@ def series(name, q1, q2, q3, wlo, whi, cy, *, focal=False, outliers=(),
             '    <circle data-outlier="%s" data-x="%s" cx="%g" cy="%g" r="4" '
             'fill="rgba(45,49,66,0.55)" stroke="#4f5d75"/>'
             % (name, ov, ox, cy)
+        )
+    if "label" not in omit:
+        body.append(
+            '    <text data-name="%s" x="148" y="%g" text-anchor="end">%s</text>'
+            % (name, cy + 4 if label_y is None else label_y,
+               name if label is None else label)
         )
     return '  <g %s%s>\n%s\n  </g>\n' % (
         " ".join(attrs), (" " + extra) if extra else "", "\n".join(body)
@@ -138,7 +147,7 @@ TICKS = tick(0) + tick(200) + tick(400)
 def honest(*extra: str) -> str:
     return document(
         series("A", 20, 30, 40, 10, 50, 80),
-        series("B", 40, 60, 90, 20, 120, 160, focal=True, outliers=(160,)),
+        series("B", 40, 60, 90, 20, 120, 160, focal=True, outliers=(180,)),
         series("C", 15, 22, 28, 8, 40, 240),
         TICKS,
         *extra,
@@ -240,8 +249,8 @@ def run_cases(h: Harness) -> int:
     h.expect_findings(
         "a median drawn off q2 is one finding",
         honest().replace(
-            series("B", 40, 60, 90, 20, 120, 160, focal=True, outliers=(160,)),
-            series("B", 40, 60, 90, 20, 120, 160, focal=True, outliers=(160,),
+            series("B", 40, 60, 90, 20, 120, 160, focal=True, outliers=(180,)),
+            series("B", 40, 60, 90, 20, 120, 160, focal=True, outliers=(180,),
                    q2_x=x(60) + 12),
             1,
         ),
@@ -309,6 +318,163 @@ def run_cases(h: Harness) -> int:
             1,
         ),
         "positions a mark",
+    )
+
+    h.expect_findings(
+        "an outlier outside the whiskers but inside the Tukey fence is one finding",
+        honest().replace(
+            series("B", 40, 60, 90, 20, 120, 160, focal=True, outliers=(180,)),
+            series("B", 40, 60, 90, 20, 120, 160, focal=True, outliers=(150,)),
+            1,
+        ),
+        1, "Tukey fences",
+    )
+
+    h.expect_findings(
+        "a whisker that reaches past the Tukey fence is one finding",
+        honest().replace(
+            series("A", 20, 30, 40, 10, 50, 80),
+            series("A", 20, 30, 40, 10, 75, 80),
+            1,
+        ),
+        1, "reach past the Tukey fences",
+    )
+
+    h.expect_findings(
+        "a slanted median whose second end misses q2 is one finding",
+        honest().replace(
+            series("A", 20, 30, 40, 10, 50, 80),
+            series("A", 20, 30, 40, 10, 50, 80, median_x2=x(30) + 40),
+            1,
+        ),
+        1, "median line",
+    )
+
+    h.expect_findings(
+        "a high whisker detached from the box is one finding",
+        honest().replace(
+            '<line data-role="whisker-hi" x1="%g" y1="80"' % x(40),
+            '<line data-role="whisker-hi" x1="%g" y1="80"' % (x(40) + 10),
+            1,
+        ),
+        1, "high whisker's box end",
+    )
+
+    h.expect_findings(
+        "a whisker drawn on another row is one finding",
+        honest().replace(
+            'x2="%g" y2="80" stroke="rgba(45,49,66,0.55)"' % x(50),
+            'x2="%g" y2="160" stroke="rgba(45,49,66,0.55)"' % x(50),
+            1,
+        ),
+        1, "off the row centre",
+    )
+
+    h.expect_clean(
+        "series wrapped in a plain <g> are all still read",
+        document(
+            "  <g class=\"series\">\n",
+            series("A", 20, 30, 40, 10, 50, 80),
+            series("B", 40, 60, 90, 20, 120, 160, focal=True, outliers=(180,)),
+            series("C", 15, 22, 28, 8, 40, 240),
+            "  </g>\n",
+            TICKS,
+        ),
+    )
+
+    h.expect_named(
+        "a wrapped series is not dropped from the checks",
+        document(
+            "  <g class=\"series\">\n",
+            series("A", 20, 30, 40, 10, 50, 80, q3_x=x(40) + 20),
+            series("B", 40, 60, 90, 20, 120, 160, focal=True, outliers=(180,)),
+            series("C", 15, 22, 28, 8, 40, 240),
+            series("D", 12, 18, 24, 6, 36, 320),
+            "  </g>\n",
+            TICKS,
+        ),
+        "series 'A' the box's right edge",
+    )
+
+    h.expect_named(
+        "an inline style width on a box is a finding",
+        honest().replace(
+            'width="40" height="32" fill="%s"' % INK,
+            'width="40" height="32" style="width: 60px" fill="%s"' % INK,
+            1,
+        ),
+        "the width property",
+    )
+
+    h.expect_findings(
+        "a <style> rule sizing rect is one finding",
+        honest().replace("<svg ", "<style>rect { width: 300px; }</style>\n<svg ", 1),
+        1, "box-size",
+    )
+
+    h.expect_clean(
+        "a <style> rule sizing only the <svg> is not a finding",
+        honest().replace("<svg ", "<style>svg { width: 100%; }</style>\n<svg ", 1),
+    )
+
+    h.expect_findings(
+        "a label that names another series is one finding",
+        honest().replace(
+            series("A", 20, 30, 40, 10, 50, 80),
+            series("A", 20, 30, 40, 10, 50, 80, label="C"),
+            1,
+        ),
+        1, "must name the series",
+    )
+
+    h.expect_findings(
+        "a label parked beside another row is one finding",
+        honest().replace(
+            series("A", 20, 30, 40, 10, 50, 80),
+            series("A", 20, 30, 40, 10, 50, 80, label_y=164),
+            1,
+        ),
+        1, "off its row",
+    )
+
+    h.expect_findings(
+        "a series with no bound label is one finding",
+        honest().replace(
+            series("A", 20, 30, 40, 10, 50, 80),
+            series("A", 20, 30, 40, 10, 50, 80, omit={"label"}),
+            1,
+        ),
+        1, "bound category labels",
+    )
+
+    for accent in (ACCENT_FILL, "rgba(240,138,89,0.12)"):
+        h.expect_findings(
+            "a second box with an accent fill %s and muted stroke is one finding"
+            % accent,
+            honest().replace(
+                series("A", 20, 30, 40, 10, 50, 80),
+                series("A", 20, 30, 40, 10, 50, 80, box_fill=accent),
+                1,
+            ),
+            1, "at most one focal",
+        )
+
+    h.expect_findings(
+        "an accent outlier on a muted series is one finding",
+        honest().replace(
+            series("C", 15, 22, 28, 8, 40, 240),
+            series("C", 15, 22, 28, 8, 40, 240, outliers=(60,)).replace(
+                'fill="rgba(45,49,66,0.55)" stroke="#4f5d75"/>',
+                'fill="rgba(191,69,32,0.55)" stroke="#bf4520"/>'),
+            1,
+        ),
+        1, "at most one focal",
+    )
+
+    h.expect_findings(
+        "a declared outlier with no data-x is one finding",
+        honest().replace('data-outlier="B" data-x="180" ', 'data-outlier="B" ', 1),
+        1, "no data-x",
     )
 
     h.expect_findings(
