@@ -217,6 +217,25 @@ def check_flowchart() -> None:
     ok("flowchart parses: shapes, subgraphs, labels, cycle, budgets, tables")
 
 
+def check_flowchart_header_statements(tmp: Path) -> None:
+    # Mermaid accepts `graph TD; A-->B;` on the header line itself; the
+    # statements after the header's semicolon are diagram content.
+    for name, header in (("graph-td", "graph TD;"), ("flowchart-lr", "flowchart LR;")):
+        source = tmp / f"header-statements-{name}.mmd"
+        source.write_text(f"{header} A-->B; B-->|ok| C;\n", encoding="utf-8")
+        diagram = json.loads(run_extract([str(source), "--json"]))["diagrams"][0]
+        nodes = sorted(node["id"] for node in diagram["nodes"])
+        edges = [(e["source"], e["target"], e["label"]) for e in diagram["edges"]]
+        if nodes != ["A", "B", "C"] or edges != [("A", "B", ""), ("B", "C", "ok")]:
+            fail(f"header-line statements were dropped for {header!r}: {nodes} {edges}")
+    bare = tmp / "header-statements-bare.mmd"
+    bare.write_text("flowchart LR;\nA-->B\n", encoding="utf-8")
+    diagram = json.loads(run_extract([str(bare), "--json"]))["diagrams"][0]
+    if [edge["target"] for edge in diagram["edges"]] != ["B"]:
+        fail("a bare header semicolon changed the following statements")
+    ok("flowchart statements after the header semicolon are retained")
+
+
 def check_entity_label_codes(tmp: Path) -> None:
     source = tmp / "entity-labels.mmd"
     source.write_text(
@@ -1341,6 +1360,24 @@ def check_edge_ids(tmp: Path) -> None:
         fail(f"an edge ID before the operator must not change the edge: {edges!r}")
     ok("Mermaid edge IDs and edge property statements are ignored")
 
+    for name, source, label, arrowhead in [
+        ("circle", "A e3@o--o B", "", "circle"),
+        ("cross", "A e4@x--x B", "", "cross"),
+        ("pipe", "A -->|retry@-1| B", "retry@-1", "arrow"),
+        ("spaced", "A -- retry@-1 --> B", "retry@-1", "arrow"),
+        ("pipe-operator", "A -->|retry@--> next| B", "retry@--> next", "arrow"),
+    ]:
+        flow.write_text("flowchart LR\n  " + source + "\n", encoding="utf-8")
+        result = json.loads(run_extract([str(flow), "--json"]))["diagrams"][0]
+        edge = result["edges"][0]
+        if edge["label"] != label or edge["arrowhead"] != arrowhead:
+            fail(f"edge ID parsing changed {name}: {edge!r}")
+    flow.write_text("flowchart LR\n subgraph Retry retry@-1\n A --> B\n end\n", encoding="utf-8")
+    result = json.loads(run_extract([str(flow), "--json"]))["diagrams"][0]
+    if result["nodes"][0]["label"] != "Retry retry@-1":
+        fail("edge ID parsing changed an unquoted subgraph title")
+    ok("edge IDs cover circle/cross operators without changing literal labels or titles")
+
 
 def check_unicode_state_regression(tmp: Path) -> None:
     path = tmp / "unicode-state.mmd"
@@ -1476,6 +1513,7 @@ def main() -> int:
         check_node_shape_updates(tmp)
         check_invisible_links(tmp)
         check_spaced_pipe_labels(tmp)
+        check_flowchart_header_statements(tmp)
         check_edge_ids(tmp)
         check_entity_label_codes(tmp)
         check_shape_and_edge_vocabulary(tmp)

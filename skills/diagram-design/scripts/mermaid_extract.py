@@ -777,16 +777,19 @@ def _endpoint_group(
 STYLE_DIRECTIVES = ("style ", "classDef ", "class ", "linkStyle ")
 
 
-_EDGE_ID = re.compile(r"(?<![\w.:@-])([A-Za-z_][\w-]*)@(?=<?[-=.~])")
+_EDGE_ID = re.compile(r"(?<![\w.:@-])([A-Za-z_][\w-]*)@")
 
 
 def _strip_edge_ids(text: str) -> tuple[str, list[str]]:
     """Drop Mermaid v11.6+ edge IDs (`A e1@--> B`) and return the IDs found."""
     mask = _top_level_mask(text)
+    operator_starts = {operator.start for operator in _edge_operators(text)}
     ids: list[str] = []
     pieces: list[str] = []
     cursor = 0
     for match in _EDGE_ID.finditer(mask):
+        if match.end() not in operator_starts:
+            continue
         pieces.append(text[cursor : match.start()])
         cursor = match.end()
         ids.append(match.group(1))
@@ -824,8 +827,6 @@ def _parse_flowchart(
         if id_match and id_match.group(1) in edge_ids:
             # `e1@{ animate: true }` styles an edge, not a node.
             continue
-        text, found_ids = _strip_edge_ids(text)
-        edge_ids.update(found_ids)
         if lowered.startswith("direction "):
             if not containers:
                 direction = text.split(maxsplit=1)[1].upper()
@@ -849,6 +850,8 @@ def _parse_flowchart(
                 containers.pop()
             continue
 
+        text, found_ids = _strip_edge_ids(text)
+        edge_ids.update(found_ids)
         operators = _edge_operators(text)
         parent = containers[-1] if containers else None
         if operators:
@@ -1189,6 +1192,15 @@ def _parse_er(
 def parse_block(block: SourceBlock) -> Diagram:
     lines = _prepared_lines(block)
     kind, direction, header_position = _kind_and_direction(lines)
+    if kind == "flowchart":
+        # `graph TD; A-->B;` is valid: statements may follow the header's
+        # semicolon on the same line, so keep them as the first statement.
+        line_number, header = lines[header_position]
+        rest = re.match(r"^\s*(?:flowchart|graph)\s+(?:TD|TB|LR|RL|BT)\b", header, re.I)
+        tail = header[rest.end() :].lstrip() if rest else ""
+        if tail.startswith(";"):
+            lines[header_position] = (line_number, header[: rest.end()])
+            lines.insert(header_position + 1, (line_number, tail[1:]))
     diagram = Diagram(block.index, kind, block.source_line, direction=direction)
     if kind == "flowchart":
         _parse_flowchart(diagram, lines, header_position)
