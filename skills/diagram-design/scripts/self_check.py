@@ -538,18 +538,54 @@ class BalanceParser(HTMLParser):
     inside a quoted attribute or a stylesheet as markup, and report an imbalance the
     document does not have. A self-closing tag arrives as both a start and an end tag,
     so it balances itself.
+
+    Titles and text areas are RCDATA: `<title>Using <span> labels</title>` is literal
+    text, not a span element. `HTMLParser` only separates RCDATA from markup from
+    Python 3.13 on, so on the versions the skill supports the inner tag arrives here as
+    a real one; this class ignores markup until the matching end tag instead.
     """
+
+    RCDATA_ELEMENTS = ("title", "textarea")
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.opens: Counter[str] = Counter()
         self.closes: Counter[str] = Counter()
+        self.rcdata = ""
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if self.rcdata:
+            return
         self.opens[tag] += 1
+        if tag in self.RCDATA_ELEMENTS:
+            self.rcdata = tag
 
     def handle_endtag(self, tag: str) -> None:
+        if self.rcdata:
+            if tag == self.rcdata:
+                self.rcdata = ""
+                self.closes[tag] += 1
+            return
         self.closes[tag] += 1
+
+
+def ends_with_shell_close(source: str) -> bool:
+    """True when the last markup in the document is `</html>`.
+
+    HTML allows comments and whitespace after the `</html>` end tag, so stripping only
+    whitespace would reject valid files; a document that really stopped early has no
+    closing tag left once trailing comments are removed.
+    """
+    tail = source.rstrip()
+    while True:
+        start = tail.rfind("<!--")
+        if start < 0:
+            break
+        end = tail.find("-->", start + 4)
+        if end < 0 or tail[end + 3 :].strip():
+            break
+        tail = tail[:start].rstrip()
+    return tail.casefold().endswith("</html>")
 
 
 def check_document_completeness(source: str, errors: list[str]) -> None:
@@ -560,7 +596,7 @@ def check_document_completeness(source: str, errors: list[str]) -> None:
     accessible-SVG contract for the part that survived, so this check reads the shape of
     the whole file instead.
     """
-    if not source.casefold().rstrip().endswith("</html>"):
+    if not ends_with_shell_close(source):
         errors.append("document does not end with </html>; the file looks truncated")
 
     replacements = source.count(REPLACEMENT_CHAR)
@@ -574,6 +610,13 @@ def check_document_completeness(source: str, errors: list[str]) -> None:
     parser = BalanceParser()
     parser.feed(source)
     parser.close()
+    if parser.rcdata:
+        # Everything after an unterminated RCDATA element is text, so the tag counts
+        # below describe the damage rather than the cause; report the cause alone.
+        errors.append(
+            f"<{parser.rcdata}> is never closed; the rest of the document reads as its text"
+        )
+        return
     for tag in PAIRED_CONTAINER_TAGS:
         opens, closes = parser.opens[tag], parser.closes[tag]
         if opens != closes:

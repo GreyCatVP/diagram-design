@@ -82,6 +82,11 @@ def main() -> int:
     check_mutation_fail("stray closing tag", "</body>", "</body></span>", "<span> opens")
     check_mutation_fail("unclosed span", "<body>", "<body><span>tip", "<span> opens")
     check_mutation_fail("incomplete shell", "</html>", "", "does not end with </html>")
+    # Titles and text areas are RCDATA: tag names in them are text, not elements.
+    check_mutation_pass("tag names in a page title", "<title>", "<title>Using <span> and <div> labels in ")
+    check_mutation_pass("tag names in a textarea", "<body>", "<body><textarea>Using <span> labels</textarea>")
+    check_mutation_pass("trailing comment after the html end tag", "</html>", "</html>\n<!-- generated -->")
+    check_mutation_fail("unclosed textarea", "<body>", "<body><textarea>x", "is never closed")
     check_mutation_pass("optional end tag", "</p>", "")
     check_mutation_pass("optional head end tag", "</head>", "")
     check_mutation_pass("optional body end tag", "</body>", "")
