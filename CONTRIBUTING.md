@@ -28,7 +28,7 @@ See [README.md](README.md) for the full picture, including the design system and
 
 Every validation gate below must pass before a PR is ready. They also run automatically as GitHub Actions CI (`.github/workflows/ci.yml`).
 
-**Do not bump the plugin version in your PR.** The Claude, Codex, and Factory manifest versions are bumped automatically on `main` after each merge by the Auto Version Bump workflow (`.github/workflows/auto-bump.yml`, ADR 0009), so pull requests must leave all three `plugin.json` versions untouched — CI rejects any change to them. This keeps open PRs from conflicting with each other on every merge. If your change warrants more than a patch release, say so in the PR description and the maintainer will apply the `release:minor` or `release:major` label before merging; the label selects the bump size. (`scripts/bump-plugin-version.py` still exists for the workflow and the maintainer — contributors never need to run it.)
+**Do not bump the plugin version in your PR.** The Claude, Codex, Factory, and Qoder manifest versions are bumped automatically on `main` after each merge by the Auto Version Bump workflow (`.github/workflows/auto-bump.yml`, ADR 0009), so pull requests must leave all four `plugin.json` versions untouched — CI rejects any change to them. This keeps open PRs from conflicting with each other on every merge. If your change warrants more than a patch release, say so in the PR description and the maintainer will apply the `release:minor` or `release:major` label before merging; the label selects the bump size. (`scripts/bump-plugin-version.py` still exists for the workflow and the maintainer — contributors never need to run it.)
 
 | What it checks | Command |
 |---|---|
@@ -58,7 +58,7 @@ Every validation gate below must pass before a PR is ready. They also run automa
 | Every shipped motion template/example | `python3 scripts/verify-motion.py --shipped` |
 | Docs/routing sync (description hooks, gallery, README tree, reference links and style-guide anchors, strict-bundler support paths, command/prompt surfaces, font-link parity, template title fallback order, SKILL.md split routing) | `python3 scripts/verify-docs-sync.py && python3 scripts/test-verify-docs-sync.py` |
 | Canonical README screenshots match their example HTML sources and recorded PNG digests | `python3 scripts/verify-screenshot-freshness.py` |
-| Export snippet's stalled-webfont fallback (window.stop on timeout, warning, normal load) | `python3 scripts/test-export-wait.py` (requires Playwright; skips without it) |
+| Packaged PNG exporter's stalled-webfont fallback (window.stop on timeout, warning, normal load) | `python3 scripts/test-export-wait.py` (requires Playwright; skips without it) |
 | Screenshot freshness checker behaves (CRLF checkout, real source drift, raw PNG digests) | `python3 scripts/test-verify-screenshot-freshness.py` |
 | README WebP previews match their PNGs, manifest, dimensions, and full-size links | `python3 scripts/test-build-readme-thumbs.py && python3 scripts/build-readme-thumbs.py --check` (requires `Pillow==12.1.1`) |
 | Packaged output self-check behaves (pass + adversarial cases, including `--offline`) | `python3 scripts/test-self-check.py` |

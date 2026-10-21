@@ -217,6 +217,25 @@ def check_flowchart() -> None:
     ok("flowchart parses: shapes, subgraphs, labels, cycle, budgets, tables")
 
 
+def check_flowchart_header_statements(tmp: Path) -> None:
+    # Mermaid accepts `graph TD; A-->B;` on the header line itself; the
+    # statements after the header's semicolon are diagram content.
+    for name, header in (("graph-td", "graph TD;"), ("flowchart-lr", "flowchart LR;")):
+        source = tmp / f"header-statements-{name}.mmd"
+        source.write_text(f"{header} A-->B; B-->|ok| C;\n", encoding="utf-8")
+        diagram = json.loads(run_extract([str(source), "--json"]))["diagrams"][0]
+        nodes = sorted(node["id"] for node in diagram["nodes"])
+        edges = [(e["source"], e["target"], e["label"]) for e in diagram["edges"]]
+        if nodes != ["A", "B", "C"] or edges != [("A", "B", ""), ("B", "C", "ok")]:
+            fail(f"header-line statements were dropped for {header!r}: {nodes} {edges}")
+    bare = tmp / "header-statements-bare.mmd"
+    bare.write_text("flowchart LR;\nA-->B\n", encoding="utf-8")
+    diagram = json.loads(run_extract([str(bare), "--json"]))["diagrams"][0]
+    if [edge["target"] for edge in diagram["edges"]] != ["B"]:
+        fail("a bare header semicolon changed the following statements")
+    ok("flowchart statements after the header semicolon are retained")
+
+
 def check_entity_label_codes(tmp: Path) -> None:
     source = tmp / "entity-labels.mmd"
     source.write_text(
@@ -1274,6 +1293,57 @@ def check_node_shape_updates(tmp: Path) -> None:
     ok("node declarations update shapes while bare references preserve them")
 
 
+def check_invisible_links(tmp: Path) -> None:
+    flow = tmp / "invisible-links.mmd"
+    flow.write_text("flowchart TD\nJ ~~~ K\nP --> Q ~~~ R\n", encoding="utf-8")
+    diagram = json.loads(run_extract([str(flow), "--json"]))["diagrams"][0]
+    if sorted(node["id"] for node in diagram["nodes"]) != ["J", "K", "P", "Q", "R"]:
+        fail("endpoints of an invisible link must still become nodes")
+    if [(edge["source"], edge["target"]) for edge in diagram["edges"]] != [("P", "Q")]:
+        fail("an invisible link must not become an edge")
+    if diagram["notes"] != ["2 invisible layout links ignored"]:
+        fail(f"invisible links must be reported: {diagram['notes']!r}")
+    ok("invisible ~~~ links declare their nodes without becoming edges")
+
+    for endpoint in ("x", "o"):
+        for operator, style in (("--go-->", "solid"), ("==go==>", "thick"), ("-.go.->", "dashed")):
+            for invisible in ("~~~", "~~~~"):
+                flow.write_text(f"flowchart TD\nA {invisible} {endpoint}{operator}B\n", encoding="utf-8")
+                mixed = json.loads(run_extract([str(flow), "--json"]))["diagrams"][0]
+                if {node["id"] for node in mixed["nodes"]} != {"A", endpoint, "B"}:
+                    fail("an invisible link must preserve a following x/o endpoint")
+                edges = [(edge["source"], edge["target"], edge["label"], edge["style"])
+                         for edge in mixed["edges"]]
+                if edges != [(endpoint, "B", "go", style)]:
+                    fail(f"mixed invisible/labeled chain changed its visible edge: {edges!r}")
+                if mixed["notes"] != ["1 invisible layout links ignored"]:
+                    fail("mixed invisible/labeled chains must report only their layout link")
+
+    flow.write_text("flowchart TD\nA ~~~ x--go-->B ~~~ o-.next.->C\n", encoding="utf-8")
+    mixed = json.loads(run_extract([str(flow), "--json"]))["diagrams"][0]
+    if {node["id"] for node in mixed["nodes"]} != {"A", "x", "B", "o", "C"}:
+        fail("a repeated mixed chain must preserve every endpoint")
+    if [(edge["source"], edge["target"], edge["label"]) for edge in mixed["edges"]] != [
+        ("x", "B", "go"), ("o", "C", "next")
+    ] or mixed["notes"] != ["2 invisible layout links ignored"]:
+        fail("a repeated mixed chain must retain both labeled edges and no invisible edges")
+    ok("invisible links keep x/o endpoint identity in solid, thick, dotted and repeated chains")
+
+
+def check_spaced_pipe_labels(tmp: Path) -> None:
+    flow = tmp / "spaced-pipe-labels.mmd"
+    flow.write_text(
+        "flowchart TD\nA --> |solid| B\nB -.-> |dotted| C\nC ==> |thick| D\nD --- |plain| E\nE -->|tight| F\n",
+        encoding="utf-8",
+    )
+    diagram = json.loads(run_extract([str(flow), "--json"]))["diagrams"][0]
+    edges = [(edge["source"], edge["target"], edge["label"]) for edge in diagram["edges"]]
+    expected = [("A", "B", "solid"), ("B", "C", "dotted"), ("C", "D", "thick"), ("D", "E", "plain"), ("E", "F", "tight")]
+    if edges != expected:
+        fail(f"a pipe label after whitespace must stay a label: {edges!r}")
+    ok("pipe labels may follow whitespace after the link operator")
+
+
 def check_unicode_state_regression(tmp: Path) -> None:
     path = tmp / "unicode-state.mmd"
     path.write_text('stateDiagram-v2\n待机 : 等待输入\n待机 --> 完成\n', encoding="utf-8")
@@ -1358,13 +1428,19 @@ def check_standalone_state_regression(tmp: Path) -> None:
     notes.write_text(
         "stateDiagram-v2\nstate Idle\nnote left of Idle\nGhost\nend note\n"
         "note right of Idle\nPhantom\nend note\n"
-        "note left of Idle: inline annotation\n"
-        "note right of Idle: inline annotation\nActive\nnote\nend\nnotebook\n",
+        "note left of Idle: first inline annotation\n"
+        "note right of Idle: second inline annotation\nActive\nnote\nend\nnotebook\n",
         encoding="utf-8",
     )
     payload = json.loads(run_extract([str(notes), "--json"]))["diagrams"][0]
     if {node["id"] for node in payload["nodes"]} != {"Idle", "Active", "note", "end", "notebook"}:
         fail("State note boundaries swallowed real states or retained annotation bodies")
+
+    if payload["notes"] != ["first inline annotation", "second inline annotation"]:
+        fail("Single-line state notes were not retained in source order")
+    digest = run_extract([str(notes)])
+    if "notes: first inline annotation; second inline annotation" not in digest:
+        fail("Single-line state notes were not printed in the digest")
 
     for side in ("left", "right"):
         unterminated = tmp / f"state-note-unterminated-{side}.mmd"
@@ -1400,6 +1476,9 @@ def main() -> int:
         check_flowchart()
         check_bidirectional_analysis(tmp)
         check_node_shape_updates(tmp)
+        check_invisible_links(tmp)
+        check_spaced_pipe_labels(tmp)
+        check_flowchart_header_statements(tmp)
         check_entity_label_codes(tmp)
         check_shape_and_edge_vocabulary(tmp)
         check_frontmatter(tmp)
