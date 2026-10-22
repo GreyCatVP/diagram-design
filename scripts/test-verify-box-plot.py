@@ -154,6 +154,14 @@ def honest(*extra: str) -> str:
     )
 
 
+def prepend_style(css: str) -> str:
+    return honest().replace("<svg ", "<style>%s</style>\n<svg " % css, 1)
+
+
+A_LABEL = '<text data-name="A" x="148" y="84" text-anchor="end">A</text>'
+A_BOX = 'data-role="box" x="200"'
+
+
 def document(*blocks: str) -> str:
     return HEAD + "".join(blocks) + TAIL
 
@@ -520,6 +528,349 @@ def run_cases(h: Harness) -> int:
             TICKS,
         ),
         "median",
+    )
+
+    h.expect_findings(
+        "a data-outlier circle outside its series group is one finding",
+        honest().replace(
+            "</svg>",
+            '  <circle data-outlier="B" data-x="300" cx="760" cy="160" r="4"/>\n'
+            "</svg>",
+            1,
+        ),
+        1, "not inside that",
+    )
+
+    b_dot = (
+        '    <circle data-outlier="B" data-x="180" cx="%g" cy="160" r="4" '
+        'fill="rgba(45,49,66,0.55)" stroke="#4f5d75"/>' % x(180)
+    )
+    h.expect_findings(
+        "outliers moved into their own layer are one finding",
+        honest().replace(b_dot + "\n", "").replace(
+            "</svg>",
+            '<g class="outliers">\n%s\n</g>\n</svg>'
+            % b_dot.replace('data-x="180"', 'data-x="300"'),
+            1,
+        ),
+        1, "not inside that",
+    )
+
+    h.expect_findings(
+        "a :nth-child size rule reaches a box",
+        prepend_style('g[data-name="A"] > :nth-child(6) { width: 300px }'),
+        1, "box-size",
+    )
+    h.expect_findings(
+        "a :not() size rule with no typed subject reaches a box",
+        prepend_style("[data-q1] :not(text):not(line):not(circle) { width: 300px }"),
+        1, "box-size",
+    )
+    h.expect_findings(
+        "a backslash escape in a selector is one finding",
+        prepend_style(r"r\000065ct { width: 300px }"),
+        1, "backslash",
+    )
+    h.expect_findings(
+        "a CSS comment hiding a width rule is one finding",
+        prepend_style("rect{/**/width:300px}"),
+        1, "box-size",
+    )
+    h.expect_findings(
+        "a CSS comment hiding a transform is one finding",
+        prepend_style("rect{/**/transform:translateX(100px)}"),
+        1, "positions a mark",
+    )
+    h.expect_named(
+        "an inline style comment hiding a width is a finding",
+        honest().replace(
+            'width="40" height="32" fill="%s"' % INK,
+            'width="40" height="32" style="/**/width:300px" fill="%s"' % INK,
+            1,
+        ),
+        "the width property",
+    )
+    h.expect_named(
+        "a backslash escape in an inline style is a finding",
+        honest().replace(
+            'width="40" height="32" fill="%s"' % INK,
+            'width="40" height="32" style="width:\\33 00px" fill="%s"' % INK,
+            1,
+        ),
+        "backslash",
+    )
+    h.expect_findings(
+        "a stylesheet link other than the font link is one finding",
+        honest().replace(
+            "<svg ",
+            '<link rel="stylesheet" href="data:text/css,rect%7Bwidth:300px%7D">\n'
+            "<svg ",
+            1,
+        ),
+        1, "stylesheet link",
+    )
+    h.expect_clean(
+        "the Google font stylesheet link is not a finding",
+        honest().replace(
+            "<svg ",
+            '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?'
+            'family=Geist&display=swap">\n<svg ',
+            1,
+        ),
+    )
+    h.expect_findings(
+        "a <set> inside the figure is one finding",
+        honest().replace(
+            "    <rect %s" % A_BOX,
+            '    <set attributeName="width" to="300"/>\n    <rect %s' % A_BOX,
+            1,
+        ),
+        1, "<set>",
+    )
+    h.expect_findings(
+        "an <animate> inside the figure is one finding",
+        honest().replace(
+            "</svg>",
+            '  <animate attributeName="x" to="120"/>\n</svg>',
+            1,
+        ),
+        1, "<animate>",
+    )
+
+    h.expect_findings(
+        "dx/dy on a bound label is one finding",
+        honest().replace(A_LABEL, A_LABEL.replace(" y=", ' dy="136" y=', 1), 1),
+        1, "dx/dy",
+    )
+    h.expect_findings(
+        "a positioned tspan in a bound label is one finding",
+        honest().replace(
+            A_LABEL,
+            '<text data-name="A" x="148" y="84" text-anchor="end">'
+            '<tspan y="220">A</tspan></text>',
+            1,
+        ),
+        1, "<tspan>",
+    )
+    h.expect_clean(
+        "an unpositioned tspan in a bound label is not a finding",
+        honest().replace(
+            A_LABEL,
+            '<text data-name="A" x="148" y="84" text-anchor="end">'
+            "<tspan>A</tspan></text>",
+            1,
+        ),
+    )
+    h.expect_findings(
+        "a label drawn off the label rail is one finding",
+        honest().replace(A_LABEL, A_LABEL.replace('x="148"', 'x="-500"', 1), 1),
+        1, "label rail",
+    )
+    h.expect_findings(
+        "a hidden bound label is one finding",
+        honest().replace(
+            A_LABEL,
+            A_LABEL.replace("<text ", '<text opacity="0" ', 1)
+            + '<text x="148" y="84">Catalog</text>',
+            1,
+        ),
+        1, "hides its bound label",
+    )
+
+    h.expect_findings(
+        "an inline accent fill on a muted box is one finding",
+        honest().replace(
+            'x="200" y="64" width="40" height="32" fill="%s"' % INK,
+            'x="200" y="64" width="40" height="32" style="fill:#bf4520" fill="%s"'
+            % INK,
+            1,
+        ),
+        1, "at most one focal",
+    )
+    h.expect_findings(
+        "a class rule painting a muted box with the accent is one finding",
+        prepend_style(".hot{fill:#bf4520}").replace(
+            A_BOX, 'data-role="box" class="hot" x="200"', 1),
+        1, "at most one focal",
+    )
+    for accent in ("#bf4520ff", "rgb(191,69,32)"):
+        h.expect_findings(
+            "accent fill %s on a muted box is one finding" % accent,
+            honest().replace(
+                series("A", 20, 30, 40, 10, 50, 80),
+                series("A", 20, 30, 40, 10, 50, 80, box_fill=accent),
+                1,
+            ),
+            1, "at most one focal",
+        )
+    h.expect_findings(
+        "an accent fill on the paper underlay is one finding",
+        honest().replace(
+            "    <rect %s" % A_BOX,
+            '    <rect x="200" y="64" width="40" height="32" fill="#bf4520"/>\n'
+            "    <rect %s" % A_BOX,
+            1,
+        ),
+        1, "at most one focal",
+    )
+    h.expect_findings(
+        "an accent stroke on the median is one finding",
+        honest().replace(
+            'data-role="median" x1="220" y1="64" x2="220" y2="96" stroke="#2d3142"',
+            'data-role="median" x1="220" y1="64" x2="220" y2="96" stroke="#bf4520"',
+            1,
+        ),
+        1, "at most one focal",
+    )
+
+    block = series("A", 20, 30, 40, 10, 50, 80)
+    h.expect_findings(
+        "a nested svg viewport shifting a series is one finding",
+        honest().replace(
+            block, '<svg x="120" overflow="visible">\n%s</svg>\n' % block, 1),
+        1, "nested <svg>",
+    )
+    h.expect_findings(
+        "a <use> shifting a series is one finding",
+        honest().replace("</svg>", '  <use href="#auth" x="120"/>\n</svg>', 1),
+        1, "<use>",
+    )
+    hidden = block.replace("<g ", '<g id="auth" ', 1)
+    drawn = block.replace(' data-q1="20"', "", 1)
+    stashed = honest().replace(
+        block, "<defs>\n%s</defs>\n%s" % (hidden, drawn), 1)
+    h.expect_named(
+        "a series stashed in <defs> is a finding",
+        stashed, "non-rendering",
+    )
+    h.expect_named(
+        "a series stashed in <defs> after a self-closing <mask/> is a finding",
+        honest().replace(
+            block, "<defs>\n<mask/>\n%s</defs>\n%s" % (hidden, drawn), 1),
+        "non-rendering",
+    )
+    h.expect_named(
+        "a drawn copy with no data-q1 is a finding",
+        stashed, "outside every series",
+    )
+
+    h.expect_findings(
+        "a second median off q2 is one finding",
+        honest().replace(
+            'data-role="median" x1="220" y1="64" x2="220" y2="96" '
+            'stroke="#2d3142" stroke-width="1.5"/>',
+            'data-role="median" x1="220" y1="64" x2="220" y2="96" '
+            'stroke="#2d3142" stroke-width="1.5"/>\n'
+            '    <line data-role="median" x1="500" y1="64" x2="500" y2="96" '
+            'stroke="#2d3142" stroke-width="1.5"/>',
+            1,
+        ),
+        1, "median line",
+    )
+    h.expect_findings(
+        "a cap off the whisker end is one finding",
+        honest().replace(
+            '    <line data-role="whisker-hi" x1="240" y1="80" x2="260" y2="80" '
+            'stroke="rgba(45,49,66,0.55)" stroke-width="1"/>',
+            '    <line data-role="whisker-hi" x1="240" y1="80" x2="260" y2="80" '
+            'stroke="rgba(45,49,66,0.55)" stroke-width="1"/>\n'
+            '    <line data-role="cap" x1="800" y1="72" x2="800" y2="88" '
+            'stroke="#4f5d75"/>',
+            1,
+        ),
+        1, "cap",
+    )
+    h.expect_findings(
+        "an unbound circle inside a series is one finding",
+        honest().replace(
+            A_LABEL,
+            '    <circle cx="300" cy="80" r="4" fill="#4f5d75"/>\n    ' + A_LABEL,
+            1,
+        ),
+        1, "paper mask",
+    )
+    papered = honest().replace(
+        "  <g ", '  <rect width="100%" height="100%" fill="#f5f5f5"/>\n  <g ', 1)
+    mask = '<circle cx="520" cy="160" r="4" fill="#f5f5f5"/>\n    '
+    h.expect_clean(
+        "a paper mask on a bound outlier is not a finding",
+        papered.replace('<circle data-outlier="B"', mask + '<circle data-outlier="B"', 1),
+    )
+    h.expect_findings(
+        "a paper mask repainted by an inline style is one finding",
+        papered.replace(
+            '<circle data-outlier="B"',
+            mask.replace("/>", ' style="fill:#4f5d75"/>', 1) + '<circle data-outlier="B"',
+            1,
+        ),
+        1, "paper mask",
+    )
+    h.expect_findings(
+        "an <animateColor> inside the figure is one finding",
+        honest().replace(
+            "</svg>", '  <animateColor attributeName="fill" to="#bf4520"/>\n</svg>', 1),
+        1, "<animatecolor>",
+    )
+    h.expect_findings(
+        "an accent fill inherited from a muted series group is one finding",
+        honest().replace(block, block.replace("<g ", '<g fill="#bf4520" ', 1), 1),
+        1, "at most one focal",
+    )
+    h.expect_findings(
+        "an accent path inside a muted series is one finding",
+        honest().replace(
+            A_LABEL, '<path d="M200 64h40v32h-40z" fill="#bf4520"/>\n    ' + A_LABEL, 1),
+        1, "at most one focal",
+    )
+    h.expect_findings(
+        "a paper mask inheriting a group stroke is one finding",
+        papered.replace(
+            '<circle data-outlier="B"', mask + '<circle data-outlier="B"', 1,
+        ).replace('<g data-name="B"', '<g stroke="#4f5d75" data-name="B"', 1),
+        1, "paper mask",
+    )
+    h.expect_findings(
+        "a paper mask inheriting a wrapper stroke is one finding",
+        papered.replace(
+            '<circle data-outlier="B"', mask + '<circle data-outlier="B"', 1,
+        ).replace('  <g data-name="B"', '  <g stroke="#4f5d75">\n  <g data-name="B"', 1
+        ).replace("</svg>", "  </g>\n</svg>", 1),
+        1, "paper mask",
+    )
+    h.expect_findings(
+        "a hidden tspan inside a bound label is one finding",
+        honest().replace(
+            A_LABEL,
+            '<text data-name="A" x="148" y="84" text-anchor="end">'
+            '<tspan opacity="0">A</tspan></text>',
+            1,
+        ),
+        1, "hides its bound label",
+    )
+    h.expect_findings(
+        "a descendant class rule painting a muted series with the accent is one finding",
+        prepend_style(".hot rect{fill:#bf4520}").replace(
+            block, block.replace("<g ", '<g class="hot" ', 1), 1),
+        1, "at most one focal",
+    )
+    h.expect_findings(
+        "a polygon class rule painting a muted series with the accent is one finding",
+        prepend_style("polygon.hot{fill:#bf4520}").replace(
+            A_LABEL,
+            '<polygon class="hot" points="200,64 240,64 240,96"/>\n    ' + A_LABEL,
+            1,
+        ),
+        1, "at most one focal",
+    )
+    h.expect_findings(
+        "a cap on the whisker end but off its row is one finding",
+        honest().replace(
+            A_LABEL,
+            '<line data-role="cap" x1="260" y1="200" x2="260" y2="216" '
+            'stroke="#4f5d75"/>\n    ' + A_LABEL,
+            1,
+        ),
+        1, "cap runs",
     )
 
     h.expect_out_of_scope(
