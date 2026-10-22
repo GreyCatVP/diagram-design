@@ -875,7 +875,13 @@ def main() -> int:
                     else document
                 )
                 before = container[key]
-                container[key] = before.replace("architecture delta, ", "")
+                container[key] = re.sub(
+                    r"\barchitecture delta\b,?\s*",
+                    "Architecture, ",
+                    before,
+                    count=1,
+                    flags=re.IGNORECASE,
+                )
                 if container[key] == before:
                     raise AssertionError(f"{relative} {key} lacks Architecture delta")
                 path.write_text(json.dumps(document), encoding="utf-8")
