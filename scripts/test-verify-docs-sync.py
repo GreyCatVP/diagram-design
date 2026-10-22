@@ -563,7 +563,7 @@ def split_route_error(heading: str, target: str) -> str:
 
 
 def check_mutate_line_endings() -> None:
-    """mutate() mutates a CRLF fixture in place, restores it byte for byte, and rejects a stale needle."""
+    """A CRLF fixture mutates in place, restores its original bytes, and rejects a stale needle."""
     fixture = b"# Title\r\n\r\n### 4px grid\r\nbody\r\n"
     with tempfile.TemporaryDirectory(prefix="verify-docs-sync-mutate-") as temporary:
         path = Path(temporary) / "layout-budget.md"
@@ -581,10 +581,19 @@ def check_mutate_line_endings() -> None:
         if b"\n" in mutated.replace(b"\r\n", b""):
             raise AssertionError("the mutation rewrote the fixture's line endings")
 
+        lf_path = Path(temporary) / "lf.md"
+        lf_fixture = b"# Title\n\n### 4px grid\nbody\n"
+        lf_path.write_bytes(lf_fixture)
+        if mutate(lf_path, "### 4px grid\n", "### Grid\n") != lf_fixture:
+            raise AssertionError("mutate() must return an LF fixture's original bytes")
+        if lf_path.read_bytes() != b"# Title\n\n### Grid\nbody\n":
+            raise AssertionError("the LF fixture was not mutated in place")
+
         try:
             mutate(path, "### never present\n", "### Grid\n")
-        except AssertionError:
-            pass
+        except AssertionError as error:
+            if "no longer contains" not in str(error):
+                raise AssertionError(f"a stale needle raised an unrelated error: {error}") from error
         else:
             raise AssertionError("a stale needle must still raise")
 
@@ -2219,7 +2228,8 @@ diagram-design/
         "strict-bundler packaging, "
         "routing surfaces, size-preset surfaces, Factory install contract, type-count routing, High-Level invariants, "
         "font-link parity, the Cyrillic title fallback order, the type-ramp contract, "
-        "split routing, and gallery guards (parent/variant model, contiguous ordinals, variant letters, type parity)"
+        "split routing, the CRLF fixture fallback in the fixture helper, and gallery guards "
+        "(parent/variant model, contiguous ordinals, variant letters, type parity)"
     )
     return 0
 
