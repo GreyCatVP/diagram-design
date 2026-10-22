@@ -145,11 +145,18 @@ TITLE_ORDER = "'Instrument Serif', 'Noto Serif', 'Noto Serif KR'"
 
 
 def mutate(path: Path, old: str, new: str) -> bytes:
-    """Replace *old* once in *path* and return the original bytes."""
+    """Replace *old* once in *path* and return the original bytes.
+
+    Fixtures are authored in LF, but only SKILL.md is pinned to LF in .gitattributes,
+    so a Windows checkout with ``core.autocrlf=true`` hands these files back as CRLF.
+    Retry the search on a newline-normalised copy instead of failing the fixture.
+    """
     original = path.read_bytes()
     text = original.decode("utf-8")
     if old not in text:
-        raise AssertionError(f"{path.name} no longer contains {old!r}; update the fixture")
+        text = text.replace("\r\n", "\n")
+        if old not in text:
+            raise AssertionError(f"{path.name} no longer contains {old!r}; update the fixture")
     path.write_bytes(text.replace(old, new, 1).encode("utf-8"))
     return original
 
