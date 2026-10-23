@@ -984,13 +984,15 @@ def check_sequence_digest_regions(tmp: Path) -> None:
     scene = tmp / "sequence-digest-regions.mmd"
     scene.write_text(
         "sequenceDiagram\nparticipant A\nparticipant B\n"
-        "alt valid file\nA->>B: ok\nelse too large\nA->>B: 413\nelse\nA->>B: other\nend\n"
+        "alt valid file\nA->>B: ok\nelse too large\nA->>B: 413\nelse too<br>slow\nA->>B: 504\n"
+        "else\nA->>B: other\nend\n"
         "par one\nA->>B: x\nand two\nA->>B: y\nend\n"
         "critical connect\nA->>B: c\noption timeout\nA->>B: t\nend\n",
         encoding="utf-8",
     )
     expected = (
-        "- fragments: alt(valid file | else: too large | else: unlabeled), par(one | and: two), "
+        "- fragments: alt(valid file | else: too large | else: too ⏎ slow | else: unlabeled), "
+        "par(one | and: two), "
         "critical(connect | option: timeout)"
     )
     if expected not in run_extract([str(scene)]).splitlines():

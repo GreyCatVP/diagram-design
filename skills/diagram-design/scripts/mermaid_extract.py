@@ -1329,7 +1329,7 @@ REGION_KEYWORDS = {"alt": "else", "par": "and", "critical": "option"}
 def _fragment_digest(item: dict[str, Any]) -> str:
     keyword = REGION_KEYWORDS.get(item["kind"], "else")
     parts = [item["label"] or "unlabeled"] + [f"{keyword}: {region or 'unlabeled'}" for region in item["regions"]]
-    return " | ".join(_escape_markdown(part) for part in parts)
+    return " | ".join(_escape_table(part) for part in parts)
 
 
 def digest(
