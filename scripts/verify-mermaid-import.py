@@ -980,6 +980,24 @@ def check_sequence_highlight_nesting_regression(tmp: Path) -> None:
     ok("sequence highlight blocks preserve semantic fragment regions and depth")
 
 
+def check_sequence_digest_regions(tmp: Path) -> None:
+    scene = tmp / "sequence-digest-regions.mmd"
+    scene.write_text(
+        "sequenceDiagram\nparticipant A\nparticipant B\n"
+        "alt valid file\nA->>B: ok\nelse too large\nA->>B: 413\nelse\nA->>B: other\nend\n"
+        "par one\nA->>B: x\nand two\nA->>B: y\nend\n"
+        "critical connect\nA->>B: c\noption timeout\nA->>B: t\nend\n",
+        encoding="utf-8",
+    )
+    expected = (
+        "- fragments: alt(valid file | else: too large | else: unlabeled), par(one | and: two), "
+        "critical(connect | option: timeout)"
+    )
+    if expected not in run_extract([str(scene)]).splitlines():
+        fail("digest drops the else/and/option regions of sequence fragments")
+    ok("digest lists the else/and/option regions of sequence fragments")
+
+
 def check_sequence_grammar_forms(tmp: Path) -> None:
     """Quoted participants, create directives, and full arrow vocabulary.
 
@@ -1491,6 +1509,7 @@ def main() -> int:
         check_legacy_stdout_encoding(tmp)
         check_sequence_grammar_forms(tmp)
         check_sequence_highlight_nesting_regression(tmp)
+        check_sequence_digest_regions(tmp)
         check_adversarial(tmp)
         check_errors_and_limits(tmp)
         check_docs_and_wiring()
