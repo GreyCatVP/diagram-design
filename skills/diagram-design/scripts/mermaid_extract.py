@@ -948,7 +948,10 @@ def _parse_sequence(
             off, start, step = numbering.groups()
             entry = {"line": line_number, "off": bool(off)}
             if not off:
-                entry.update(start=int(start or 1), step=int(step or 1))
+                try:
+                    entry.update(start=int(start or 1), step=int(step or 1))
+                except ValueError:  # past Python's int-from-string digit limit
+                    _fail(f"autonumber value exceeds integer limits at line {line_number}")
             diagram.autonumber.append(entry)
             continue
         if lowered.startswith("note "):

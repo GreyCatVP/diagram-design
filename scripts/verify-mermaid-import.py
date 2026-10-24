@@ -1015,6 +1015,9 @@ def check_sequence_autonumber(tmp: Path) -> None:
         fail(f"autonumber start/step not kept in the IR: {diagram['autonumber']}")
     if len(diagram["edges"]) != 4:
         fail("autonumber lines changed the parsed messages")
+    huge = tmp / "sequence-autonumber-huge.mmd"
+    huge.write_text(f"sequenceDiagram\nautonumber {'9' * 5000}\nA->>B: one\n", encoding="utf-8")
+    expect_error([str(huge)], "autonumber value exceeds integer limits at line 2")
     ok("sequence autonumber directives are kept with their start and step")
 
 
