@@ -882,6 +882,64 @@ def run_cases(h: Harness) -> int:
         "example-scatter-fixture.html",
     )
 
+    a_block = series("A", 20, 30, 40, 10, 50, 80)
+    h.expect_findings(
+        "a second box rect in a series is one finding",
+        honest().replace(
+            A_LABEL,
+            '<rect data-role="box" x="200" y="64" width="160" height="32" '
+            'fill="rgba(45,49,66,0.06)" stroke="#4f5d75"/>\n    ' + A_LABEL,
+            1,
+        ),
+        1, "data-role=box marks",
+    )
+    h.expect_findings(
+        "a second whisker-hi in a series is one finding",
+        honest().replace(
+            A_LABEL,
+            '<line data-role="whisker-hi" x1="240" y1="80" x2="400" y2="80" '
+            'stroke="rgba(45,49,66,0.55)" stroke-width="1"/>\n    ' + A_LABEL,
+            1,
+        ),
+        1, "data-role=whisker-hi marks",
+    )
+    h.expect_named(
+        "bound marks wrapped in <defs> inside a visible series are a finding",
+        honest().replace(
+            a_block,
+            a_block.replace('    <line data-role="whisker-lo"',
+                            '    <defs>\n    <line data-role="whisker-lo"', 1)
+            .replace("    " + A_LABEL, "    </defs>\n    " + A_LABEL, 1),
+            1,
+        ),
+        "non-rendering container",
+    )
+    shared = prepend_style(".series.focal rect{fill:#bf4520}")
+    for group in ('<g data-name="A"', '<g data-name="C"'):
+        shared = shared.replace(group, group.replace("<g ", '<g class="series" '), 1)
+    h.expect_clean(
+        "a compound class rule does not paint groups carrying only one of its classes",
+        shared.replace('<g data-name="B"', '<g class="series focal" data-name="B"', 1),
+    )
+    h.expect_findings(
+        "a compound class rule painting a second series is one finding",
+        shared.replace('<g class="series" data-name="A"',
+                       '<g class="series focal" data-name="A"', 1),
+        1, "at most one focal",
+    )
+    h.expect_clean(
+        "a stroked sibling group does not repaint a paper mask",
+        papered.replace(
+            '<circle data-outlier="B"', mask + '<circle data-outlier="B"', 1,
+        ).replace(
+            '    <line data-role="whisker-lo" x1="200"',
+            '    <g stroke="#4f5d75"><line data-role="whisker-lo" x1="200"', 1,
+        ).replace(
+            'x2="240" y2="160" stroke="rgba(45,49,66,0.55)" stroke-width="1"/>',
+            'x2="240" y2="160" stroke="rgba(45,49,66,0.55)" stroke-width="1"/></g>', 1,
+        ),
+    )
+
     h.expect_out_of_scope(
         "data-value on a <circle> never claims a file — the beeswarm contract",
         "<svg role='img'><title>t</title><desc>A beeswarm of requests.</desc>"

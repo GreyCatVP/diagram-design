@@ -502,9 +502,11 @@ def declared_paints(style: str) -> list:
 
 
 def class_paints(source: str) -> dict:
-    """class name -> fill/stroke values from a rule that names the class.
+    """Required classes -> fill/stroke values from a rule that names them.
 
-    `stroke:<class>` keys hold the stroke values alone.
+    Each key is the frozenset of classes one compound selector requires, so
+    `.series.focal rect` paints only under an element carrying both classes.
+    `("stroke", <classes>)` keys hold the stroke values alone.
     """
     found = {}
     for match in STYLE_RE.finditer(source):
@@ -523,20 +525,36 @@ def class_paints(source: str) -> dict:
                 if typed and typed.group(1).lower() in NON_MARK_TAGS:
                     continue
                 # `.hot rect` paints the rects under whatever carries
-                # .hot, so an ancestor class counts as well as the subject's.
+                # .hot, so an ancestor compound counts as well as the
+                # subject's. A compound such as `.series.focal` only matches
+                # an element that carries every class it names.
                 strokes = STROKE_DECL_RE.findall(rule.group(2))
-                for cls in re.findall(r"\.([\w-]+)", alternative):
-                    found.setdefault(cls, []).extend(paints)
-                    found.setdefault("stroke:" + cls, []).extend(
+                for compound in compounds:
+                    required = frozenset(re.findall(r"\.([\w-]+)", compound))
+                    if not required:
+                        continue
+                    found.setdefault(required, []).extend(paints)
+                    found.setdefault(("stroke", required), []).extend(
                         value.strip() for value in strokes)
     return found
+
+
+def matching_class_paints(attrs: dict, paints: dict, stroke: bool) -> list:
+    classes = set(attrs.get("class", "").split())
+    values = []
+    for key, found in paints.items():
+        required = key[1] if isinstance(key, tuple) else key
+        if isinstance(key, tuple) != stroke:
+            continue
+        if required <= classes:
+            values.extend(found)
+    return values
 
 
 def element_paints(attrs: dict, paints: dict) -> list:
     values = [attrs[key] for key in ("fill", "stroke") if key in attrs]
     values.extend(declared_paints(attrs.get("style", "")))
-    for cls in attrs.get("class", "").split():
-        values.extend(paints.get(cls, []))
+    values.extend(matching_class_paints(attrs, paints, stroke=False))
     return values
 
 
@@ -545,8 +563,7 @@ def stroke_paints(attrs: dict, paints: dict) -> list:
     values = [attrs["stroke"]] if "stroke" in attrs else []
     values.extend(value.strip() for value in
                   STROKE_DECL_RE.findall(blank_css_comments(attrs.get("style", ""))))
-    for cls in attrs.get("class", "").split():
-        values.extend(paints.get("stroke:" + cls, []))
+    values.extend(matching_class_paints(attrs, paints, stroke=True))
     return values
 
 
@@ -651,6 +668,7 @@ def view_x_span(source: str) -> tuple:
 def parse_series(source: str, findings: list, name: str) -> list:
     paints = class_paints(source)
     paper = figure_paper(source)
+    hidden = nonrendering_spans(source)
     series = []
     groups = groups_of(source)
     svgs = [attrs_of(m.group("attrs")) for m in GROUP_OPEN_RE.finditer(source)
@@ -699,6 +717,30 @@ def parse_series(source: str, findings: list, name: str) -> list:
                 % (where, attrs["data-name"])
             )
             continue
+        boxes = [m for m in RECT_RE.finditer(body)
+                 if attrs_of(m.group("attrs")).get("data-role") == "box"]
+        for role, count in (("box", len(boxes)),
+                            ("whisker-lo", len(whisker_lines)),
+                            ("whisker-hi", len(whisker_hi_lines))):
+            if count > 1:
+                findings.append(
+                    "%s: series %r draws %d data-role=%s marks; a series has "
+                    "exactly one, and an extra mark shows a value the checker "
+                    "never reads" % (where, attrs["data-name"], count, role)
+                )
+        for mark in OPEN_TAG_RE.finditer(body):
+            mattrs = attrs_of(mark.group("attrs"))
+            if not ({"data-role", "data-outlier", "data-name"} & set(mattrs)):
+                continue
+            # check_structure reports a series whose own group is hidden.
+            if inside_span(body_at + mark.start(), hidden) \
+                    and not inside_span(match.start(), hidden):
+                findings.append(
+                    "%s:%d: series %r has a bound <%s> inside a non-rendering "
+                    "container, so the checker reads a mark that is never drawn"
+                    % (name, line_of(source, body_at + mark.start()),
+                       attrs["data-name"], mark.group("tag").lower())
+                )
         whisker_lo, whisker_hi = whisker_lines[0], whisker_hi_lines[0]
         medians = []
         bad_coord = False
@@ -741,7 +783,7 @@ def parse_series(source: str, findings: list, name: str) -> list:
         for circle in CIRCLE_RE.finditer(body):
             cattrs = attrs_of(circle.group("attrs"))
             if "data-outlier" not in cattrs:
-                unbound.append(cattrs)
+                unbound.append((cattrs, body_at + circle.start()))
                 continue
             if "data-x" not in cattrs:
                 findings.append(
@@ -762,16 +804,16 @@ def parse_series(source: str, findings: list, name: str) -> list:
                 continue
             outliers.append((value, cx, ccy))
         # Paint inherits: a mask that states no stroke of its own takes the
-        # stroke of the series group, a group inside it, a wrapper around
-        # it, or the <svg> itself.
-        wrappers = [attrs_of(g.group("attrs")) for g in groups
-                    if g.body_at() <= match.start() < g.body_at() + len(g.group("body"))]
-        inherited = set()
-        for holder in [attrs] + svgs + wrappers + [attrs_of(g.group("attrs"))
-                                                   for g in G_OPEN_RE.finditer(body)]:
-            inherited.update(value.strip().lower()
-                             for value in stroke_paints(holder, paints))
-        for cattrs in unbound:
+        # stroke of every group around it (the series group, a group inside
+        # it, a wrapper around it) and of the <svg> itself. Only the circle's
+        # own ancestors count: a sibling group's stroke never reaches it.
+        for cattrs, at in unbound:
+            ancestors = [attrs_of(g.group("attrs")) for g in groups
+                         if g.body_at() <= at < g.body_at() + len(g.group("body"))]
+            inherited = set()
+            for holder in svgs + ancestors:
+                inherited.update(value.strip().lower()
+                                 for value in stroke_paints(holder, paints))
             cx = number(cattrs.get("cx"))
             ccy = number(cattrs.get("cy"))
             fill = cattrs.get("fill", "").strip().lower()
