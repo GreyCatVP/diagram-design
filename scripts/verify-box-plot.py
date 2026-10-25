@@ -501,6 +501,10 @@ def declared_paints(style: str) -> list:
             for match in PAINT_DECL_RE.finditer(blank_css_comments(style))]
 
 
+NEGATION_RE = re.compile(r":not\([^()]*\)", re.IGNORECASE)
+FUNCTIONAL_PSEUDO_RE = re.compile(r":[\w-]+\(")
+
+
 def class_paints(source: str) -> dict:
     """Required classes -> fill/stroke values from a rule that names them.
 
@@ -530,9 +534,18 @@ def class_paints(source: str) -> dict:
                 # an element that carries every class it names.
                 strokes = STROKE_DECL_RE.findall(rule.group(2))
                 for compound in compounds:
-                    required = frozenset(re.findall(r"\.([\w-]+)", compound))
-                    if not required:
-                        continue
+                    # A negation never adds a requirement, so dropping it
+                    # can only widen what the rule paints.
+                    positive = NEGATION_RE.sub("", compound)
+                    if FUNCTIONAL_PSEUDO_RE.search(positive):
+                        # :is(), :where(), :has() and the like are not
+                        # modelled. Fail closed: the paint reaches every
+                        # element, so a hidden accent cannot slip through.
+                        required = frozenset()
+                    else:
+                        required = frozenset(re.findall(r"\.([\w-]+)", positive))
+                        if not required:
+                            continue
                     found.setdefault(required, []).extend(paints)
                     found.setdefault(("stroke", required), []).extend(
                         value.strip() for value in strokes)

@@ -927,6 +927,12 @@ def run_cases(h: Harness) -> int:
                        '<g class="series focal" data-name="A"', 1),
         1, "at most one focal",
     )
+    for rule in ("rect.hot:not(.muted){fill:#bf4520}", "rect:is(.hot){fill:#bf4520}"):
+        h.expect_named(
+            "a %s rule painting a muted box is a finding" % rule.split("{")[0],
+            prepend_style(rule).replace(A_BOX, 'class="hot" ' + A_BOX, 1),
+            "at most one focal",
+        )
     h.expect_clean(
         "a stroked sibling group does not repaint a paper mask",
         papered.replace(
