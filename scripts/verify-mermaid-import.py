@@ -591,11 +591,22 @@ A --> B
         fail("leading Mermaid frontmatter was not skipped before grammar detection")
     if "Checkout" in digest or "forest" in digest:
         fail("frontmatter config leaked into the digest")
+    if "- discarded: 0 style directives, 0 click handlers, 1 config directives" not in digest:
+        fail("discarded frontmatter config was not counted in the digest")
+
+    directives = tmp / "init-directives.mmd"
+    directives.write_text(
+        '%%{init: {"theme": "dark"}}%%\nflowchart LR\nA --> B\n%%{\n  init: {"theme": "forest"}\n}%%\n',
+        encoding="utf-8",
+    )
+    counted = json.loads(run_extract([str(directives), "--json"]))["diagrams"][0]["discarded"]
+    if counted["config_directives"] != 2:
+        fail(f"%%{{init}}%% directives were not counted: {counted}")
 
     unterminated = tmp / "unterminated-frontmatter.mmd"
     unterminated.write_text("---\ntitle: Broken\nflowchart LR\nA --> B\n", encoding="utf-8")
     expect_error([str(unterminated)], "not a Mermaid file")
-    ok("frontmatter is skipped, and an unterminated block still fails specifically")
+    ok("frontmatter and %%{init}%% are skipped and counted, and an unterminated block still fails specifically")
 
 
 def check_outer_markdown_fences(tmp: Path) -> None:
@@ -901,7 +912,7 @@ def check_adversarial(tmp: Path) -> None:
             fail(f"chained/multi-target edge missing: {pair}")
     if not any(edge["label"] == "label --> remains text" for edge in edges):
         fail("arrow text inside a quoted edge label was split as syntax")
-    if diagram["discarded"] != {"style_directives": 4, "click_handlers": 1}:
+    if diagram["discarded"] != {"style_directives": 4, "click_handlers": 1, "config_directives": 1}:
         fail(f"discard counts wrong: {diagram['discarded']}")
     serialized = json.dumps(payload)
     if "example.invalid" in serialized:
@@ -978,6 +989,26 @@ def check_sequence_highlight_nesting_regression(tmp: Path) -> None:
         if visits[0] > len(text):
             fail(f"sequence fragment depth rescanned nested stacks: {visits[0]} visits")
     ok("sequence highlight blocks preserve semantic fragment regions and depth")
+
+
+def check_sequence_digest_regions(tmp: Path) -> None:
+    scene = tmp / "sequence-digest-regions.mmd"
+    scene.write_text(
+        "sequenceDiagram\nparticipant A\nparticipant B\n"
+        "alt valid file\nA->>B: ok\nelse too large\nA->>B: 413\nelse too<br>slow\nA->>B: 504\n"
+        "else\nA->>B: other\nend\n"
+        "par one\nA->>B: x\nand two\nA->>B: y\nend\n"
+        "critical connect\nA->>B: c\noption timeout\nA->>B: t\nend\n",
+        encoding="utf-8",
+    )
+    expected = (
+        "- fragments: alt(valid file | else: too large | else: too ⏎ slow | else: unlabeled), "
+        "par(one | and: two), "
+        "critical(connect | option: timeout)"
+    )
+    if expected not in run_extract([str(scene)]).splitlines():
+        fail("digest drops the else/and/option regions of sequence fragments")
+    ok("digest lists the else/and/option regions of sequence fragments")
 
 
 def check_sequence_grammar_forms(tmp: Path) -> None:
@@ -1527,6 +1558,7 @@ def main() -> int:
         check_legacy_stdout_encoding(tmp)
         check_sequence_grammar_forms(tmp)
         check_sequence_highlight_nesting_regression(tmp)
+        check_sequence_digest_regions(tmp)
         check_adversarial(tmp)
         check_errors_and_limits(tmp)
         check_docs_and_wiring()
