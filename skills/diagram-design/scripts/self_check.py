@@ -585,7 +585,7 @@ def ends_with_shell_close(source: str) -> bool:
         if end < 0 or tail[end + 3 :].strip():
             break
         tail = tail[:start].rstrip()
-    return tail.casefold().endswith("</html>")
+    return re.search(r"</html\s*>\Z", tail, re.IGNORECASE) is not None
 
 
 def check_document_completeness(source: str, errors: list[str]) -> None:

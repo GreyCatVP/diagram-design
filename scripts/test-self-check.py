@@ -86,6 +86,8 @@ def main() -> int:
     check_mutation_pass("tag names in a page title", "<title>", "<title>Using <span> and <div> labels in ")
     check_mutation_pass("tag names in a textarea", "<body>", "<body><textarea>Using <span> labels</textarea>")
     check_mutation_pass("trailing comment after the html end tag", "</html>", "</html>\n<!-- generated -->")
+    check_mutation_pass("space before the html end tag's >", "</html>", "</html >")
+    check_mutation_pass("newline inside the html end tag", "</html>", "</html\n>")
     check_mutation_fail("unclosed textarea", "<body>", "<body><textarea>x", "is never closed")
     check_mutation_pass("optional end tag", "</p>", "")
     check_mutation_pass("optional head end tag", "</head>", "")
