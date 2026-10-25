@@ -859,7 +859,7 @@ def _parse_flowchart(
                             operator.undirected,
                         )
             continue
-        if re.search(r"(?:--|==|-.).*?(?:>|x|o|-)", _top_level_mask(text)):
+        if re.search(r"(?:--|==|-\.).*?(?:>|x|o|-)", _top_level_mask(text)):
             _fail(f"malformed edge at line {line_number}")
         parsed = _parse_node_expression(text)
         if parsed is not None:
