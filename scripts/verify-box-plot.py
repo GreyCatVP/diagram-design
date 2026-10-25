@@ -552,6 +552,44 @@ def class_paints(source: str) -> dict:
     return found
 
 
+def class_stroke_rules(source: str) -> list:
+    """Stroke rules a paper mask's ancestors may pass down.
+
+    One (required classes, on_subject, reaches_circle, strokes) entry per
+    class-bearing compound. `on_subject` marks the compound the rule paints
+    (`.outer{stroke:...}` paints the group itself, so it inherits and can be
+    overridden further down). A non-subject compound (`.hot rect`) paints
+    descendants; `reaches_circle` says whether its subject can be a circle.
+    """
+    rules = []
+    for match in STYLE_RE.finditer(source):
+        css = blank_css_comments(match.group("body"))
+        for rule in re.finditer(r"([^{}]+)\{([^{}]*)\}", css):
+            strokes = [value.strip().lower()
+                       for value in STROKE_DECL_RE.findall(rule.group(2))]
+            if not strokes:
+                continue
+            for alternative in rule.group(1).split(","):
+                compounds = [part for part in re.split(r"[\s>+~]+", alternative.strip())
+                             if part]
+                if not compounds:
+                    continue
+                typed = re.match(r"([A-Za-z][\w-]*)", compounds[-1])
+                reaches_circle = not typed or typed.group(1).lower() == "circle"
+                for index, compound in enumerate(compounds):
+                    positive = NEGATION_RE.sub("", compound)
+                    if FUNCTIONAL_PSEUDO_RE.search(positive):
+                        # Not modelled: fail closed, the stroke reaches the
+                        # mask and nothing overrides it.
+                        rules.append((frozenset(), False, True, strokes))
+                        continue
+                    required = frozenset(re.findall(r"\.([\w-]+)", positive))
+                    if required:
+                        rules.append((required, index == len(compounds) - 1,
+                                      reaches_circle, strokes))
+    return rules
+
+
 def matching_class_paints(attrs: dict, paints: dict, stroke: bool) -> list:
     classes = set(attrs.get("class", "").split())
     values = []
@@ -680,6 +718,7 @@ def view_x_span(source: str) -> tuple:
 
 def parse_series(source: str, findings: list, name: str) -> list:
     paints = class_paints(source)
+    stroke_rules = class_stroke_rules(source)
     paper = figure_paper(source)
     hidden = nonrendering_spans(source)
     series = []
@@ -829,23 +868,29 @@ def parse_series(source: str, findings: list, name: str) -> list:
         # wrapper, the series group, a group inside it), so an inner
         # stroke="none" overrides an outer stroke. Only the circle's own
         # ancestors count: a sibling group's stroke never reaches it.
-        # Only an ancestor's own attribute or inline style overrides: a
-        # class rule such as `.hot rect{stroke:none}` may paint descendants
-        # rather than the group, so class strokes are kept and never
-        # override anything.
+        # A class rule counts as the ancestor's own stroke only when the
+        # ancestor is the rule's subject (`.outer{stroke:...}`). A rule that
+        # paints descendants (`.hot circle`) reaches the mask directly, so no
+        # inner group overrides it; one whose subject can't be a circle
+        # (`.hot rect`) never reaches the mask at all.
         for cattrs, at in unbound:
             ancestors = [attrs_of(g.group("attrs")) for g in groups
                          if g.body_at() <= at < g.body_at() + len(g.group("body"))]
-            inherited, from_classes = set(), set()
+            inherited, direct = set(), set()
             for holder in svgs + ancestors:
+                classes = set(holder.get("class", "").split())
                 stated = {value.strip().lower()
                           for value in stroke_paints(holder, {})}
+                for required, on_subject, reaches_circle, strokes in stroke_rules:
+                    if not required <= classes:
+                        continue
+                    if on_subject:
+                        stated.update(strokes)
+                    elif reaches_circle:
+                        direct.update(strokes)
                 if stated:
                     inherited = stated
-                from_classes.update(
-                    value.strip().lower()
-                    for value in matching_class_paints(holder, paints, stroke=True))
-            inherited |= from_classes
+            inherited |= direct
             cx = number(cattrs.get("cx"))
             ccy = number(cattrs.get("cy"))
             fill = cattrs.get("fill", "").strip().lower()
