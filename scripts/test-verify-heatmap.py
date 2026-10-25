@@ -107,7 +107,7 @@ def case(
     expect_pass: bool,
     describe: str,
 ) -> None:
-    if source == original and not expect_pass:
+    if source == original:
         failures.append(
             f"could not build the {name!r} fixture (anchor not found in source)"
         )
