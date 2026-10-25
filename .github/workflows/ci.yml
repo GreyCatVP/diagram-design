@@ -97,6 +97,9 @@ jobs:
           python scripts/test-lint-a11y.py
           python scripts/lint-skin.py --all --baseline
 
+      - name: Verify Mermaid import
+        run: python scripts/verify-mermaid-import.py
+
   validate:
     name: Lint & Verify (${{ matrix.os }}, Python ${{ matrix.python-version }})
     strategy:
