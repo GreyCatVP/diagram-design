@@ -986,6 +986,15 @@ def run_cases(h: Harness) -> int:
             "  <g ", "  <style>.outer circle{stroke:#4f5d75}</style>\n  <g ", 1),
         1, "paper mask",
     )
+    h.expect_findings(
+        "a class rule stroking groups under an outer group reaches a paper mask",
+        papered.replace(
+            '<circle data-outlier="B"', mask + '<circle data-outlier="B"', 1,
+        ).replace('  <g data-name="B"', '  <g class="outer">\n  <g data-name="B"', 1
+        ).replace("</svg>", "  </g>\n</svg>", 1
+        ).replace("  <g ", "  <style>.outer g{stroke:#4f5d75}</style>\n  <g ", 1),
+        1, "paper mask",
+    )
 
     h.expect_out_of_scope(
         "data-value on a <circle> never claims a file — the beeswarm contract",

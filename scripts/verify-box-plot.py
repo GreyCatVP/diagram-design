@@ -552,14 +552,23 @@ def class_paints(source: str) -> dict:
     return found
 
 
+# Shapes that never hold another element, so a rule painting one of them
+# can't reach a paper-mask circle or pass a stroke down to it.
+LEAF_TAGS = {"rect", "line", "path", "text", "tspan", "polygon", "polyline",
+             "ellipse", "image", "use"}
+
+
 def class_stroke_rules(source: str) -> list:
     """Stroke rules a paper mask's ancestors may pass down.
 
-    One (required classes, on_subject, reaches_circle, strokes) entry per
+    One (required classes, on_subject, reaches_mask, strokes) entry per
     class-bearing compound. `on_subject` marks the compound the rule paints
     (`.outer{stroke:...}` paints the group itself, so it inherits and can be
     overridden further down). A non-subject compound (`.hot rect`) paints
-    descendants; `reaches_circle` says whether its subject can be a circle.
+    descendants; `reaches_mask` says whether its subject can be the mask
+    or a group between it and the ancestor (anything but a leaf shape).
+    A descendant rule on a group (`.outer g`) is kept as reaching the mask
+    without working out which group it lands on, so it fails closed.
     """
     rules = []
     for match in STYLE_RE.finditer(source):
@@ -575,7 +584,7 @@ def class_stroke_rules(source: str) -> list:
                 if not compounds:
                     continue
                 typed = re.match(r"([A-Za-z][\w-]*)", compounds[-1])
-                reaches_circle = not typed or typed.group(1).lower() == "circle"
+                reaches_mask = not typed or typed.group(1).lower() not in LEAF_TAGS
                 for index, compound in enumerate(compounds):
                     positive = NEGATION_RE.sub("", compound)
                     if FUNCTIONAL_PSEUDO_RE.search(positive):
@@ -586,7 +595,7 @@ def class_stroke_rules(source: str) -> list:
                     required = frozenset(re.findall(r"\.([\w-]+)", positive))
                     if required:
                         rules.append((required, index == len(compounds) - 1,
-                                      reaches_circle, strokes))
+                                      reaches_mask, strokes))
     return rules
 
 
@@ -870,9 +879,9 @@ def parse_series(source: str, findings: list, name: str) -> list:
         # ancestors count: a sibling group's stroke never reaches it.
         # A class rule counts as the ancestor's own stroke only when the
         # ancestor is the rule's subject (`.outer{stroke:...}`). A rule that
-        # paints descendants (`.hot circle`) reaches the mask directly, so no
-        # inner group overrides it; one whose subject can't be a circle
-        # (`.hot rect`) never reaches the mask at all.
+        # paints descendants (`.hot circle`, `.hot g`) is treated as reaching
+        # the mask directly, so no inner group overrides it; one whose subject
+        # is a leaf shape (`.hot rect`) never reaches the mask at all.
         for cattrs, at in unbound:
             ancestors = [attrs_of(g.group("attrs")) for g in groups
                          if g.body_at() <= at < g.body_at() + len(g.group("body"))]
@@ -881,12 +890,12 @@ def parse_series(source: str, findings: list, name: str) -> list:
                 classes = set(holder.get("class", "").split())
                 stated = {value.strip().lower()
                           for value in stroke_paints(holder, {})}
-                for required, on_subject, reaches_circle, strokes in stroke_rules:
+                for required, on_subject, reaches_mask, strokes in stroke_rules:
                     if not required <= classes:
                         continue
                     if on_subject:
                         stated.update(strokes)
-                    elif reaches_circle:
+                    elif reaches_mask:
                         direct.update(strokes)
                 if stated:
                     inherited = stated
