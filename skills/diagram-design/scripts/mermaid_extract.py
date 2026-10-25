@@ -36,6 +36,10 @@ MAX_EDGES = 5000
 # with others. Real statements are a few hundred characters at most; the cap
 # keeps per-statement parsing work bounded.
 MAX_STATEMENT_CHARS = 4096
+# Sequence `autonumber` start and step. Mermaid numbers steps with JS numbers,
+# which stay exact up to 15 digits. Checking the length first also keeps the
+# error the same on Pythons with and without an int-from-string digit limit.
+MAX_AUTONUMBER_DIGITS = 15
 SUPPORTED_KINDS = "flowchart, sequenceDiagram, stateDiagram-v2, erDiagram"
 UNSUPPORTED_KINDS = {
     "pie",
@@ -951,10 +955,12 @@ def _parse_sequence(
             off, start, step = numbering.groups()
             entry = {"line": line_number, "off": bool(off)}
             if not off:
-                try:
-                    entry.update(start=int(start or 1), step=int(step or 1))
-                except ValueError:  # past Python's int-from-string digit limit
-                    _fail(f"autonumber value exceeds integer limits at line {line_number}")
+                if any(len(value or "") > MAX_AUTONUMBER_DIGITS for value in (start, step)):
+                    _fail(
+                        f"autonumber value exceeds {MAX_AUTONUMBER_DIGITS} digits "
+                        f"at line {line_number}"
+                    )
+                entry.update(start=int(start or 1), step=int(step or 1))
             diagram.autonumber.append(entry)
             continue
         if lowered.startswith("note "):

@@ -1026,9 +1026,15 @@ def check_sequence_autonumber(tmp: Path) -> None:
         fail(f"autonumber start/step not kept in the IR: {diagram['autonumber']}")
     if len(diagram["edges"]) != 4:
         fail("autonumber lines changed the parsed messages")
-    huge = tmp / "sequence-autonumber-huge.mmd"
-    huge.write_text(f"sequenceDiagram\nautonumber {'9' * 5000}\nA->>B: one\n", encoding="utf-8")
-    expect_error([str(huge)], "autonumber value exceeds integer limits at line 2")
+    widest = tmp / "sequence-autonumber-widest.mmd"
+    widest.write_text(f"sequenceDiagram\nautonumber {'9' * 15} {'9' * 15}\nA->>B: one\n", encoding="utf-8")
+    diagram = json.loads(run_extract([str(widest), "--json"]))["diagrams"][0]
+    if diagram["autonumber"][0] != {"line": 2, "off": False, "start": 10**15 - 1, "step": 10**15 - 1}:
+        fail(f"15-digit autonumber start not kept: {diagram['autonumber']}")
+    for name, numbers in (("start", "9" * 16), ("step", f"1 {'9' * 16}"), ("huge", "9" * 5000)):
+        source = tmp / f"sequence-autonumber-{name}.mmd"
+        source.write_text(f"sequenceDiagram\nautonumber {numbers}\nA->>B: one\n", encoding="utf-8")
+        expect_error([str(source)], "autonumber value exceeds 15 digits at line 2")
     ok("sequence autonumber directives are kept with their start and step")
 
 
