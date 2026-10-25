@@ -964,6 +964,13 @@ def run_cases(h: Harness) -> int:
         stroked_root,
         1, "paper mask",
     )
+    h.expect_findings(
+        "a class rule painting stroke:none on a series' rects does not "
+        "override a root stroke on a paper mask",
+        stroked_root.replace("  <g ", "  <style>.hot rect{stroke:none}</style>\n  <g ", 1
+        ).replace('<g data-name="B"', '<g class="hot" data-name="B"', 1),
+        1, "paper mask",
+    )
 
     h.expect_out_of_scope(
         "data-value on a <circle> never claims a file — the beeswarm contract",

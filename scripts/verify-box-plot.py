@@ -829,15 +829,23 @@ def parse_series(source: str, findings: list, name: str) -> list:
         # wrapper, the series group, a group inside it), so an inner
         # stroke="none" overrides an outer stroke. Only the circle's own
         # ancestors count: a sibling group's stroke never reaches it.
+        # Only an ancestor's own attribute or inline style overrides: a
+        # class rule such as `.hot rect{stroke:none}` may paint descendants
+        # rather than the group, so class strokes are kept and never
+        # override anything.
         for cattrs, at in unbound:
             ancestors = [attrs_of(g.group("attrs")) for g in groups
                          if g.body_at() <= at < g.body_at() + len(g.group("body"))]
-            inherited = set()
+            inherited, from_classes = set(), set()
             for holder in svgs + ancestors:
                 stated = {value.strip().lower()
-                          for value in stroke_paints(holder, paints)}
+                          for value in stroke_paints(holder, {})}
                 if stated:
                     inherited = stated
+                from_classes.update(
+                    value.strip().lower()
+                    for value in matching_class_paints(holder, paints, stroke=True))
+            inherited |= from_classes
             cx = number(cattrs.get("cx"))
             ccy = number(cattrs.get("cy"))
             fill = cattrs.get("fill", "").strip().lower()
