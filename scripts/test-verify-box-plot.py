@@ -945,6 +945,25 @@ def run_cases(h: Harness) -> int:
             'x2="240" y2="160" stroke="rgba(45,49,66,0.55)" stroke-width="1"/></g>', 1,
         ),
     )
+    for radius, change in (("missing", ""), ("zero", ' r="0"')):
+        h.expect_findings(
+            "a bound outlier with a %s radius is one finding" % radius,
+            re.sub(r'(<circle data-outlier="B"[^>]*?) r="4"', r"\1" + change,
+                   honest(), count=1),
+            1, "positive radius",
+        )
+    stroked_root = papered.replace(
+        '<circle data-outlier="B"', mask + '<circle data-outlier="B"', 1,
+    ).replace("<svg viewBox", '<svg stroke="#4f5d75" viewBox', 1)
+    h.expect_clean(
+        "a series group's stroke=\"none\" overrides a root stroke on a paper mask",
+        stroked_root.replace('<g data-name="B"', '<g stroke="none" data-name="B"', 1),
+    )
+    h.expect_findings(
+        "a root stroke reaching a paper mask with no override is one finding",
+        stroked_root,
+        1, "paper mask",
+    )
 
     h.expect_out_of_scope(
         "data-value on a <circle> never claims a file — the beeswarm contract",

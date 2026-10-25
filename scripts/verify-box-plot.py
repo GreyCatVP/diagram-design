@@ -815,18 +815,29 @@ def parse_series(source: str, findings: list, name: str) -> list:
                     % (where, attrs["data-name"])
                 )
                 continue
+            radius = number(cattrs.get("r"))
+            if radius is None or radius <= 0:
+                findings.append(
+                    "%s: an outlier on %r has no positive radius — a dot "
+                    "with r missing or 0 is never drawn"
+                    % (where, attrs["data-name"])
+                )
+                continue
             outliers.append((value, cx, ccy))
         # Paint inherits: a mask that states no stroke of its own takes the
-        # stroke of every group around it (the series group, a group inside
-        # it, a wrapper around it) and of the <svg> itself. Only the circle's
-        # own ancestors count: a sibling group's stroke never reaches it.
+        # stroke of the nearest ancestor that sets one (the <svg> itself, a
+        # wrapper, the series group, a group inside it), so an inner
+        # stroke="none" overrides an outer stroke. Only the circle's own
+        # ancestors count: a sibling group's stroke never reaches it.
         for cattrs, at in unbound:
             ancestors = [attrs_of(g.group("attrs")) for g in groups
                          if g.body_at() <= at < g.body_at() + len(g.group("body"))]
             inherited = set()
             for holder in svgs + ancestors:
-                inherited.update(value.strip().lower()
-                                 for value in stroke_paints(holder, paints))
+                stated = {value.strip().lower()
+                          for value in stroke_paints(holder, paints)}
+                if stated:
+                    inherited = stated
             cx = number(cattrs.get("cx"))
             ccy = number(cattrs.get("cy"))
             fill = cattrs.get("fill", "").strip().lower()
