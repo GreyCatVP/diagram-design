@@ -10,6 +10,8 @@ from __future__ import annotations
 import contextlib
 import io
 import importlib.util
+import contextlib
+import io
 import re
 import sys
 import tempfile
@@ -66,6 +68,119 @@ class ExportSvgStandaloneTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.mod = load_helper()
 
+    def test_nested_rule_groups_preserve_paint_and_animation_bindings(self) -> None:
+        for group in ("@layer base", "@container (min-width: 1px)", "@future-group paint"):
+            with self.subTest(group=group):
+                html = '<style>' + group + ' {@keyframes pulse {from {opacity:0;} to {opacity:1;}} .paint {fill:red;animation:pulse 1s;}}</style>'
+                html += '<svg viewBox="0 0 10 10"><rect class="paint"/></svg>'
+                svg = self.mod.export_svg_document(html, Path("group.html"))
+                css = embedded_css(svg)
+                self.assertIn(group + " {", css)
+                self.assertIn("#group-root .paint { fill:red;animation:group-root-pulse 1s; }", css)
+                self.assertIn("@keyframes group-root-pulse { from {opacity:0;} to {opacity:1;} }", css)
+                ET.fromstring(svg)
+
+    def test_stray_page_css_closing_braces_preserve_valid_rules(self) -> None:
+        body = '<svg viewBox="0 0 10 10"><rect class="paint"/><text class="label">x</text></svg>'
+        clean = '<style>.paint {fill:red;}.label {fill:blue;}</style>' + body
+        recovered = '<style>} .paint {fill:red;} } }.label {fill:blue;} }</style>' + body
+        self.assertEqual(self.mod.export_svg_document(recovered, Path("brace.html")),
+                         self.mod.export_svg_document(clean, Path("brace.html")))
+
+    def test_unknown_declaration_blocks_warn_without_losing_paint(self) -> None:
+        html = '<style>@property --paint {syntax:"<color>";inherits:false;initial-value:red;}.paint {fill:red;}</style>'
+        html += '<svg viewBox="0 0 10 10"><rect class="paint"/></svg>'
+        warning = io.StringIO()
+        with contextlib.redirect_stderr(warning):
+            svg = self.mod.export_svg_document(html, Path("property.html"))
+        self.assertNotIn("@property", embedded_css(svg))
+        self.assertIn("#property-root .paint { fill:red; }", embedded_css(svg))
+        self.assertIn("warning: dropping unsupported CSS block", warning.getvalue())
+
+    def test_smil_paint_values_follow_namespaced_definitions(self) -> None:
+        html = ('<svg viewBox="0 0 10 10"><defs><linearGradient id="paint"/>'
+                '<linearGradient id="other"/></defs><rect width="10" height="10">'
+                '<set attributeName="fill" to="url(#paint)" begin="0s"/>'
+                '<animate attributeName="str&#111;ke" from="url(#paint)" '
+                'to="url(#other)" values="url(#paint); url(#other)" by="url(#paint)"/>'
+                '</rect></svg>')
+        root = ET.fromstring(self.mod.export_svg_document(html, Path("smil.html")))
+        animation = next(element for element in root.iter() if element.tag.endswith("}set"))
+        self.assertEqual(animation.get("to"), "url(#smil-paint)")
+        animation = next(element for element in root.iter() if element.tag.endswith("}animate"))
+        for name, expected in {"from": "url(#smil-paint)", "to": "url(#smil-other)",
+                               "values": "url(#smil-paint); url(#smil-other)",
+                               "by": "url(#smil-paint)"}.items():
+            self.assertEqual(animation.get(name), expected, name)
+
+    def test_smil_reference_values_preserve_css_escapes_and_literals(self) -> None:
+        for target in ("fill", "stroke", "filter", "clip-path", "mask", "marker-end"):
+            with self.subTest(target=target):
+                html = ('<svg viewBox="0 0 10 10"><defs><linearGradient id="paint"/></defs>'
+                        '<animate attributeName="' + target + '" '
+                        'from="URL(&quot;#pa\\69 nt&quot;)" to="url(#missing)" '
+                        'values="url(#paint);url(#pa\\69 nt);none" '
+                        'by="url(#paint)" data-label="url(#paint)"/></svg>')
+                root = ET.fromstring(self.mod.export_svg_document(html, Path("smil.html")))
+                actual = next(node for node in root.iter() if node.tag.endswith("}animate"))
+                self.assertEqual(actual.get("from"), 'url("#smil-pa\\69 nt")')
+                self.assertEqual(actual.get("to"), "url(#missing)")
+                self.assertEqual(actual.get("values"), "url(#smil-paint);url(#smil-pa\\69 nt);none")
+                self.assertEqual(actual.get("by"), "url(#smil-paint)")
+                self.assertEqual(actual.get("data-label"), "url(#paint)")
+
+    def test_only_applicable_animation_attributes_carry_paint_urls(self) -> None:
+        for markup in ('<g attributeName="fill" to="url(#paint)"/>',
+                       '<animateTransform attributeName="fill" to="url(#paint)"/>',
+                       '<set attributeName="fill" from="url(#paint)" '
+                       'values="url(#paint)" by="url(#paint)"/>',
+                       '<animate attributename="fill" to="url(#paint)"/>'):
+            with self.subTest(markup=markup):
+                html = ('<svg viewBox="0 0 10 10"><defs><linearGradient id="paint"/>'
+                        '</defs>' + markup + '</svg>')
+                svg = self.mod.export_svg_document(html, Path("smil.html"))
+                self.assertIn(markup, svg)
+
+    def test_unchanged_inline_css_keeps_original_attribute_spelling(self) -> None:
+        style = "font-family:'Foo\\&#10;Bar'; --literal:&amp;#10;;fill:url(#external)"
+        html = ('<svg viewBox="0 0 10 10"><defs><linearGradient id="paint"/>'
+                '</defs><text style="' + style + '">Label</text></svg>')
+        svg = self.mod.export_svg_document(html, Path("space.html"))
+        self.assertIn('style="' + style + '"', svg)
+
+    def test_animation_looking_metadata_remains_literal(self) -> None:
+        for element in ("set", "animate", "animateTransform", "g"):
+            for target in ("data-label", "Fill", "style"):
+                with self.subTest(element=element, target=target):
+                    html = ('<svg viewBox="0 0 10 10"><defs><linearGradient id="paint"/>'
+                            '</defs><' + element + ' attributeName="' + target + '" '
+                            'to="url(#paint)" from="url(#paint)" '
+                            'values="url(#paint);url(#paint)" by="url(#paint)"/></svg>')
+                    root = ET.fromstring(self.mod.export_svg_document(html, Path("smil.html")))
+                    actual = next(node for node in root.iter() if node.get("attributeName"))
+                    for name in ("to", "from", "by"):
+                        self.assertEqual(actual.get(name), "url(#paint)")
+                    self.assertEqual(actual.get("values"), "url(#paint);url(#paint)")
+
+    def test_inline_css_attribute_whitespace_keeps_xml_semantics(self) -> None:
+        whitespace = ("&#9;", "&#10;", "&#13;", "&#x9;", "&#xA;", "&#xD;",
+                      "\t", "\n", "\r", "\r\n", "&amp;#10;")
+        for spelling in whitespace:
+            for rewrite in (False, True):
+                with self.subTest(spelling=repr(spelling), rewrite=rewrite):
+                    style = "font-family:'Foo\\" + spelling + "Bar'; --quoted:'a" + spelling + "b'"
+                    if rewrite:
+                        style += ";fill:url(#paint)"
+                    html = ('<svg viewBox="0 0 10 10"><defs><linearGradient id="paint"/>'
+                            '</defs><text style="' + style + '">Label</text></svg>')
+                    original = next(node for node in ET.fromstring(html).iter() if node.tag == "text")
+                    exported = ET.fromstring(self.mod.export_svg_document(html, Path("space.html")))
+                    actual = next(node for node in exported.iter() if node.tag.endswith("}text"))
+                    expected = original.get("style")
+                    if rewrite:
+                        expected = expected.replace("url(#paint)", "url(#space-paint)")
+                    self.assertEqual(actual.get("style"), expected)
+
     def test_css_comment_delimiters_inside_literals_survive_export(self) -> None:
         selectors = [
             'rect[data-label="net/*retained*/revenue"]',
@@ -110,6 +225,91 @@ class ExportSvgStandaloneTests(unittest.TestCase):
         # Hex escape terminator plus descendant whitespace must remain distinct.
         css = self.mod.diagram_css_from_html('<style>.\\31  rect {fill:red}</style>', 'literal-root')
         self.assertIn('#literal-root .\\31  rect', css)
+
+    def test_css_escaped_local_paint_fragments_follow_namespaced_defs(self) -> None:
+        references = [r'url(#\70 aint)', r"url('#\70 aint')", r'url(&quot;#\70 aint&quot;)']
+        for reference in references:
+            with self.subTest(reference=reference):
+                source = '<svg viewBox="0 0 20 20"><defs><linearGradient id="paint"/></defs>'
+                source += '<rect fill="' + reference + '" width="20" height="20"/></svg>'
+                root = ET.fromstring(self.mod.export_svg_document(source, Path("literal.html"), system_fonts=True))
+                gradient = root.find('.//{http://www.w3.org/2000/svg}linearGradient')
+                rectangle = root.find('{http://www.w3.org/2000/svg}rect')
+                self.assertEqual(gradient.get('id'), 'literal-paint')
+                self.assertIn(r'#literal-\70 aint', rectangle.get('fill'))
+
+    def test_url_looking_metadata_and_css_strings_remain_literal(self) -> None:
+        for fragment in (r'#\70 aint', '#paint'):
+            with self.subTest(fragment=fragment):
+                literal = 'url(' + fragment + ')'
+                selector_value = literal.replace('\\', '\\\\')
+                source = '<style>rect[data-label="' + selector_value + '"]{fill:red}</style>'
+                source += '<svg viewBox="0 0 20 20"><defs><linearGradient id="paint"/></defs>'
+                source += '<rect data-label="' + literal + '" width="20" height="20"/></svg>'
+                exported = self.mod.export_svg_document(source, Path("literal.html"), system_fonts=True)
+                rectangle = ET.fromstring(exported).find('{http://www.w3.org/2000/svg}rect')
+                self.assertEqual(rectangle.get('data-label'), literal)
+                self.assertIn('[data-label="' + selector_value + '"]', embedded_css(exported))
+        for carrier in ('stylesheet', 'inline'):
+            with self.subTest(carrier=carrier):
+                declaration = r'--note:"url(#\70 aint)";fill:url(#\70 aint)'
+                source = '<svg viewBox="0 0 20 20"><defs><linearGradient id="paint"/></defs>'
+                if carrier == 'stylesheet':
+                    source += '<style>.paint {' + declaration + '}</style><rect class="paint"/>'
+                else:
+                    source += "<rect style='" + declaration + "'/>"
+                exported = self.mod.export_svg_document(source + '</svg>', Path("literal.html"), system_fonts=True)
+                if carrier == 'stylesheet':
+                    css = ''.join(node.text or '' for node in ET.fromstring(exported).iter() if node.tag.endswith('}style'))
+                else:
+                    css = ET.fromstring(exported).find('{http://www.w3.org/2000/svg}rect').get('style')
+                self.assertIn(r'--note:"url(#\70 aint)"', css)
+                self.assertIn(r'fill:url(#literal-\70 aint)', css)
+
+    def test_commented_inline_paint_keeps_its_optional_definition_binding(self) -> None:
+        source = '<svg viewBox="0 0 20 20"><defs><!-- <pattern id="paint"/> --></defs>'
+        source += '<symbol id="paint"><rect width="10" height="10"/></symbol>'
+        source += '<!-- <rect style="fill:url(#paint)"/> --><use href="#paint"/></svg>'
+        exported = self.mod.export_svg_document(source, Path("literal.html"), system_fonts=True)
+        self.assertIn('<pattern id="literal-paint"/>', exported)
+        self.assertIn('<rect style="fill:url(#literal-paint)"/>', exported)
+        self.assertEqual(ET.fromstring(exported).find('{http://www.w3.org/2000/svg}use').get('href'), '#paint')
+
+    def test_longer_css_function_names_are_not_local_url_functions(self) -> None:
+        for function in ('noturl', 'vendor-url', '-url', '_url', '💡url'):
+            for carrier in ('stylesheet', 'inline'):
+                with self.subTest(function=function, carrier=carrier):
+                    declaration = '--note:' + function + r'(#\70 aint);fill:red'
+                    source = '<svg viewBox="0 0 20 20"><defs><linearGradient id="paint"/></defs>'
+                    if carrier == 'stylesheet':
+                        source += '<style>.paint {' + declaration + '}</style><rect class="paint"/>'
+                    else:
+                        source += "<rect style='" + declaration + "'/>"
+                    root = ET.fromstring(self.mod.export_svg_document(source + '</svg>', Path("literal.html"), system_fonts=True))
+                    css = ''.join(node.text or '' for node in root.iter() if node.tag.endswith('}style')) if carrier == 'stylesheet' else root.find('{http://www.w3.org/2000/svg}rect').get('style')
+                    self.assertIn(declaration, css)
+
+    def test_escaped_function_identifiers_are_consumed_before_url_matching(self) -> None:
+        functions = [r'my\31 url', r'my\000031url', r'my\0031 url', r'my\31 URL', r'my\31' + '\turl']
+        for function in functions:
+            for carrier in ('stylesheet', 'inline'):
+                with self.subTest(function=function, carrier=carrier):
+                    declaration = '--note:' + function + r'(#\70 aint);fill:red'
+                    source = '<svg viewBox="0 0 20 20"><defs><linearGradient id="paint"/></defs>'
+                    if carrier == 'stylesheet':
+                        source += '<style>.paint {' + declaration + '}</style><rect class="paint"/>'
+                    else:
+                        source += "<rect style='" + declaration + "'/>"
+                    root = ET.fromstring(self.mod.export_svg_document(source + '</svg>', Path("literal.html"), system_fonts=True))
+                    css = ''.join(node.text or '' for node in root.iter() if node.tag.endswith('}style')) if carrier == 'stylesheet' else root.find('{http://www.w3.org/2000/svg}rect').get('style')
+                    self.assertIn(declaration.replace('\t', ' ') if carrier == 'inline' else declaration, css)
+
+    def test_second_space_after_an_identifier_escape_starts_a_real_url(self) -> None:
+        declaration = r'--note:my\31  url(#\70 aint);fill:red'
+        source = '<svg viewBox="0 0 20 20"><defs><linearGradient id="paint"/></defs>'
+        source += '<style>.paint {' + declaration + '}</style><rect class="paint"/></svg>'
+        exported = self.mod.export_svg_document(source, Path("literal.html"), system_fonts=True)
+        self.assertIn(r'--note:my\31  url(#literal-\70 aint);fill:red', exported)
 
     def test_rgba_parent_normalizes_with_unrelated_page_paint(self) -> None:
         for prop in ("fill", "stroke"):
@@ -391,6 +591,48 @@ class ExportSvgStandaloneTests(unittest.TestCase):
         self.assertIn(r"#diagram-A\&\#38\;B stop { stop-color:blue; }", css)
         self.assertEqual([element.get("fill") for element in root.iter() if element.tag.endswith("}rect")],
                          ["url(#diagram-A&B)", "url(#diagram-A&#38;B)"])
+    def test_unquoted_data_url_semicolons_preserve_conditional_paint(self) -> None:
+        image = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg=="
+        for url in ("data:image/png;base64,AAAA", "data:image/png;base64," + image):
+            for quote in ("", '"'):
+                with self.subTest(url=url, quote=quote):
+                    condition = f"@supports (background: url({quote}{url}{quote}))"
+                    html = '<style>' + condition + ' { .paint {fill:red;} }</style>'
+                    html += '<svg viewBox="0 0 10 10"><rect class="paint"/></svg>'
+                    css = embedded_css(self.mod.export_svg_document(html, Path("function.html")))
+                    self.assertIn(condition + " {", css)
+                    self.assertIn("#function-root .paint { fill:red; }", css)
+                    self.assertNotIn("#function-root base64", css)
+
+    def test_function_semicolon_keeps_nested_layer_order_and_animation(self) -> None:
+        condition = "@supports (background: url(data:image/png;base64,AAAA))"
+        html = '<style>@keyframes pulse {to{opacity:1}} ' + condition
+        html += ' { @layer second, first; @layer first { .paint {fill:red;animation:pulse 1s;} } }</style>'
+        html += '<svg viewBox="0 0 10 10"><rect class="paint"/></svg>'
+        css = embedded_css(self.mod.export_svg_document(html, Path("nested-function.html")))
+        self.assertIn(condition + " {", css)
+        self.assertIn("@layer second, first;", css)
+        self.assertIn("animation:nested-function-root-pulse 1s", css)
+
+    def test_font_face_and_supports_do_not_block_export(self) -> None:
+        html = '<style>@font-face {font-family: Custom; src:url("custom.woff2");}'
+        html += '@supports (display: grid) {.paint {fill:#ff0000;}}</style>'
+        html += '<svg viewBox="0 0 10 10"><rect class="paint"/></svg>'
+        result = self.mod.export_svg_document(html, Path("custom-font.html"))
+        css = embedded_css(result)
+        self.assertIn('@font-face', css)
+        self.assertIn('font-family: Custom', css)
+        self.assertIn('@supports (display: grid)', css)
+        self.assertIn('#custom-font-root .paint', css)
+
+    def test_system_fonts_omits_custom_font_face(self) -> None:
+        html = '<style>@supports (display: grid) {@font-face {font-family: Custom; src:url("custom.woff2");} .label {font-family: Custom;}}</style>'
+        html += '<svg viewBox="0 0 10 10"><text class="label">Label</text></svg>'
+        css = embedded_css(self.mod.export_svg_document(html, Path("system-custom.html"), system_fonts=True))
+        self.assertNotIn("@font-face", css)
+        self.assertNotIn("custom.woff2", css)
+        self.assertNotIn("fonts.googleapis.com", css)
+        self.assertIn("#system-custom-root .label", css)
     def test_optional_defs_387_template_dots_keep_namespace(self) -> None:
         source = ASSETS / "template.html"
         exported = self.mod.export_svg_document(source.read_text(encoding="utf-8"), source)
@@ -625,6 +867,215 @@ class ExportSvgStandaloneTests(unittest.TestCase):
             html = f'<svg viewBox="0 0 10 10"><style>rect {{ {prop}\\2d opacity:0.5 }}</style><rect {prop}="rgba(255,0,0,0.5)"/></svg>'
             result = ET.fromstring(self.mod.export_svg_document(html, Path("escaped.html")))
             self.assertEqual(result.find("{http://www.w3.org/2000/svg}rect").get(prop), "rgba(255,0,0,0.5)")
+
+    def test_escaped_animation_properties_keep_keyframe_bindings(self) -> None:
+        properties = (r'anim\61 tion', r'animation\2d name', r'-webkit-anim\61 tion',
+                      r'\61 nimation-name', r'\000061nimation', r'ANIM\41 TION')
+        for prop in properties:
+            with self.subTest(prop=prop):
+                value = 'pulse' if 'name' in prop else 'pulse 1s'
+                html = '<style>@keyframes pulse {to {opacity:1}} .paint {' + prop + ':' + value + ';}</style>'
+                html += '<svg viewBox="0 0 40 40"><rect class="paint" style="' + prop + ':' + value + '"/></svg>'
+                result = self.mod.export_svg_document(html, Path('escaped-property.html'))
+                self.assertIn(prop + ':' + value.replace('pulse', 'escaped-property-root-pulse'), embedded_css(result))
+                shape = next(element for element in ET.fromstring(result).iter() if element.tag.endswith('}rect'))
+                self.assertEqual(shape.get('style'), prop + ':' + value.replace('pulse', 'escaped-property-root-pulse'))
+                self.assertIn('@keyframes escaped-property-root-pulse', embedded_css(result))
+
+    def test_escaped_nested_animation_properties_are_refused(self) -> None:
+        for prop in (r'anim\61 tion', r'animation\2d name', r'-webkit-anim\61 tion'):
+            for nested in ('& {' + prop + ':pulse;}', '& {fill:red;} ' + prop + ':pulse;',
+                           '@media print {' + prop + ':pulse;}'):
+                with self.subTest(prop=prop, nested=nested):
+                    html = '<style>@keyframes pulse {to {opacity:1}} .paint {' + nested + '}</style>'
+                    html += '<svg viewBox="0 0 40 40"><rect class="paint"/></svg>'
+                    with self.assertRaisesRegex(ValueError, 'unsupported nested CSS animation declaration'):
+                        self.mod.export_svg_document(html, Path('nested-escaped.html'))
+
+    def test_escaped_svg_local_animation_properties_are_refused(self) -> None:
+        for prop in (r'anim\61 tion', r'animation\2d name', r'-webkit-anim\61 tion'):
+            with self.subTest(prop=prop):
+                html = '<style>@keyframes pulse {to {opacity:1}}</style><svg viewBox="0 0 40 40">'
+                html += '<style>.paint {' + prop + ':pulse;}</style><rect class="paint"/></svg>'
+                with self.assertRaisesRegex(ValueError, 'unsupported SVG-local animation stylesheet'):
+                    self.mod.export_svg_document(html, Path('local-escaped.html'))
+
+    def test_animation_property_looking_literals_remain_literal(self) -> None:
+        declaration = r'content:";anim\61 tion:pulse;";--anim\61 tion:pulse;anim\;ation:pulse;anim\:ation:pulse;fill:red;'
+        html = '<style>@keyframes pulse {to {opacity:1}} .paint {' + declaration + '}</style>'
+        html += '<svg viewBox="0 0 40 40"><style>.paint {' + declaration + '}</style><rect class="paint"/></svg>'
+        result = self.mod.export_svg_document(html, Path('literal-property.html'))
+        self.assertIn(declaration, embedded_css(result))
+        self.assertIn(declaration, result)
+
+    def test_reserved_animation_values_stay_disabled_or_reset(self) -> None:
+        for value in ("none", "inherit", "initial", "unset", "revert", "revert-layer"):
+            with self.subTest(value=value):
+                html = '<style>@keyframes "' + value + '" {to {opacity:1}}'
+                html += '.paint {animation-name:' + value + '; animation:' + value + ';}'
+                html += '</style><svg viewBox="0 0 40 40"><rect class="paint" style="animation-name:' + value + '"/></svg>'
+                result = self.mod.export_svg_document(html, Path("reserved.html"))
+                css = embedded_css(result)
+                self.assertIn('animation-name:' + value + ';', css)
+                self.assertIn('animation:' + value + ';', css)
+                self.assertIn('style="animation-name:' + value + '"', result)
+                self.assertIn('@keyframes "reserved-root-' + value + '"', css)
+                self.assertEqual(self.mod._animation_declarations('animation-name:' + value.upper(), {value.upper():'prefixed'}), 'animation-name:' + value.upper())
+                for quote in ('"', "'"):
+                    body = 'animation-name:' + quote + value + quote + ';animation:' + quote + value + quote + ' 1s'
+                    expected = 'animation-name:' + quote + 'reserved-' + value + quote + ';animation:' + quote + 'reserved-' + value + quote + ' 1s'
+                    self.assertEqual(self.mod._animation_declarations(body, {value:'reserved-' + value}), expected)
+        self.assertEqual(self.mod._animation_declarations('animation-name:linear', {'linear':'prefixed-linear'}), 'animation-name:prefixed-linear')
+        self.assertEqual(self.mod._animation_declarations('animation:none 1s linear', {'none':'prefixed-none'}), 'animation:none 1s linear')
+
+    def test_nested_animation_bindings_fail_clearly_before_export(self) -> None:
+        for nested in ('& {animation:pulse 1s;}', '@media print {animation-name:pulse;}', '& { & { -webkit-animation:pulse 1s; } }'):
+            with self.subTest(nested=nested):
+                html = '<style>@keyframes pulse {to {opacity:1}} .paint {fill:red;' + nested + '}</style>'
+                html += '<svg viewBox="0 0 40 40"><rect class="paint"/></svg>'
+                with self.assertRaisesRegex(ValueError, 'unsupported nested CSS animation declaration'):
+                    self.mod.export_svg_document(html, Path("nested.html"))
+        html = '<style>@keyframes pulse {to {opacity:1}} .paint {animation:pulse 1s; & {fill:red;content:"animation:pulse; { }";transform:translate(1px, 2px); animation:hover {fill:blue;} }}</style>'
+        html += '<svg viewBox="0 0 40 40"><rect class="paint"/></svg>'
+        result = self.mod.export_svg_document(html, Path("nested.html"))
+        self.assertIn('animation:nested-root-pulse 1s', embedded_css(result))
+        self.assertIn('content:"animation:pulse; { }"', embedded_css(result))
+        self.assertIn('transform:translate(1px, 2px)', embedded_css(result))
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / 'nested.html'
+            output = Path(directory) / 'nested.svg'
+            source.write_text(html.replace('fill:red;content:', 'animation:pulse 1s;content:'), encoding='utf-8')
+            errors = io.StringIO()
+            with contextlib.redirect_stderr(errors):
+                self.assertEqual(self.mod.main([str(source), str(output)]), 2)
+            self.assertFalse(output.exists())
+            self.assertIn('unsupported nested CSS animation declaration', errors.getvalue())
+            self.assertNotIn('Traceback', errors.getvalue())
+
+    def test_animation_after_nested_block_is_refused(self) -> None:
+        html = '<style>@keyframes pulse {to{opacity:1}} .paint { & {fill:red;} animation:pulse 1s; }</style><svg viewBox="0 0 40 40"><rect class="paint"/></svg>'
+        with self.assertRaisesRegex(ValueError, 'unsupported nested CSS animation declaration'):
+            self.mod.export_svg_document(html, Path("trailing.html"))
+
+    def test_animation_between_nested_blocks_is_refused(self) -> None:
+        html = '<style>@keyframes pulse {to{opacity:1}} .paint { & {fill:red;} animation:pulse 1s; & {stroke:blue;} }</style><svg viewBox="0 0 40 40"><rect class="paint"/></svg>'
+        with self.assertRaisesRegex(ValueError, 'unsupported nested CSS animation declaration'):
+            self.mod.export_svg_document(html, Path("middle.html"))
+
+    def test_animation_before_nested_block_is_namespaced(self) -> None:
+        html = '<style>@keyframes pulse {to{opacity:1}} .paint {animation:pulse 1s; & {fill:red;}}</style><svg viewBox="0 0 40 40"><rect class="paint"/></svg>'
+        result = self.mod.export_svg_document(html, Path("prefix.html"))
+        self.assertIn('animation:prefix-root-pulse 1s', embedded_css(result))
+
+    def test_important_priority_is_not_a_keyframe_name(self) -> None:
+        html = '<style>@keyframes pulse {to{opacity:1}} @keyframes important {to{opacity:0}} .paint {animation:pulse 1s !important;}</style><svg viewBox="0 0 40 40"><rect class="paint"/></svg>'
+        result = self.mod.export_svg_document(html, Path("priority.html"))
+        self.assertIn('animation:priority-root-pulse 1s !important', embedded_css(result))
+        self.assertNotIn('!priority-root-important', result)
+
+    def test_comment_prefixed_svg_local_animation_is_refused(self) -> None:
+        html = '<style>@keyframes pulse {to{opacity:1}}</style><svg viewBox="0 0 40 40"><style>#paint {/*note*/animation:pulse 1s;}</style><rect id="paint"/></svg>'
+        with self.assertRaisesRegex(ValueError, 'unsupported SVG-local animation stylesheet'):
+            self.mod.export_svg_document(html, Path("local-comment.html"))
+
+    def test_custom_property_value_blocks_are_not_nested_animation_rules(self) -> None:
+        # A custom property's value is token data: semicolons inside its block
+        # do not end the declaration, so animation text there is not rewritten.
+        for value in ('{animation:pulse 1s;}', '{ .nested {animation-name:pulse;} }',
+                      '{fill:red;animation:pulse 1s;}', '{ .nested {fill:red;animation-name:pulse;} }'):
+            with self.subTest(value=value):
+                html = '<style>@keyframes pulse {to {opacity:1}} .paint {'
+                html += '--unused:' + value + ';fill:red;animation:pulse 1s;}</style>'
+                html += '<svg viewBox="0 0 40 40"><rect class="paint"/></svg>'
+                result = self.mod.export_svg_document(html, Path("custom-block.html"))
+                css = embedded_css(result)
+                self.assertIn('--unused:' + value, css)
+                self.assertIn('animation:custom-block-root-pulse 1s', css)
+                ET.fromstring(result)
+        html = '<style>@keyframes pulse {to {opacity:1}} .paint {'
+        html += '--unused:{animation:pulse 1s;}; & {animation:pulse 1s;}}</style>'
+        html += '<svg viewBox="0 0 40 40"><rect class="paint"/></svg>'
+        with self.assertRaisesRegex(ValueError, 'unsupported nested CSS animation declaration'):
+            self.mod.export_svg_document(html, Path("custom-block.html"))
+        html = '<style>@keyframes pulse {to {opacity:1}}</style><svg viewBox="0 0 40 40">'
+        html += '<rect style="--unused:{fill:red;animation:pulse 1s;}; animation:pulse 1s"/></svg>'
+        result = self.mod.export_svg_document(html, Path("custom-inline.html"))
+        shape = ET.fromstring(result).find("{http://www.w3.org/2000/svg}rect")
+        self.assertEqual(shape.get("style"), '--unused:{fill:red;animation:pulse 1s;}; animation:custom-inline-root-pulse 1s')
+
+    def test_unbalanced_brackets_do_not_hide_animation_declarations(self) -> None:
+        # A stray closer, or a brace inside url(), must not stop declaration
+        # splitting and leave a later animation bound to the old name.
+        for style in ('--x:}; animation:pulse 1s', '--x:); animation:pulse 1s', 'fill:red}; animation:pulse 1s'):
+            with self.subTest(style=style):
+                html = '<style>@keyframes pulse {to {opacity:1}}</style><svg viewBox="0 0 40 40">'
+                html += f'<rect style="{style}"/></svg>'
+                result = self.mod.export_svg_document(html, Path("unbalanced.html"))
+                shape = ET.fromstring(result).find("{http://www.w3.org/2000/svg}rect")
+                self.assertIn('animation:unbalanced-root-pulse 1s', shape.get("style"))
+        html = '<style>@keyframes pulse {to {opacity:1}} .a {background:url(a{b.png); animation:pulse 1s}</style>'
+        html += '<svg viewBox="0 0 40 40"><rect class="a"/></svg>'
+        self.assertIn('animation:unbalanced-root-pulse 1s', embedded_css(self.mod.export_svg_document(html, Path("unbalanced.html"))))
+        html = '<style>@keyframes pulse {to {opacity:1}} .a {& {fill:blue} --z:url(a{b); animation:pulse 1s; & {fill:red}}</style>'
+        html += '<svg viewBox="0 0 40 40"><rect class="a"/></svg>'
+        with self.assertRaisesRegex(ValueError, 'unsupported nested CSS animation declaration'):
+            self.mod.export_svg_document(html, Path("unbalanced.html"))
+
+    def test_nested_layer_statement_does_not_hide_animation_declaration(self) -> None:
+        for declaration in ('animation:pulse 1s;', '-webkit-animation-name:pulse;'):
+            with self.subTest(declaration=declaration), tempfile.TemporaryDirectory() as directory:
+                source = Path(directory) / 'layer-gap.html'
+                output = Path(directory) / 'layer-gap.svg'
+                source.write_text(
+                    '<style>@keyframes pulse {to{opacity:1}} .paint {&{@layer first,second;'
+                    + declaration + '}}</style><svg viewBox="0 0 10 10"><rect class="paint"/></svg>',
+                    encoding='utf-8',
+                )
+                errors = io.StringIO()
+                with contextlib.redirect_stderr(errors):
+                    self.assertEqual(self.mod.main([str(source), str(output)]), 2)
+                self.assertFalse(output.exists())
+                self.assertIn('unsupported nested CSS animation declaration', errors.getvalue())
+                self.assertNotIn('Traceback', errors.getvalue())
+
+    def test_keyframes_and_bindings_are_scoped_together(self) -> None:
+        html = '<style>@keyframes pulse {from {fill:#ff0000} to {fill:#ff0000}}'
+        html += '@-webkit-keyframes other {to {opacity:1}}'
+        html += '.paint {animation:pulse var(--duration) linear, other 2s; animation-name:"pulse", other; content:"pulse; other";}'
+        html += '@media print {.paint {animation:none !important}}</style>'
+        html += '<svg viewBox="0 0 40 40"><rect class="paint" style="animation-name:pulse"/></svg>'
+        result = self.mod.export_svg_document(html, Path("frames.html"))
+        css = embedded_css(result)
+        self.assertIn('@keyframes frames-root-pulse { from {fill:#ff0000} to {fill:#ff0000} }', css)
+        self.assertIn('@-webkit-keyframes frames-root-other', css)
+        self.assertIn('animation:frames-root-pulse var(--duration) linear, frames-root-other 2s', css)
+        self.assertIn('animation-name:"frames-root-pulse", frames-root-other', css)
+        self.assertIn('content:"pulse; other"', css)
+        self.assertIn('style="animation-name:frames-root-pulse"', result)
+        self.assertIn('animation:none !important', css)
+        self.assertEqual(self.mod._animation_declarations('animation:pulse 1s steps(2, end)', {'pulse':'frames-pulse','steps':'frames-steps'}), 'animation:frames-pulse 1s steps(2, end)')
+        other = self.mod.export_svg_document(html, Path("second.html"))
+        self.assertNotIn('frames-root-pulse', other)
+        for value in ('var(--name)', 'pulse 1s, var(--other)'):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, 'unresolved CSS animation name'):
+                self.mod._animation_declarations(f'animation:{value}', {'pulse':'frames-root-pulse'})
+        with self.assertRaisesRegex(ValueError, 'ambiguous CSS animation name'):
+            self.mod._animation_declarations('animation:linear 1s', {'linear':'frames-root-linear'})
+        with self.assertRaisesRegex(ValueError, 'unsupported SVG-local animation stylesheet'):
+            self.mod.export_svg_document(html.replace('<rect', '<style>.paint {animation:pulse 1s}</style><rect'), Path("local.html"))
+
+    def test_inline_animation_literals_decode_once_and_keep_comments(self) -> None:
+        for attribute in ('style="animation:&quot;linear&quot; 1s both"', "style='animation:\"linear\" 1s both'"):
+            html = '<style>@keyframes "linear" {to {fill:#ff0000}}</style>'
+            html += f'<svg viewBox="0 0 40 40"><rect {attribute}/></svg>'
+            result = self.mod.export_svg_document(html, Path("literal.html"))
+            shape = ET.fromstring(result).find("{http://www.w3.org/2000/svg}rect")
+            self.assertEqual(shape.get("style"), 'animation:"literal-root-linear" 1s both')
+        html = '<style>@keyframes pulse {to {fill:#ff0000}}</style><svg viewBox="0 0 40 40">'
+        html += '<rect style="/*note: retained;*/ animation-name:pulse; content:&quot;&amp;copy;&quot;"/></svg>'
+        result = self.mod.export_svg_document(html, Path("comment.html"))
+        shape = ET.fromstring(result).find("{http://www.w3.org/2000/svg}rect")
+        self.assertEqual(shape.get("style"), '/*note: retained;*/ animation-name:comment-root-pulse; content:"&copy;"')
     def test_quoted_urls_preserve_delimiters_and_exact_fragment_case(self) -> None:
         markup = '<svg><defs><linearGradient id="paint)"/></defs><style>.paint { fill:url("#paint)"); }</style></svg>'
         result = self.mod.namespace_defs_ids(markup, "quoted")
@@ -1007,6 +1458,29 @@ class ExportSvgStandaloneTests(unittest.TestCase):
         self.assertIn('<!-- fill="rgba(255,0,0,0.5)" -->', result)
         self.assertIn('<![CDATA[stroke="rgba(255,0,0,0.5)"]]>', result)
         self.assertIn('data-fill="rgba(255,0,0,0.5)"', result)
+
+    def test_conditional_diagram_css_retains_media_wrappers(self) -> None:
+        html = '<style>.paint {fill: #ff0000;} @media print { .paint {fill: #0000ff;} '
+        html += 'body {padding: 40px;} @media (min-width: 10px) {.edge {stroke: #00ff00;}} }</style>'
+        html += '<svg viewBox="0 0 40 40"><rect class="paint" width="40" height="40"/></svg>'
+        result = self.mod.export_svg_document(html, Path("media.html"))
+        css = embedded_css(result)
+        self.assertIn('@media print {', css)
+        self.assertIn('@media (min-width: 10px) {', css)
+        self.assertIn('#media-root .paint { fill: #0000ff; }', css)
+        self.assertNotIn('padding', css)
+        blocks = list(self.mod._css_blocks(css[css.index("');") + 3:]))
+        self.assertEqual(blocks[0][0], '#media-root .paint')
+        self.assertEqual(blocks[1][0], '@media print')
+        self.assertIn('#media-root .paint', blocks[1][1])
+        # Braces inside a string are not a nested block.
+        css = self.mod.diagram_css_from_html('<style>.label {content: "{x}";}</style>', 'root')
+        self.assertIn('content: "{x}"', css)
+        warnings = io.StringIO()
+        with contextlib.redirect_stderr(warnings):
+            css = self.mod.diagram_css_from_html('<style>@unknown {.paint {fill: red;}}</style>', 'root')
+        self.assertEqual(css, "@unknown {\n#root .paint { fill: red; }\n}")
+        self.assertEqual(warnings.getvalue(), "")
     def test_compound_original_root_does_not_gain_an_ancestor(self) -> None:
         for selector in ('.diagram#original .paint',
                          'svg.diagram#original .paint',
@@ -1280,6 +1754,115 @@ class ExportSvgStandaloneTests(unittest.TestCase):
                 self.assertTrue(source.is_file(), f"{name} is listed but not shipped")
                 with self.assertRaises(ValueError):
                     self.mod.export_svg_document(source.read_text(encoding="utf-8"), source)
+
+    def test_deep_css_nesting_cli_fails_cleanly_without_output(self) -> None:
+        css = "@media screen {" * 3000 + ".paint{fill:red}" + "}" * 3000
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / "deep.html"
+            output = Path(folder) / "deep.svg"
+            source.write_text('<style>' + css + '</style><svg viewBox="0 0 10 10"><rect class="paint" width="5" height="5"/></svg>', encoding="utf-8")
+            errors = io.StringIO()
+            with contextlib.redirect_stderr(errors), contextlib.redirect_stdout(io.StringIO()):
+                result = self.mod.main([str(source), str(output), "--system-fonts"])
+            self.assertEqual(result, 2)
+            self.assertIn("diagram CSS nesting", errors.getvalue())
+            self.assertNotIn("Traceback", errors.getvalue())
+            self.assertFalse(output.exists())
+
+    def test_url_braces_are_value_text_in_css_rule_tree(self) -> None:
+        for url in ("image{.png", "image}.png"):
+            with self.subTest(url=url):
+                css = f'@supports (background: url({url})) {{ .paint {{fill:red;}} }}'
+                html = '<style>' + css + '</style><svg viewBox="0 0 10 10"><rect class="paint" width="5" height="5"/></svg>'
+                rendered = self.mod.export_svg_document(html, Path("url-braces.html"), system_fonts=True)
+                self.assertIn(css.split(" {")[0], rendered)
+                self.assertIn('#url-braces-root .paint', rendered)
+                self.assertIn('fill:red;', rendered)
+                ET.fromstring(rendered)
+
+    def test_unknown_css_group_nesting_scans_source_once(self) -> None:
+        for depth in (200, 400):
+            with self.subTest(depth=depth):
+                css = "@foo {" * depth + '.paint{fill:red;content:"{;}"}' + "}" * depth
+                html = '<style>' + css + '</style><svg viewBox="0 0 10 10"><rect class="paint" width="5" height="5"/></svg>'
+                with patch.object(self.mod, "_css_rule_tree", wraps=self.mod._css_rule_tree) as scans, patch.object(self.mod, "_CssRule", wraps=self.mod._CssRule) as nodes:
+                    rendered = self.mod.export_svg_document(html, Path("linear.html"), system_fonts=True)
+                self.assertEqual(scans.call_count, 1)
+                self.assertEqual(sum(len(call.args[0]) for call in scans.call_args_list), len(css))
+                self.assertEqual(nodes.call_count, depth + 1)
+                self.assertEqual(rendered.count("@foo"), depth)
+                self.assertIn('#linear-root .paint', rendered)
+                self.assertIn('content:"{;}"', rendered)
+                ET.fromstring(rendered)
+
+    def test_export_collects_keyframes_once_from_shared_css_tree(self) -> None:
+        css = '@media screen{@foo{@font-face{font-family:Demo;src:url("font.woff2")}@keyframes spin{from{opacity:0}to{opacity:1}}.paint{fill:red;animation:spin 1s}}}@unknown{font-family:Demo}'
+        html = '<style>' + css + '</style><svg viewBox="0 0 10 10"><rect class="paint" width="5" height="5"/></svg>'
+        errors = io.StringIO()
+        with patch.object(self.mod, "_keyframe_names", wraps=self.mod._keyframe_names) as names, contextlib.redirect_stderr(errors):
+            rendered = self.mod.export_svg_document(html, Path("shared.html"))
+        self.assertEqual(names.call_count, 1)
+        self.assertIn('@font-face', rendered)
+        self.assertIn('@keyframes shared-root-spin', rendered)
+        self.assertIn('animation:shared-root-spin 1s', rendered)
+        self.assertNotIn('@unknown', rendered)
+        self.assertIn('dropping unsupported CSS block', errors.getvalue())
+        ET.fromstring(rendered)
+
+    def test_definition_only_css_groups_keep_fonts_and_keyframes(self) -> None:
+        keyframes = '@keyframes pulse{from{opacity:0}to{opacity:1}}'
+        font = '@font-face{font-family:Demo;src:url("demo.woff2")}'
+        for wrapper in ('@scope (svg)', '@future'):
+            for definition in (keyframes, font, '@nested {' + keyframes + font + '}'):
+                with self.subTest(wrapper=wrapper, definition=definition):
+                    css = wrapper + '{' + definition + '}.paint{fill:red;animation:pulse 1s;font-family:Demo}'
+                    html = '<style>' + css + '</style><svg viewBox="0 0 10 10"><rect class="paint" width="5" height="5"/></svg>'
+                    errors = io.StringIO()
+                    with contextlib.redirect_stderr(errors):
+                        rendered = self.mod.export_svg_document(html, Path("definitions.html"))
+                    self.assertIn(wrapper, rendered)
+                    self.assertEqual(errors.getvalue(), "")
+                    if keyframes in definition:
+                        self.assertIn('@keyframes definitions-root-pulse', rendered)
+                        self.assertIn('animation:definitions-root-pulse 1s', rendered)
+                    if font in definition:
+                        self.assertIn('@font-face', rendered)
+                        system_fonts = self.mod.export_svg_document(html, Path("definitions.html"), system_fonts=True)
+                        self.assertNotIn('@font-face', system_fonts)
+                    ET.fromstring(rendered)
+        html = '<style>@future{font-family:Demo}.paint{fill:red}</style><svg viewBox="0 0 10 10"><rect class="paint" width="5" height="5"/></svg>'
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors):
+            rendered = self.mod.export_svg_document(html, Path("declarations.html"))
+        self.assertNotIn('@future', rendered)
+        self.assertIn('dropping unsupported CSS block', errors.getvalue())
+
+    def test_scoped_paint_fails_cleanly_before_output(self) -> None:
+        for css in ('@scope (#original) {.paint{fill:red}}', '@scope (#original) {@scope (.zone) {.paint{fill:red}}}', '@scope (#\\6f riginal) to ([data-label="brace}"]) {.paint{content:"brace}";fill:red}}'):
+            with self.subTest(css=css), tempfile.TemporaryDirectory() as folder:
+                source = Path(folder) / "scope.html"
+                output = Path(folder) / "scope.svg"
+                source.write_text('<style>' + css + '</style><svg id="original" viewBox="0 0 10 10"><rect class="paint" width="5" height="5"/></svg>', encoding="utf-8")
+                errors = io.StringIO()
+                with contextlib.redirect_stderr(errors), contextlib.redirect_stdout(io.StringIO()):
+                    status = self.mod.main([str(source), str(output), "--system-fonts"])
+                self.assertEqual(status, 2)
+                self.assertIn("unsupported CSS scope with paint rules", errors.getvalue())
+                self.assertNotIn("Traceback", errors.getvalue())
+                self.assertFalse(output.exists())
+
+    def test_layer_order_statements_survive_with_important_blocks(self) -> None:
+        css = '@layer second, first; @layer first { .paint {fill:red!important} } @layer second { .paint {fill:blue!important} }'
+        html = '<style>' + css + '</style><svg viewBox="0 0 10 10"><rect class="paint" width="5" height="5"/></svg>'
+        exported = self.mod.export_svg_document(html, Path("layers.html"), system_fonts=True)
+        self.assertIn('@layer second, first;', exported)
+        self.assertLess(exported.index('@layer second, first;'), exported.index('@layer first {'))
+        self.assertLess(exported.index('@layer first {'), exported.index('@layer second {'))
+        self.assertIn('fill:red!important', exported)
+        self.assertIn('fill:blue!important', exported)
+        nested = self.mod.diagram_css_from_html('<style>@media screen {@layer second, first; @layer first {.paint{fill:red}}}</style>', 'layers-root')
+        self.assertIn('@media screen {\n@layer second, first;', nested)
+        ET.fromstring(exported)
 
 
 if __name__ == "__main__":

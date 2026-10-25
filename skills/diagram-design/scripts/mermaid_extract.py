@@ -116,7 +116,7 @@ class Diagram:
     fragments: list[dict[str, Any]] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     discarded: dict[str, int] = field(
-        default_factory=lambda: {"style_directives": 0, "click_handlers": 0}
+        default_factory=lambda: {"style_directives": 0, "click_handlers": 0, "config_directives": 0}
     )
     _nodes_by_id: dict[str, Node] = field(default_factory=dict, init=False, repr=False)
     _state_descriptions: dict[str, list[str]] = field(default_factory=dict, init=False, repr=False)
@@ -317,11 +317,13 @@ def _frontmatter_end(lines: list[str]) -> int:
     return -1
 
 
-def _prepared_lines(block: SourceBlock) -> list[tuple[int, str]]:
+def _prepared_lines(block: SourceBlock) -> tuple[list[tuple[int, str]], int]:
+    """Blank out comments and config, returning the lines and the number of config directives."""
     prepared: list[tuple[int, str]] = []
     in_directive = False
     lines = block.text.splitlines()
     frontmatter_end = _frontmatter_end(lines)
+    config_directives = 1 if frontmatter_end >= 0 else 0
     for offset, raw in enumerate(lines):
         line_number = block.source_line + offset
         stripped = raw.strip()
@@ -336,6 +338,7 @@ def _prepared_lines(block: SourceBlock) -> list[tuple[int, str]]:
             prepared.append((line_number, ""))
             continue
         if stripped.startswith("%%{"):
+            config_directives += 1
             if "}%%" not in stripped:
                 in_directive = True
             prepared.append((line_number, ""))
@@ -344,7 +347,7 @@ def _prepared_lines(block: SourceBlock) -> list[tuple[int, str]]:
             prepared.append((line_number, ""))
             continue
         prepared.append((line_number, raw.rstrip()))
-    return prepared
+    return prepared, config_directives
 
 
 def _kind_and_direction(
@@ -645,6 +648,9 @@ class _Operator:
 
 
 def _operator_style(token: str) -> tuple[str, str, bool, bool]:
+    if token.startswith("~"):
+        # `A ~~~ B` is an invisible link: it only places B near A.
+        return "invisible", "none", False, True
     style = "dashed" if "." in token else "thick" if "=" in token else "solid"
     arrowhead = "cross" if token.endswith("x") else "circle" if token.endswith("o") else "arrow"
     undirected = ">" not in token and not token.endswith(("x", "o"))
@@ -692,7 +698,7 @@ def _edge_operators(text: str) -> list[_Operator]:
         r"(?P<closing>\.-+[>xo]|\.-+)"
     )
     trailing_operator = re.compile(
-        r"(?:\.-+[>xo]|\.-+|-{2,}>|--[xo]|=+>|={2,}|-{3,})"
+        r"(?:\.-+[>xo]|\.-+|-{2,}>|--[xo]|=+>|={2,}|-{3,}|~{3,})"
         r"(?:\|[^|\n]*\|)?\s*$"
     )
     for edge_pattern in (text_edge, dotted_edge):
@@ -729,7 +735,7 @@ def _edge_operators(text: str) -> list[_Operator]:
             occupied.append((operator_start, match.end()))
 
     pattern = re.compile(
-        r"[xo][-=.]+[xo]|<[-=.]+>|-+\.-+>|=+>|-+(?:>|x|o)|-+\.-+|={3,}|-{3,}"
+        r"[xo][-=.]+[xo]|<[-=.]+>|-+\.-+>|=+>|-+(?:>|x|o)|-+\.-+|={3,}|-{3,}|~{3,}"
     )
     for match in pattern.finditer(mask):
         if any(start <= match.start() < end for start, end in occupied):
@@ -737,10 +743,15 @@ def _edge_operators(text: str) -> list[_Operator]:
         token = match.group()
         end = match.end()
         label = ""
-        if end < len(text) and text[end] == "|":
-            close = text.find("|", end + 1)
+        # Mermaid allows whitespace between the link and its pipe label:
+        # `A --> |yes| B` reads the same as `A -->|yes| B`.
+        opening_pipe = end
+        while opening_pipe < len(text) and text[opening_pipe] in " \t":
+            opening_pipe += 1
+        if opening_pipe < len(text) and text[opening_pipe] == "|":
+            close = text.find("|", opening_pipe + 1)
             if close != -1:
-                label = clean_label(text[end + 1 : close])
+                label = clean_label(text[opening_pipe + 1 : close])
                 end = close + 1
         style, arrowhead, bidirectional, undirected = _operator_style(token)
         operators.append(
@@ -784,6 +795,7 @@ def _parse_flowchart(
     diagram: Diagram, lines: list[tuple[int, str]], header_position: int
 ) -> None:
     containers: list[str] = []
+    invisible_links = 0
     for line_number, raw in _logical_statements(lines[header_position + 1 :]):
         text = raw.strip()
         if not text:
@@ -830,6 +842,11 @@ def _parse_flowchart(
                 _fail(f"malformed edge at line {line_number}")
             valid_groups = [group for group in groups if group is not None]
             for index, operator in enumerate(operators):
+                if operator.style == "invisible":
+                    # The endpoints were declared above; the link itself is a
+                    # layout hint with no meaning of its own.
+                    invisible_links += 1
+                    continue
                 for source in valid_groups[index]:
                     for target in valid_groups[index + 1]:
                         diagram.add_edge(
@@ -848,6 +865,8 @@ def _parse_flowchart(
         if parsed is not None:
             node_id, label, shape = parsed
             diagram.add_node(node_id, label, shape, parent)
+    if invisible_links:
+        diagram.notes.append(f"{invisible_links} invisible layout links ignored")
 
 
 def _parse_sequence(
@@ -1008,7 +1027,10 @@ def _parse_state(
         if note:
             # A colon marks a single-line note; otherwise ignore its opaque body
             # through `end note` before interpreting states, edges or braces.
-            note_start = line_number if note.group(1) is None else None
+            if note.group(1) is None:
+                note_start = line_number
+            else:
+                diagram.notes.append(clean_label(note.group(1)))
             continue
         if _discard_nonsemantic(diagram, text):
             continue
@@ -1142,9 +1164,19 @@ def _parse_er(
 
 
 def parse_block(block: SourceBlock) -> Diagram:
-    lines = _prepared_lines(block)
+    lines, config_directives = _prepared_lines(block)
     kind, direction, header_position = _kind_and_direction(lines)
+    if kind == "flowchart":
+        # `graph TD; A-->B;` is valid: statements may follow the header's
+        # semicolon on the same line, so keep them as the first statement.
+        line_number, header = lines[header_position]
+        rest = re.match(r"^\s*(?:flowchart|graph)\s+(?:TD|TB|LR|RL|BT)\b", header, re.I)
+        tail = header[rest.end() :].lstrip() if rest else ""
+        if tail.startswith(";"):
+            lines[header_position] = (line_number, header[: rest.end()])
+            lines.insert(header_position + 1, (line_number, tail[1:]))
     diagram = Diagram(block.index, kind, block.source_line, direction=direction)
+    diagram.discarded["config_directives"] = config_directives
     if kind == "flowchart":
         _parse_flowchart(diagram, lines, header_position)
     elif kind == "sequenceDiagram":
@@ -1294,6 +1326,16 @@ def _block_summary(block: SourceBlock, selected: list[Diagram]) -> str:
     return f"[{diagram.index}] {diagram.kind} ({len(diagram.nodes)}n/{len(diagram.edges)}e)"
 
 
+# The keyword that opens each extra region of a fragment: `else` in alt, `and` in par, `option` in critical.
+REGION_KEYWORDS = {"alt": "else", "par": "and", "critical": "option"}
+
+
+def _fragment_digest(item: dict[str, Any]) -> str:
+    keyword = REGION_KEYWORDS.get(item["kind"], "else")
+    parts = [item["label"] or "unlabeled"] + [f"{keyword}: {region or 'unlabeled'}" for region in item["regions"]]
+    return " | ".join(_escape_table(part) for part in parts)
+
+
 def digest(
     path: Path,
     blocks: list[SourceBlock],
@@ -1323,15 +1365,15 @@ def digest(
                 f"edges {'OVER' if info['over_edge_budget'] else 'ok'} (max 12)",
             ]
         )
-        if diagram.discarded["style_directives"] or diagram.discarded["click_handlers"]:
+        if any(diagram.discarded.values()):
             output.append(
                 f"- discarded: {diagram.discarded['style_directives']} style directives, "
-                f"{diagram.discarded['click_handlers']} click handlers"
+                f"{diagram.discarded['click_handlers']} click handlers, "
+                f"{diagram.discarded['config_directives']} config directives"
             )
         if diagram.fragments:
             fragments = ", ".join(
-                f"{item['kind']}({_escape_markdown(item['label'] or 'unlabeled')})"
-                for item in diagram.fragments
+                f"{item['kind']}({_fragment_digest(item)})" for item in diagram.fragments
             )
             output.append(f"- fragments: {fragments}")
         if diagram.notes:
